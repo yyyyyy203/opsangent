@@ -1,0 +1,322 @@
+import type {
+  AgentContext,
+  AgentEvent,
+  AgentMessage,
+  ChatModel,
+  CheckpointStore,
+  Clock,
+  EventSink,
+  IdGenerator,
+  ModelResponse,
+  Observability,
+  ToolCall,
+  RawToolCall,
+  ToolExecutionResult,
+} from '../contracts/index.js';
+import type { ContextCompressor } from '../context-compressor/types.js';
+import { AsyncEventQueue } from '../event/async-event-queue.js';
+import type { EventBus } from '../event/event-bus.js';
+import type { EventFactory } from '../event/event-factory.js';
+import type { ToolBatchExecutor } from '../tool/batch-executor.js';
+import type { Toolkit } from '../tool/toolkit.js';
+import type { ToolAdmission } from '../tool/admission.js';
+import { admitToolBatch } from './admit-tool-batch.js';
+import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
+
+export interface AgentHarnessDependencies {
+  model: ChatModel;
+  toolkit: Toolkit;
+  batchExecutor: ToolBatchExecutor;
+  checkpoints: CheckpointStore;
+  compressor: ContextCompressor;
+  events: EventBus;
+  eventFactory: EventFactory;
+  observability: Observability;
+  clock: Clock;
+  ids: IdGenerator;
+  admission: ToolAdmission;
+}
+
+export class AgentHarness implements DiagnosisAgent {
+  public constructor(private readonly dependencies: AgentHarnessDependencies) {}
+
+  public async reply(options: ReplyOptions): Promise<DiagnosisRunResult> {
+    const stream = this.replyStream(options);
+    while (true) {
+      const item = await stream.next();
+      if (item.done) return item.value;
+    }
+  }
+
+  public async *replyStream(options: ReplyOptions): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    const context = this.createContext(options);
+    return yield* this.streamContext(context, options.signal ?? new AbortController().signal);
+  }
+
+  public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    const context = await this.dependencies.checkpoints.load(runId);
+    if (context === null) throw new Error(`Checkpoint not found: ${runId}`);
+    return yield* this.streamContext(context, signal);
+  }
+
+  private async *streamContext(context: AgentContext, signal: AbortSignal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    const queue = new AsyncEventQueue();
+    const unsubscribe = this.dependencies.events.subscribe((event) => {
+      if (event.runId === context.runId) queue.push(event);
+    });
+    let finalResult: DiagnosisRunResult | undefined;
+    let failure: unknown;
+    const producer = this.run(context, signal)
+      .then((result) => { finalResult = result; })
+      .catch((error: unknown) => { failure = error; })
+      .finally(() => queue.close());
+
+    try {
+      for await (const event of queue) yield event;
+      await producer;
+      if (failure !== undefined) {
+        throw failure instanceof Error
+          ? failure
+          : new Error(typeof failure === 'string' ? failure : 'Agent producer failed with a non-Error value.');
+      }
+      if (finalResult === undefined) throw new Error('Agent run ended without a result.');
+      return finalResult;
+    } finally {
+      unsubscribe();
+    }
+  }
+
+  private async run(context: AgentContext, signal: AbortSignal): Promise<DiagnosisRunResult> {
+    const rootSpan = this.dependencies.observability.startSpan({
+      name: 'inspection.run', kind: 'chain', runId: context.runId,
+      attributes: { profileId: context.profileId },
+    });
+    await this.publish('RUN_STARTED', context, { profileId: context.profileId });
+    let finalText = '';
+
+    try {
+      const pausedForExternalExecution = await this.resumePendingToolCall(context, signal);
+      if (pausedForExternalExecution) {
+        const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+        rootSpan.end(result);
+        return result;
+      }
+      while (context.budget.iteration < context.budget.maxIterations) {
+        if (signal.aborted) throw new Error('Agent run aborted.');
+        if (this.dependencies.clock.now().getTime() - Date.parse(context.budget.startedAt) >= context.budget.maxDurationMs) {
+          throw new Error('Agent run duration budget exhausted.');
+        }
+
+        const compressed = await this.dependencies.compressor.compress(context);
+        context = compressed.context;
+        if (compressed.decision.level !== 'none') {
+          await this.publish('CONTEXT_COMPRESSED', context, { ...compressed.decision });
+        }
+
+        context.budget.iteration += 1;
+        const stepId = this.dependencies.ids.next('step');
+        await this.publish('STEP_STARTED', context, { iteration: context.budget.iteration }, stepId);
+        await this.publish('REASONING_STARTED', context, { stage: context.stage }, stepId);
+
+        const response = await this.reason(context, stepId, signal);
+        const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
+        if (response.text !== undefined) finalText += response.text;
+        if (candidates.length === 0) {
+          context.status = 'completed';
+          await this.dependencies.checkpoints.save(context);
+          await this.publish('RUN_FINISHED', context, { finalText });
+          const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+          rootSpan.end(result);
+          return result;
+        }
+
+        for (const call of candidates) {
+          await this.publish('TOOL_CALL_CREATED', context, { id: call.id, name: call.name }, stepId);
+        }
+        const admission = admitToolBatch(candidates, context, this.dependencies.admission, this.dependencies.clock, signal);
+        for (const repair of admission.repairs) await this.publish('TOOL_PROGRESS', context, repair, stepId);
+        for (const result of admission.rejected) await this.publish('TOOL_RESULT', context, result, stepId);
+        const batch = await this.dependencies.batchExecutor.execute(admission.calls, context, stepId, signal);
+        const results = [...admission.rejected, ...batch.results];
+        for (const deferred of batch.deferredActions) {
+          results.push(this.deferredResult(deferred));
+        }
+        const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
+        this.appendToolExchange(context, candidates, orderedResults);
+
+        if (batch.interrupt !== undefined) {
+          context.status = batch.interrupt.interruptType === 'external_tool_execution'
+            ? 'paused'
+            : 'awaiting_confirmation';
+          context.pendingInterrupt = batch.interrupt;
+          context.pendingToolCalls = admission.calls.filter((call) => call.id === batch.interrupt?.toolCallId);
+          await this.dependencies.checkpoints.save(context);
+          if (context.status === 'awaiting_confirmation') {
+            await this.publish('REQUIRE_CONFIRM', context, batch.interrupt, stepId);
+          }
+          await this.publish('RUN_PAUSED', context, { reason: batch.interrupt.interruptType }, stepId);
+          const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+          rootSpan.end(result);
+          return result;
+        }
+
+        context.pendingToolCalls = [];
+        context.stage = this.nextStage(admission.calls);
+        await this.dependencies.checkpoints.save(context);
+      }
+      throw new Error('Agent iteration budget exhausted.');
+    } catch (error) {
+      context.status = signal.aborted ? 'cancelled' : 'failed';
+      await this.dependencies.checkpoints.save(context);
+      const message = error instanceof Error ? error.message : String(error);
+      await this.publish('RUN_FAILED', context, { message });
+      rootSpan.fail(error);
+      return { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+    } finally {
+      await this.dependencies.observability.flush();
+    }
+  }
+
+  private async resumePendingToolCall(context: AgentContext, signal: AbortSignal): Promise<boolean> {
+    if (context.pendingToolCalls.length === 0) return false;
+    if (context.pendingInterrupt?.interruptType === 'external_tool_execution') return true;
+    const pending = context.pendingToolCalls[0];
+    if (pending === undefined || !context.confirmedToolCallIds.includes(pending.id)) return false;
+
+    const stepId = this.dependencies.ids.next('step');
+    const batch = await this.dependencies.batchExecutor.execute([pending], context, stepId, signal);
+    if (batch.interrupt !== undefined) {
+      if (batch.interrupt.interruptType !== 'external_tool_execution') {
+        throw new Error(`Confirmed tool call was interrupted again: ${pending.id}`);
+      }
+      this.replaceToolResult(context, batch.results[0] ?? this.deferredResult(pending));
+      context.pendingInterrupt = batch.interrupt;
+      context.status = 'paused';
+      context.contextVersion += 1;
+      await this.dependencies.checkpoints.save(context);
+      await this.publish('RUN_PAUSED', context, { reason: 'external_tool_execution' }, stepId);
+      return true;
+    }
+    const result = batch.results[0];
+    if (result === undefined) throw new Error(`Confirmed tool call produced no result: ${pending.id}`);
+    this.replaceToolResult(context, result);
+    context.pendingToolCalls = [];
+    delete context.pendingInterrupt;
+    context.status = 'running';
+    context.stage = 'verification';
+    context.contextVersion += 1;
+    await this.dependencies.checkpoints.save(context);
+    return false;
+  }
+
+  private replaceToolResult(context: AgentContext, replacement: ToolExecutionResult): void {
+    for (const message of context.messages) {
+      message.blocks = message.blocks.map((block) => (
+        block.type === 'tool_result' && block.result.toolCallId === replacement.toolCallId
+          ? { type: 'tool_result' as const, result: replacement }
+          : block
+      ));
+    }
+  }
+
+  private async reason(context: AgentContext, stepId: string, signal: AbortSignal): Promise<ModelResponse> {
+    const span = this.dependencies.observability.startSpan({
+      name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
+      attributes: { stage: context.stage, iteration: context.budget.iteration },
+    });
+    const stream = this.dependencies.model.stream(context.messages, this.dependencies.toolkit.list(), {
+      signal, runId: context.runId, stepId,
+    });
+    try {
+      while (true) {
+        const item = await stream.next();
+        if (item.done) {
+          span.end({ toolCallCount: item.value.toolCalls.length + (item.value.rawToolCalls?.length ?? 0), usage: item.value.usage });
+          return item.value;
+        }
+        if (item.value.type === 'text_delta') {
+          await this.publish('TEXT_DELTA', context, { delta: item.value.delta }, stepId);
+        }
+      }
+    } catch (error) {
+      span.fail(error);
+      throw error;
+    }
+  }
+
+  private createContext(options: ReplyOptions): AgentContext {
+    const now = this.dependencies.clock.now().toISOString();
+    const runId = options.runId ?? this.dependencies.ids.next('run');
+    const userMessage: AgentMessage = {
+      id: this.dependencies.ids.next('msg'), role: 'user', createdAt: now,
+      blocks: [{ type: 'text', text: options.message }],
+    };
+    return {
+      runId,
+      status: 'running',
+      stage: 'triage',
+      profileId: options.profileId,
+      messages: [userMessage],
+      pendingToolCalls: [],
+      confirmedToolCallIds: [],
+      rejectedToolCallIds: [],
+      executedActions: [],
+      evidenceIds: [],
+      missingEvidence: [],
+      budget: {
+        startedAt: now,
+        maxIterations: options.maxIterations ?? 15,
+        iteration: 0,
+        maxToolCalls: options.maxToolCalls ?? 20,
+        toolCallsUsed: 0,
+        maxDurationMs: options.maxDurationMs ?? 120_000,
+      },
+      contextVersion: 1,
+    };
+  }
+
+  private appendToolExchange(context: AgentContext, calls: Array<ToolCall | RawToolCall>, results: ToolExecutionResult[]): void {
+    const now = this.dependencies.clock.now().toISOString();
+    context.messages.push({
+      id: this.dependencies.ids.next('msg'), role: 'assistant', createdAt: now,
+      blocks: calls.map((call) => 'arguments' in call
+        ? { type: 'raw_tool_call' as const, call }
+        : { type: 'tool_call' as const, call }),
+    });
+    for (const result of results) {
+      context.messages.push({
+        id: this.dependencies.ids.next('msg'), role: 'tool', createdAt: now,
+        blocks: [{ type: 'tool_result', result }],
+      });
+    }
+  }
+
+  private deferredResult(call: ToolCall): ToolExecutionResult {
+    const now = this.dependencies.clock.now().toISOString();
+    return {
+      toolCallId: call.id,
+      toolName: call.name,
+      status: 'skipped',
+      response: { blocks: [{ type: 'json', value: { reason: 'replan_after_evidence' } }] },
+      startedAt: now,
+      finishedAt: now,
+    };
+  }
+
+  private nextStage(calls: ToolCall[]): AgentContext['stage'] {
+    return calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind === 'action')
+      ? 'verification'
+      : 'hypothesis';
+  }
+
+  private publish(
+    type: AgentEvent['type'],
+    context: AgentContext,
+    payload: AgentEvent['payload'],
+    stepId?: string,
+  ): Promise<void> {
+    const event = this.dependencies.eventFactory.create(type, context.runId, payload, stepId);
+    const sink: EventSink = this.dependencies.events;
+    return Promise.resolve(sink.publish(event));
+  }
+}

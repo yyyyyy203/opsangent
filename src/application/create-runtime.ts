@@ -1,0 +1,103 @@
+import { AgentHarness } from '../agent/agent-harness.js';
+import type { ChatModel, CheckpointStore, Clock, Guardian, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import { randomIdGenerator, systemClock } from '../contracts/index.js';
+import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
+import { EventBus } from '../event/event-bus.js';
+import { EventFactory } from '../event/event-factory.js';
+import { BashGuardian } from '../guard/bash-guardian.js';
+import { GuardEngine } from '../guard/guard-engine.js';
+import { EvidenceBudgetHook } from '../hooks/evidence-budget-hook.js';
+import { HookExecutor } from '../hooks/hook-executor.js';
+import { RiskActionHook } from '../hooks/risk-action-hook.js';
+import type { ToolHook } from '../hooks/types.js';
+import { NoopObservability } from '../observability/noop-observability.js';
+import { InMemoryCheckpointStore } from '../storage/in-memory-checkpoint-store.js';
+import { ToolBatchExecutor } from '../tool/batch-executor.js';
+import { createExternalBashTool } from '../tool/builtin/bash-tool.js';
+import { ToolExecutionPipeline } from '../tool/execution-pipeline.js';
+import { DefaultToolRunner } from '../tool/tool-runner.js';
+import { Toolkit } from '../tool/toolkit.js';
+import { ToolAdmission } from '../tool/admission.js';
+import { ExternalToolResultService } from './external-tool-result-service.js';
+import { HitlService } from './hitl-service.js';
+
+export interface AgentRuntimeOptions {
+  model: ChatModel;
+  workspaceRoots: string[];
+  tools?: Tool[];
+  guardians?: Guardian[];
+  hooks?: ToolHook[];
+  checkpoints?: CheckpointStore;
+  observability?: Observability;
+  clock?: Clock;
+  ids?: IdGenerator;
+  includeExternalBash?: boolean;
+  actionMode?: 'dry_run' | 'execute';
+}
+
+export function createAgentRuntime(options: AgentRuntimeOptions) {
+  const clock = options.clock ?? systemClock;
+  const ids = options.ids ?? randomIdGenerator;
+  const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
+  const observability = options.observability ?? new NoopObservability();
+  const events = new EventBus();
+  const eventFactory = new EventFactory(clock);
+  const toolkit = new Toolkit();
+  if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
+  for (const tool of options.tools ?? []) toolkit.register(tool);
+  const guard = new GuardEngine([
+    new BashGuardian(options.workspaceRoots),
+    ...(options.guardians ?? []),
+  ]);
+  const hooks = new HookExecutor([
+    new EvidenceBudgetHook(),
+    new RiskActionHook(clock),
+    ...(options.hooks ?? []),
+  ]);
+  const pipeline = new ToolExecutionPipeline(
+    toolkit,
+    guard,
+    hooks,
+    new DefaultToolRunner(),
+    checkpoints,
+    events,
+    eventFactory,
+    observability,
+    clock,
+    { actionMode: options.actionMode ?? 'dry_run' },
+  );
+  const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
+  const agent = new AgentHarness({
+    model: options.model,
+    toolkit,
+    batchExecutor,
+    checkpoints,
+    compressor: new RuleBasedContextCompressor({
+      maxMessagesBeforeL1: 40,
+      maxSerializedBytesBeforeL2: 256_000,
+      keepRecentMessages: 16,
+    }),
+    events,
+    eventFactory,
+    observability,
+    clock,
+    ids,
+    admission: new ToolAdmission(toolkit),
+  });
+  return {
+    agent,
+    toolkit,
+    events,
+    checkpoints,
+    hitl: new HitlService(checkpoints, clock),
+    externalTools: new ExternalToolResultService(
+      checkpoints,
+      clock,
+      toolkit,
+      guard,
+      hooks,
+      events,
+      eventFactory,
+    ),
+  };
+}
