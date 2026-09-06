@@ -42,6 +42,28 @@ export class ToolExecutionPipeline {
     stepId: string,
     signal: AbortSignal,
   ): Promise<ExecutionOutcome> {
+    let outcome: ExecutionOutcome;
+    try {
+      if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
+      outcome = await this.executeValidated(call, context, stepId, signal);
+    } catch (error) {
+      const agentError = toAgentError(error);
+      outcome = {
+        type: 'completed',
+        result: this.result(call, signal.aborted ? 'aborted' : 'failed', this.clock.now().toISOString(), undefined, agentError),
+        risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
+      };
+    }
+    await this.events.publish(this.eventFactory.create('TOOL_RESULT', context.runId, outcome.result, stepId));
+    return outcome;
+  }
+
+  private async executeValidated(
+    call: ToolCall,
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): Promise<ExecutionOutcome> {
     const startedAt = this.clock.now().toISOString();
     const tool = this.toolkit.get(call.name);
     if (tool === undefined) {
@@ -59,14 +81,19 @@ export class ToolExecutionPipeline {
       return { type: 'completed', result, risk: { severity: 'SAFE', requireConfirmation: false, findings: [] } };
     }
 
-    const normalizedCall = { ...call, input: validation.value ?? call.input };
+    const semantics = tool.validateSemantics?.(validation.value ?? call.input);
+    if (semantics && !semantics.valid) {
+      return { type: 'completed', result: this.result(call, 'failed', startedAt, undefined, semantics.error),
+        risk: { severity: 'SAFE', requireConfirmation: false, findings: [] } };
+    }
+    const normalizedCall = { ...call, input: semantics?.value ?? validation.value ?? call.input };
     const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: normalizedCall });
     const hookContext: HookContext = {
       context,
       stepId,
-      toolCall: call,
+      toolCall: normalizedCall,
       tool,
-      input: validation.value ?? call.input,
+      input: normalizedCall.input,
       risk,
     };
     const pre = await this.hooks.runBefore(hookContext);
@@ -112,6 +139,8 @@ export class ToolExecutionPipeline {
       stepId,
       signal,
       mode: tool.kind === 'action' ? this.options.actionMode : 'execute' as const,
+      deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,
+      networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
     };
     await this.events.publish(this.eventFactory.create('TOOL_STARTED', context.runId, call, stepId));
     const span = this.observability.startSpan({
@@ -143,7 +172,6 @@ export class ToolExecutionPipeline {
         await this.checkpoints.recordExecuted(call, result);
         context.executedActions.push(result);
       }
-      await this.events.publish(this.eventFactory.create('TOOL_RESULT', context.runId, result, stepId));
       span.end(response);
       return { type: 'completed', result, risk };
     } catch (error) {
@@ -151,7 +179,6 @@ export class ToolExecutionPipeline {
         ? { code: 'ABORTED' as const, message: 'Tool execution aborted.', retryable: false }
         : toAgentError(error);
       const result = this.result(call, signal.aborted ? 'aborted' : 'failed', startedAt, undefined, agentError);
-      await this.events.publish(this.eventFactory.create('TOOL_RESULT', context.runId, result, stepId));
       span.fail(agentError);
       return { type: 'completed', result, risk };
     }

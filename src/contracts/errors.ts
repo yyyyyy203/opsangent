@@ -12,6 +12,13 @@ export type AgentErrorCode =
   | 'TOOL_ARGUMENTS_SCHEMA_INVALID'
   | 'TOOL_ARGUMENTS_SEMANTIC_INVALID'
   | 'POLICY_DENIED'
+  | 'MCP_NETWORK_ERROR'
+  | 'MCP_TIMEOUT'
+  | 'MCP_RATE_LIMITED'
+  | 'MCP_SERVER_ERROR'
+  | 'MCP_AUTH_ERROR'
+  | 'MCP_PROTOCOL_ERROR'
+  | 'CIRCUIT_OPEN'
   | 'USER_REJECTED';
 
 export interface AgentError {
@@ -25,7 +32,13 @@ export function toAgentError(
   error: unknown,
   fallbackCode: AgentErrorCode = 'TOOL_ERROR',
 ): AgentError {
-  if (isAgentError(error)) return error;
+  // Error subclasses lose custom fields under structuredClone; checkpoints need a plain DTO.
+  if (isAgentError(error)) return {
+    code: error.code,
+    message: error.message,
+    retryable: error.retryable,
+    ...(error.details === undefined ? {} : { details: error.details }),
+  };
   return {
     code: fallbackCode,
     message: error instanceof Error ? error.message : String(error),

@@ -17,7 +17,11 @@ export class ToolAdmission {
     try { serialized = 'arguments' in candidate ? candidate.arguments : JSON.stringify(candidate.input); }
     catch { return this.reject('TOOL_ARGUMENTS_PARSE_FAILED', 'json_parse', 'non_json_input'); }
     const parsed = parseJsonArguments(serialized);
-    if (!parsed.ok) return this.reject('TOOL_ARGUMENTS_PARSE_FAILED', 'json_parse', parsed.reason);
+    if (!parsed.ok) return {
+      accepted: false,
+      error: { code: 'TOOL_ARGUMENTS_PARSE_FAILED', message: 'Tool arguments rejected.', retryable: false,
+        details: { gate: 'json_parse', reason: parsed.reason, retryableByModel: true, expectedSchema: toolInputJsonSchema(tool) } },
+    };
     const schema = validateToolInput(tool, parsed.value);
     if (!schema.valid || !schema.value) {
       return { accepted: false, error: {

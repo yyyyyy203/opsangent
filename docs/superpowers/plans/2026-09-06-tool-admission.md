@@ -10,13 +10,13 @@
 
 ## Tasks
 
-- [ ] Write test/tool-admission.test.ts for parse repair, malformed optional input, duplicate keys, schema errors, correction feedback, exhausted new IDs, budgets and cancellation; run failing tests.
-- [ ] Extend contracts/{tool,model,message,context,errors}.ts, keeping existing ToolCall.input.
-- [ ] Add tool/json-arguments.ts with a bounded JSON tokenizer, duplicate-key detection and syntax-only repair outside strings.
-- [ ] Add tool/admission.ts: existence, parse, strict Schema, injected semantic policy; output accepted call or structured rejection.
-- [ ] Integrate Harness correction state and paired messages. Conservative V1 correction key is tool name per Run; exhausted keys remain blocked across resume.
-- [ ] Integrate Pipeline semantics and normalized Guard input; count all calls, including rejected calls, without double charging.
-- [ ] Correct batch allSettled/error isolation/order and serial writes, test valid siblings execute once.
-- [ ] Run lint, typecheck, test, build and document verified scope and remaining roadmap.
+- [x] Write test/tool-admission.test.ts for parse repair, malformed optional input, duplicate keys, schema errors, correction feedback, exhausted new IDs, budgets and cancellation; run failing tests.
+- [x] Extend contracts/{tool,model,message,context,errors}.ts, keeping existing ToolCall.input.
+- [x] Add tool/json-arguments.ts with a bounded JSON tokenizer, duplicate-key detection and syntax-only repair outside strings.
+- [x] Add tool/admission.ts: existence, parse, strict Schema, injected semantic policy; output accepted call or structured rejection.
+- [x] Integrate Harness correction state and paired messages. Conservative V1 correction key is tool name per Run; exhausted keys remain blocked across resume.
+- [x] Integrate Pipeline semantics and normalized Guard input; count all calls, including rejected calls, without double charging.
+- [x] Correct batch allSettled/error isolation/order and serial writes, test valid siblings execute once.
+- [x] Run lint, typecheck, test, build and document verified scope and remaining roadmap.
 
 Each task uses failing behavior tests before production edits. No new external dependency is required. Full MCP, SQLite, simulator and Web deployment belong to subsequent independently verified milestones.

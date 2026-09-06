@@ -1,3 +1,4 @@
+import type { AgentError } from './errors.js';
 import type { SerializableInterrupt } from './hitl.js';
 import type { AgentMessage } from './message.js';
 import type { ToolCall, ToolExecutionResult } from './tool.js';
@@ -32,4 +33,6 @@ export interface AgentContext {
   /** Conservative V1: one model correction opportunity per tool per Run. */
   toolCorrections?: Record<string, { firstCallId: string; failures: number }>;
   admittedToolCallIds?: string[];
+  networkAttemptBudget?: { remaining: number };
+  failure?: AgentError;
 }

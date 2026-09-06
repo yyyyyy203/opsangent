@@ -45,6 +45,8 @@ export interface ToolCallOptions {
   stepId: string;
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
+  deadline?: number;
+  networkAttemptBudget?: { remaining: number };
 }
 
 export type ToolResponseBlock =

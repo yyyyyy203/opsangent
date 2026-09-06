@@ -7,12 +7,14 @@ import type {
   Clock,
   EventSink,
   IdGenerator,
+  MessageBlock,
   ModelResponse,
   Observability,
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
 } from '../contracts/index.js';
+import { toAgentError } from '../contracts/index.js';
 import type { ContextCompressor } from '../context-compressor/types.js';
 import { AsyncEventQueue } from '../event/async-event-queue.js';
 import type { EventBus } from '../event/event-bus.js';
@@ -95,6 +97,7 @@ export class AgentHarness implements DiagnosisAgent {
     let finalText = '';
 
     try {
+      delete context.failure;
       const pausedForExternalExecution = await this.resumePendingToolCall(context, signal);
       if (pausedForExternalExecution) {
         const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
@@ -120,8 +123,16 @@ export class AgentHarness implements DiagnosisAgent {
 
         const response = await this.reason(context, stepId, signal);
         const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
+        const seenIds = new Set(context.messages.flatMap((message) => message.blocks.flatMap((block) =>
+          block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
+        if (candidates.length > 32) throw new Error('Model tool batch exceeds admission limit.');
+        for (const candidate of candidates) {
+          if (!candidate.id || seenIds.has(candidate.id)) throw new Error('Model returned a missing or duplicate tool call ID.');
+          seenIds.add(candidate.id);
+        }
         if (response.text !== undefined) finalText += response.text;
         if (candidates.length === 0) {
+          this.appendToolExchange(context, response.text, candidates, []);
           context.status = 'completed';
           await this.dependencies.checkpoints.save(context);
           await this.publish('RUN_FINISHED', context, { finalText });
@@ -142,7 +153,7 @@ export class AgentHarness implements DiagnosisAgent {
           results.push(this.deferredResult(deferred));
         }
         const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
-        this.appendToolExchange(context, candidates, orderedResults);
+        this.appendToolExchange(context, response.text, candidates, orderedResults);
 
         if (batch.interrupt !== undefined) {
           context.status = batch.interrupt.interruptType === 'external_tool_execution'
@@ -167,9 +178,15 @@ export class AgentHarness implements DiagnosisAgent {
       throw new Error('Agent iteration budget exhausted.');
     } catch (error) {
       context.status = signal.aborted ? 'cancelled' : 'failed';
+      const failure = toAgentError(error);
+      context.failure = failure;
       await this.dependencies.checkpoints.save(context);
-      const message = error instanceof Error ? error.message : String(error);
-      await this.publish('RUN_FAILED', context, { message });
+      await this.publish('RUN_FAILED', context, {
+        message: failure.message,
+        code: failure.code,
+        retryable: failure.retryable,
+        category: failure.details?.category,
+      });
       rootSpan.fail(error);
       return { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
     } finally {
@@ -224,8 +241,9 @@ export class AgentHarness implements DiagnosisAgent {
       name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
       attributes: { stage: context.stage, iteration: context.budget.iteration },
     });
+    const deadline = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
     const stream = this.dependencies.model.stream(context.messages, this.dependencies.toolkit.list(), {
-      signal, runId: context.runId, stepId,
+      signal, runId: context.runId, stepId, deadline,
     });
     try {
       while (true) {
@@ -275,13 +293,21 @@ export class AgentHarness implements DiagnosisAgent {
     };
   }
 
-  private appendToolExchange(context: AgentContext, calls: Array<ToolCall | RawToolCall>, results: ToolExecutionResult[]): void {
+  private appendToolExchange(
+    context: AgentContext,
+    text: string | undefined,
+    calls: Array<ToolCall | RawToolCall>,
+    results: ToolExecutionResult[],
+  ): void {
     const now = this.dependencies.clock.now().toISOString();
+    const blocks: MessageBlock[] = [];
+    if (text !== undefined && text.length > 0) blocks.push({ type: 'text', text });
+    blocks.push(...calls.map((call) => 'arguments' in call
+      ? { type: 'raw_tool_call' as const, call }
+      : { type: 'tool_call' as const, call }));
     context.messages.push({
       id: this.dependencies.ids.next('msg'), role: 'assistant', createdAt: now,
-      blocks: calls.map((call) => 'arguments' in call
-        ? { type: 'raw_tool_call' as const, call }
-        : { type: 'tool_call' as const, call }),
+      blocks,
     });
     for (const result of results) {
       context.messages.push({

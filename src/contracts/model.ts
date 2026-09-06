@@ -17,6 +17,7 @@ export interface ModelCallOptions {
   signal: AbortSignal;
   runId: string;
   stepId: string;
+  deadline?: number;
 }
 
 export interface ChatModel {

@@ -27,10 +27,10 @@ describe('tool admission through the Harness', () => {
     const result = await runtime.agent.reply({ message: 'inspect', profileId: 'test' });
     const context = await runtime.checkpoints.load(result.runId);
     expect(runtime.executed).toEqual([{ service: 'checkout' }]);
-    expect(context?.messages.flatMap((m) => m.blocks)).toEqual(expect.arrayContaining([
-      expect.objectContaining({ type: 'raw_tool_call', call: expect.objectContaining({ id: 'a' }) }),
-      expect.objectContaining({ type: 'tool_result', result: expect.objectContaining({ toolCallId: 'a', error: expect.objectContaining({ code: 'TOOL_ARGUMENTS_PARSE_FAILED' }) }) }),
-    ]));
+    const blocks = context?.messages.flatMap((m) => m.blocks);
+    expect(blocks?.some((block) => block.type === 'raw_tool_call' && block.call.id === 'a')).toBe(true);
+    const failure = blocks?.find((block) => block.type === 'tool_result' && block.result.toolCallId === 'a');
+    expect(failure?.type === 'tool_result' && failure.result.error?.code).toBe('TOOL_ARGUMENTS_PARSE_FAILED');
     expect(context?.budget.toolCallsUsed).toBe(2);
   });
   it('prevents new IDs from resetting exhausted correction state', async () => {
@@ -48,5 +48,19 @@ describe('tool admission through the Harness', () => {
     const runtime = setup([raw('a', '{'), raw('b', '{"service":"checkout"}'), done]);
     await runtime.agent.reply({ message: 'inspect', profileId: 'test', maxToolCalls: 1 });
     expect(runtime.executed).toEqual([]);
+  });
+
+  it('preserves exhausted correction state when a new Harness resumes a checkpoint', async () => {
+    const runtime = setup([raw('a', '{'), raw('b', '{')]);
+    const first = await runtime.agent.reply({ message: 'inspect', profileId: 'test' });
+    expect(first.status).toBe('failed');
+    const resumed = createAgentRuntime({
+      model: new ScriptedModel([raw('c', '{"service":"checkout"}'), done]),
+      workspaceRoots: [], includeExternalBash: false, checkpoints: runtime.checkpoints, tools: runtime.toolkit.list(),
+    });
+    const stream = resumed.agent.resumeStream(first.runId);
+    while (!(await stream.next()).done) { /* Drain the public stream, including its final result. */ }
+    expect(runtime.executed).toEqual([]);
+    expect((await runtime.checkpoints.load(first.runId))?.toolCorrections?.['tool:query']?.failures).toBe(2);
   });
 });

@@ -36,7 +36,7 @@ function parse(text: string, maxDepth: number): Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) throw new Error('object_required');
   // JSON.parse has already checked grammar. Tokenize to reject duplicate decoded keys,
   // including escaped keys, before they can be silently overwritten.
-  const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}\[\]:,]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g) ?? [];
+  const tokens = text.match(/"(?:\\.|[^"\\])*"|[{}[\]:,]|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?|true|false|null/g) ?? [];
   const stack: Array<Set<string> | null> = [];
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];

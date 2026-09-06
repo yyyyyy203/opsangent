@@ -11,11 +11,15 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "lint": "eslint .",
+    "lab:backend:up": "docker compose -p agentops-metrics -f infrastructure/metrics-lab/compose.yaml up -d",
+    "lab:backend:stop": "docker compose -p agentops-metrics -f infrastructure/metrics-lab/compose.yaml stop",
+    "lab:start": "pnpm build && node apps/metrics-lab/index.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
     "langsmith": "^0.3.74",
     "zod": "^3.25.76",
     "zod-to-json-schema": "^3.24.6"

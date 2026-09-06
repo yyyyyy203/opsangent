@@ -2,8 +2,10 @@ import type { Tool } from '../contracts/index.js';
 
 export class Toolkit {
   private readonly tools = new Map<string, Tool>();
+  private frozen = false;
 
   public register(tool: Tool): void {
+    if (this.frozen) throw new Error('Tool registry is frozen for this inspection runtime.');
     if (this.tools.has(tool.name)) throw new Error(`Tool already registered: ${tool.name}`);
     this.tools.set(tool.name, tool);
   }
@@ -14,5 +16,9 @@ export class Toolkit {
 
   public list(): Tool[] {
     return [...this.tools.values()];
+  }
+
+  public freeze(): void {
+    this.frozen = true;
   }
 }
