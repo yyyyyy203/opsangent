@@ -30,6 +30,13 @@ export class MessageVersionConflictError extends Error {
   }
 }
 
+export class StoredDataCorruptionError extends Error {
+  public constructor(public readonly recordType: 'event' | 'message', public readonly recordId: string) {
+    super(`stored ${recordType} is corrupt: ${recordId}`);
+    this.name = 'StoredDataCorruptionError';
+  }
+}
+
 export type PendingAgentEventV2<T extends AgentEventTypeV2 = AgentEventTypeV2> =
   T extends AgentEventTypeV2 ? Omit<AgentEventEnvelopeV2<T>, 'sequence'> : never;
 
