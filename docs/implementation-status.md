@@ -1,5 +1,11 @@
 # 实现进度与验证记录
 
+## 最新设计决策：Event / Message V2 作为一期协议地基
+
+2026-09-07：确认一期完整实现 Event/Message V2，而非只补少量事件名。范围包括强类型 PayloadMap、完整 MessageBlock、ID 与暂停恢复语义、模型/工具/四闸门/HITL/Subagent/MCP/熔断/压缩/记忆事件、EventStore 与重放、Public SSE/Audit/LangSmith 三类投影及 V1 兼容投影。完整设计见 [Event 与 Message V2 协议](./architecture/15-event-message-v2.md)。
+
+当前源码仍是 V1 契约，本条是已确认目标而非完成声明。尚未实现 V2 Schema、事件持久化、投影、运行时发射和迁移测试；后续必须先形成实施计划，再开始修改公共契约。
+
 ## 最新增量：可运行 Metrics Lab 组装
 
 2026-09-06：新增独立模拟器管理 API 和统一 Metrics Lab 生命周期。管理端仅监听 127.0.0.1，严格允许 GET /scenarios 与 PUT /scenario；抓取端仍不包含场景控制，Agent MCP 也无法访问管理能力。startMetricsLab 同时组装模拟器指标端、管理端、Prometheus 查询源和只读 MCP 服务，并在启动失败或关闭时回收已启动资源。提供 lab:backend:up、lab:backend:stop、lab:start 命令。
