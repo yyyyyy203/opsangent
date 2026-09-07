@@ -2,6 +2,7 @@ export * from './common.js';
 export * from './context.js';
 export * from './errors.js';
 export * from './event.js';
+export * from './event-v2/index.js';
 export * from './guard.js';
 export * from './hitl.js';
 export * from './memory.js';
