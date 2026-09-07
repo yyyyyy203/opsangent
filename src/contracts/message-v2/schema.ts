@@ -2,11 +2,13 @@ import { z } from 'zod';
 import type { AgentMessageV2, MessageBlockV2 } from './index.js';
 import {
   identifierSchema,
+  isJsonValue,
   jsonMetadataSchema,
   jsonValueSchema,
   messageRoleV2Schema,
   messageStatusV2Schema,
   messageVisibilityV2Schema,
+  optionalJsonMetadataSchema,
   timestampSchema,
 } from './common.js';
 
@@ -21,13 +23,13 @@ const agentErrorSchema = z.object({
   code: agentErrorCodeSchema,
   message: z.string(),
   retryable: z.boolean(),
-  details: z.record(z.unknown()).optional(),
+  details: optionalJsonMetadataSchema,
 }).strict();
 
 const toolCallSchema = z.object({
   id: identifierSchema,
   name: identifierSchema,
-  input: z.record(z.unknown()),
+  input: jsonMetadataSchema,
 }).strict();
 
 const rawToolCallSchema = z.object({
@@ -38,7 +40,7 @@ const rawToolCallSchema = z.object({
 
 const toolResponseBlockSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }).strict(),
-  z.object({ type: z.literal('json'), value: z.unknown() }).strict(),
+  z.object({ type: z.literal('json'), value: jsonValueSchema }).strict(),
   z.object({ type: z.literal('evidence_ref'), evidenceId: identifierSchema }).strict(),
   z.object({ type: z.literal('artifact'), uri: z.string(), mediaType: z.string().optional() }).strict(),
 ]);
@@ -46,7 +48,7 @@ const toolResponseBlockSchema = z.discriminatedUnion('type', [
 const toolResponseSchema = z.object({
   blocks: z.array(toolResponseBlockSchema),
   evidenceIds: z.array(identifierSchema).optional(),
-  metadata: z.record(z.unknown()).optional(),
+  metadata: optionalJsonMetadataSchema,
   isError: z.boolean().optional(),
 }).strict();
 
@@ -71,7 +73,7 @@ const contextSummarySchema = z.object({
 
 const blockBaseSchema = z.object({
   blockId: identifierSchema,
-  metadata: jsonMetadataSchema.optional(),
+  metadata: optionalJsonMetadataSchema,
 });
 
 const messageBlockV2Schema = z.discriminatedUnion('type', [
@@ -136,7 +138,7 @@ export const agentMessageV2Schema = z.object({
   blocks: z.array(messageBlockV2Schema),
   createdAt: timestampSchema,
   completedAt: timestampSchema.optional(),
-  metadata: jsonMetadataSchema.optional(),
+  metadata: optionalJsonMetadataSchema,
 }).strict().superRefine((message, context) => {
   const blockIds = new Set<string>();
   for (const [index, block] of message.blocks.entries()) {
@@ -151,9 +153,33 @@ export const agentMessageV2Schema = z.object({
 });
 
 export function parseAgentMessageV2(input: unknown): AgentMessageV2 {
-  return agentMessageV2Schema.parse(input) as AgentMessageV2;
+  const result = safeParseAgentMessageV2(input);
+  if (!result.success) throw result.error;
+  return result.data;
+}
+
+export function safeParseAgentMessageV2(
+  input: unknown,
+): z.SafeParseReturnType<unknown, AgentMessageV2> {
+  if (!isJsonValue(input)) return unsafeMessageResult();
+  try {
+    return agentMessageV2Schema.safeParse(input) as z.SafeParseReturnType<unknown, AgentMessageV2>;
+  } catch {
+    return unsafeMessageResult();
+  }
 }
 
 export function isMessageBlockV2(input: unknown): input is MessageBlockV2 {
   return messageBlockV2Schema.safeParse(input).success;
+}
+
+function unsafeMessageResult(): z.SafeParseReturnType<unknown, AgentMessageV2> {
+  return {
+    success: false,
+    error: new z.ZodError([{
+      code: z.ZodIssueCode.custom,
+      path: [],
+      message: 'Expected a JSON-safe AgentMessageV2 input',
+    }]),
+  };
 }

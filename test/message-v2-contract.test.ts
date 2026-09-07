@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { agentMessageV2Schema, parseAgentMessageV2 } from '../src/contracts/message-v2/index.js';
+import { agentMessageV2Schema, parseAgentMessageV2, safeParseAgentMessageV2 } from '../src/contracts/message-v2/index.js';
 
 const baseMessage = {
   schemaVersion: 2,
@@ -104,5 +104,51 @@ describe('Message V2 contracts', () => {
   it('rejects non-object metadata through the schema without throwing a predicate error', () => {
     expect(() => agentMessageV2Schema.safeParse({ ...baseMessage, blocks: [blockFor('text')], metadata: null })).not.toThrow();
     expect(agentMessageV2Schema.safeParse({ ...baseMessage, blocks: [blockFor('text')], metadata: null }).success).toBe(false);
+  });
+
+  it('rejects duplicate block IDs', () => {
+    expect(() => parseAgentMessageV2({
+      ...baseMessage,
+      blocks: [blockFor('text', 'duplicate-block'), blockFor('reasoning_summary', 'duplicate-block')],
+    })).toThrow();
+  });
+
+  it('rejects non-JSON values in tool call input', () => {
+    const block = blockFor('tool_call');
+    (block.call as { input: Record<string, unknown> }).input.callback = () => undefined;
+
+    expect(() => parseAgentMessageV2({ ...baseMessage, blocks: [block] })).toThrow();
+  });
+
+  it('rejects non-JSON values in tool response JSON values and metadata', () => {
+    const jsonBlock = blockFor('tool_result');
+    (jsonBlock.result as { response?: unknown }).response = { blocks: [{ type: 'json', value: new Error('not JSON') }] };
+    const metadataBlock = blockFor('tool_result');
+    (metadataBlock.result as { response?: unknown }).response = { blocks: [], metadata: { callback: () => undefined } };
+
+    expect(() => parseAgentMessageV2({ ...baseMessage, blocks: [jsonBlock] })).toThrow();
+    expect(() => parseAgentMessageV2({ ...baseMessage, blocks: [metadataBlock] })).toThrow();
+  });
+
+  it('rejects non-JSON values in AgentError details', () => {
+    const block = blockFor('error');
+    (block.error as { details?: unknown }).details = { occurredAt: new Date() };
+
+    expect(() => parseAgentMessageV2({ ...baseMessage, blocks: [block] })).toThrow();
+  });
+
+  it('treats throwing getters and Proxies as invalid JSON without throwing from safeParse', () => {
+    const throwingGetter = Object.defineProperty({}, 'value', {
+      enumerable: true,
+      get: () => { throw new Error('getter failure'); },
+    });
+    const throwingProxy = new Proxy({}, { getPrototypeOf: () => { throw new Error('proxy failure'); } });
+
+    for (const metadata of [throwingGetter, throwingProxy]) {
+      const input = { ...baseMessage, blocks: [blockFor('text')], metadata };
+      expect(() => safeParseAgentMessageV2(input)).not.toThrow();
+      expect(safeParseAgentMessageV2(input).success).toBe(false);
+      expect(() => parseAgentMessageV2(input)).toThrow();
+    }
   });
 });

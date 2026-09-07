@@ -18,7 +18,11 @@ export const messageStatusV2Schema = z.enum(['streaming', 'completed', 'failed',
 export const messageVisibilityV2Schema = z.enum(['model', 'user', 'audit']);
 
 export function isJsonValue(value: unknown): value is JsonValue {
-  return isJsonValueAt(value, new Set<object>());
+  try {
+    return isJsonValueAt(value, new Set<object>());
+  } catch {
+    return false;
+  }
 }
 
 function isJsonValueAt(value: unknown, ancestors: Set<object>): value is JsonValue {
@@ -42,15 +46,23 @@ function isJsonValueAt(value: unknown, ancestors: Set<object>): value is JsonVal
 }
 
 export function isJsonMetadata(value: unknown): value is Record<string, JsonValue> {
-  return typeof value === 'object'
-    && value !== null
-    && !Array.isArray(value)
-    && Object.getPrototypeOf(value) === Object.prototype
-    && isJsonValue(value);
+  try {
+    return typeof value === 'object'
+      && value !== null
+      && !Array.isArray(value)
+      && Object.getPrototypeOf(value) === Object.prototype
+      && isJsonValue(value);
+  } catch {
+    return false;
+  }
 }
 
 export const jsonValueSchema = z.custom<JsonValue>(isJsonValue, 'Expected a JSON-serializable value');
 export const jsonMetadataSchema = z.custom<Record<string, JsonValue>>(
   isJsonMetadata,
+  'Expected JSON-serializable metadata',
+);
+export const optionalJsonMetadataSchema = z.custom<Record<string, JsonValue> | undefined>(
+  (value) => value === undefined || isJsonMetadata(value),
   'Expected JSON-serializable metadata',
 );
