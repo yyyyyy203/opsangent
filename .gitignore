@@ -10,3 +10,4 @@ data/
 .DS_Store
 Thumbs.db
 .workbuddy/
+.worktrees/
