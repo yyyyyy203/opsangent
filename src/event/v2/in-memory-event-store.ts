@@ -7,37 +7,13 @@ import type {
   PendingAgentEventV2,
   StoredAgentMessageV2,
 } from '../../contracts/index.js';
+import {
+  EventIdConflictError,
+  MessageVersionConflictError,
+  SequenceConflictError,
+} from '../../contracts/event-store.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
 import { parseAgentMessageV2 } from '../../contracts/message-v2/schema.js';
-
-export class SequenceConflictError extends Error {
-  public constructor(
-    public readonly runId: string,
-    public readonly expectedSequence: number,
-    public readonly actualSequence: number,
-  ) {
-    super(`event sequence conflict for ${runId}: expected ${expectedSequence}, actual ${actualSequence}`);
-    this.name = 'SequenceConflictError';
-  }
-}
-
-export class EventIdConflictError extends Error {
-  public constructor(public readonly eventId: string) {
-    super(`event id conflict: ${eventId}`);
-    this.name = 'EventIdConflictError';
-  }
-}
-
-export class MessageVersionConflictError extends Error {
-  public constructor(
-    public readonly messageId: string,
-    public readonly expectedVersion: number | null,
-    public readonly actualVersion: number | null,
-  ) {
-    super(`message version conflict for ${messageId}: expected ${String(expectedVersion)}, actual ${String(actualVersion)}`);
-    this.name = 'MessageVersionConflictError';
-  }
-}
 
 export class InMemoryEventMessageStore implements EventStore, MessageStore {
   private readonly eventsByRun = new Map<string, AgentEventEnvelopeV2[]>();

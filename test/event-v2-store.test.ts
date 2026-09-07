@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { AgentMessageV2, Clock, IdGenerator } from '../src/contracts/index.js';
+import { SequenceConflictError, type AgentMessageV2, type Clock, type IdGenerator } from '../src/contracts/index.js';
 import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
-import { InMemoryEventMessageStore, SequenceConflictError } from '../src/event/v2/in-memory-event-store.js';
+import { InMemoryEventMessageStore } from '../src/event/v2/in-memory-event-store.js';
 
 const clock: Clock = { now: () => new Date('2026-09-07T10:00:00.000Z') };
 const ids: IdGenerator = { next: (prefix) => `${prefix}-1` };

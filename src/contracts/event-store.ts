@@ -1,6 +1,35 @@
 import type { AgentEventEnvelopeV2, AgentEventTypeV2 } from './event-v2/index.js';
 import type { AgentMessageV2 } from './message-v2/index.js';
 
+export class SequenceConflictError extends Error {
+  public constructor(
+    public readonly runId: string,
+    public readonly expectedSequence: number,
+    public readonly actualSequence: number,
+  ) {
+    super(`event sequence conflict for ${runId}: expected ${expectedSequence}, actual ${actualSequence}`);
+    this.name = 'SequenceConflictError';
+  }
+}
+
+export class EventIdConflictError extends Error {
+  public constructor(public readonly eventId: string) {
+    super(`event id conflict: ${eventId}`);
+    this.name = 'EventIdConflictError';
+  }
+}
+
+export class MessageVersionConflictError extends Error {
+  public constructor(
+    public readonly messageId: string,
+    public readonly expectedVersion: number | null,
+    public readonly actualVersion: number | null,
+  ) {
+    super(`message version conflict for ${messageId}: expected ${String(expectedVersion)}, actual ${String(actualVersion)}`);
+    this.name = 'MessageVersionConflictError';
+  }
+}
+
 export type PendingAgentEventV2<T extends AgentEventTypeV2 = AgentEventTypeV2> =
   T extends AgentEventTypeV2 ? Omit<AgentEventEnvelopeV2<T>, 'sequence'> : never;
 

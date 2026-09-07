@@ -1,0 +1,86 @@
+import type { AgentEventEnvelopeV2 } from '../../contracts/index.js';
+import type {
+  EventProjectorV2,
+  ProjectionFailureSinkV2,
+} from './event-publisher.js';
+import { toFailure } from './event-publisher.js';
+
+export interface ProjectionCheckpointStoreV2 {
+  load(projector: string, runId: string): Promise<number>;
+  save(projector: string, runId: string, expectedSequence: number, sequence: number): Promise<void>;
+}
+
+export class ProjectionCheckpointConflictError extends Error {
+  public constructor(projector: string, runId: string, expected: number, actual: number) {
+    super(`projection checkpoint conflict for ${projector}/${runId}: expected ${expected}, actual ${actual}`);
+    this.name = 'ProjectionCheckpointConflictError';
+  }
+}
+
+export class InMemoryProjectionCheckpointStore implements ProjectionCheckpointStoreV2 {
+  private readonly checkpoints = new Map<string, number>();
+
+  public async load(projector: string, runId: string): Promise<number> {
+    return this.checkpoints.get(this.key(projector, runId)) ?? 0;
+  }
+
+  public async save(projector: string, runId: string, expectedSequence: number, sequence: number): Promise<void> {
+    const key = this.key(projector, runId);
+    const actual = this.checkpoints.get(key) ?? 0;
+    if (actual !== expectedSequence) throw new ProjectionCheckpointConflictError(projector, runId, expectedSequence, actual);
+    if (!Number.isSafeInteger(sequence) || sequence <= actual) throw new RangeError('projection sequence must advance');
+    this.checkpoints.set(key, sequence);
+  }
+
+  private key(projector: string, runId: string): string {
+    return `${projector}\u0000${runId}`;
+  }
+}
+
+export interface ProjectionRunnerOptionsV2 {
+  maxAttempts: number;
+}
+
+export class ProjectionRunnerV2 implements EventProjectorV2 {
+  public readonly name: string;
+  private readonly tails = new Map<string, Promise<void>>();
+
+  public constructor(
+    private readonly projector: EventProjectorV2,
+    private readonly checkpoints: ProjectionCheckpointStoreV2,
+    private readonly failures: ProjectionFailureSinkV2,
+    private readonly options: ProjectionRunnerOptionsV2,
+  ) {
+    this.name = projector.name;
+    if (!Number.isSafeInteger(options.maxAttempts) || options.maxAttempts <= 0) {
+      throw new RangeError('maxAttempts must be a positive safe integer');
+    }
+  }
+
+  public async project(event: AgentEventEnvelopeV2): Promise<void> {
+    const previous = this.tails.get(event.runId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => this.process(event));
+    this.tails.set(event.runId, current);
+    try {
+      await current;
+    } finally {
+      if (this.tails.get(event.runId) === current) this.tails.delete(event.runId);
+    }
+  }
+
+  private async process(event: AgentEventEnvelopeV2): Promise<void> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.options.maxAttempts; attempt += 1) {
+      try {
+        const checkpoint = await this.checkpoints.load(this.projector.name, event.runId);
+        if (checkpoint >= event.sequence) return;
+        await this.projector.project(structuredClone(event));
+        await this.checkpoints.save(this.projector.name, event.runId, checkpoint, event.sequence);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    await this.failures.record(toFailure(event, this.projector.name, lastError, this.options.maxAttempts));
+  }
+}
