@@ -13,10 +13,10 @@ export interface AgentEventPayloadMap
 export type AgentEventTypeV2 = keyof AgentEventPayloadMap;
 
 export type AgentEventEnvelopeV2<T extends AgentEventTypeV2 = AgentEventTypeV2> =
-  AgentEventEnvelopeBaseV2<T, AgentEventPayloadMap[T]>;
+  T extends AgentEventTypeV2 ? AgentEventEnvelopeBaseV2<T, AgentEventPayloadMap[T]> : never;
 
 export type UnsequencedAgentEventV2<T extends AgentEventTypeV2 = AgentEventTypeV2> =
-  UnsequencedAgentEventBaseV2<T, AgentEventPayloadMap[T]>;
+  T extends AgentEventTypeV2 ? UnsequencedAgentEventBaseV2<T, AgentEventPayloadMap[T]> : never;
 
 export const agentEventPayloadSchemas = {
   ...eventV2PayloadSchemas,

@@ -1,8 +1,14 @@
 import { z } from 'zod';
 import { budgetTypeSchema, eventErrorPayloadV2Schema, eventStageSchema, identifierV2Schema, jsonRecordV2Schema, timestampV2Schema, type BudgetTypeV2, type EventErrorPayloadV2, type EventStageV2 } from './common.js';
 import { messageRoleV2Schema, messageStatusV2Schema, type MessageRoleV2, type MessageStatusV2 } from '../message-v2/common.js';
+import { messageBlockV2Schema } from '../message-v2/schema.js';
+import type { MessageBlockV2 } from '../message-v2/blocks.js';
 const strict = <T extends z.ZodRawShape>(shape: T) => z.object(shape).strict();
 const nonnegative = z.number().finite().nonnegative(); const positiveInteger = z.number().int().positive();
+const contentBlockTypeV2Schema = z.enum([
+  'text', 'reasoning_summary', 'tool_call', 'raw_tool_call', 'tool_result', 'evidence_ref', 'artifact_ref', 'image_ref',
+  'context_summary', 'confirmation_request', 'confirmation_result', 'diagnosis', 'action_proposal', 'action_result', 'error',
+]);
 const usageSchema = strict({ inputTokens: nonnegative.int().optional(), outputTokens: nonnegative.int().optional() });
 export interface UsagePayloadV2 { inputTokens?: number; outputTokens?: number }
 export interface RunStartedPayloadV2 { profile: string; trigger: string; deadline: string; versionSnapshot: Record<string, import('../common.js').JsonValue> }
@@ -48,17 +54,17 @@ export const modelEventPayloadSchemas = {
   MODEL_CALL_FAILED: strict({ error: eventErrorPayloadV2Schema, attempt: positiveInteger, retryable: z.boolean(), durationMs: nonnegative }),
 } as const;
 export interface MessageStartedPayloadV2 { messageId: string; role: MessageRoleV2; status: MessageStatusV2 }
-export type ContentBlockTypeV2 = 'text' | 'reasoning_summary' | 'tool_call' | 'tool_result' | 'artifact';
+export type ContentBlockTypeV2 = MessageBlockV2['type'];
 export interface ContentBlockStartedPayloadV2 { messageId: string; blockId: string; blockType: ContentBlockTypeV2; index: number }
 export interface ContentBlockDeltaPayloadV2 { messageId: string; blockId: string; delta: string; index: number }
-export interface ContentBlockCompletedPayloadV2 { messageId: string; blockId: string; blockSummary: string; index: number }
+export interface ContentBlockCompletedPayloadV2 { messageId: string; blockId: string; blockSummary: string; index: number; block?: MessageBlockV2 }
 export interface MessageCompletedPayloadV2 { messageId: string; usage?: UsagePayloadV2; completedAt: string }
 export interface MessageFailedPayloadV2 { messageId: string; error: EventErrorPayloadV2 }
 export const messageStreamEventPayloadSchemas = {
   MESSAGE_STARTED: strict({ messageId: identifierV2Schema, role: messageRoleV2Schema, status: messageStatusV2Schema }),
-  CONTENT_BLOCK_STARTED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockType: z.enum(['text', 'reasoning_summary', 'tool_call', 'tool_result', 'artifact']), index: z.number().int().nonnegative() }),
+  CONTENT_BLOCK_STARTED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockType: contentBlockTypeV2Schema, index: z.number().int().nonnegative() }),
   CONTENT_BLOCK_DELTA: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, delta: z.string(), index: z.number().int().nonnegative() }),
-  CONTENT_BLOCK_COMPLETED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockSummary: z.string().min(1), index: z.number().int().nonnegative() }),
+  CONTENT_BLOCK_COMPLETED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockSummary: z.string().min(1), index: z.number().int().nonnegative(), block: messageBlockV2Schema.optional() }),
   MESSAGE_COMPLETED: strict({ messageId: identifierV2Schema, usage: usageSchema.optional(), completedAt: timestampV2Schema }),
   MESSAGE_FAILED: strict({ messageId: identifierV2Schema, error: eventErrorPayloadV2Schema }),
 } as const;

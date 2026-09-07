@@ -76,7 +76,7 @@ const blockBaseSchema = z.object({
   metadata: optionalJsonMetadataSchema,
 });
 
-const messageBlockV2Schema = z.discriminatedUnion('type', [
+export const messageBlockV2Schema = z.discriminatedUnion('type', [
   blockBaseSchema.extend({ type: z.literal('text'), text: z.string() }).strict(),
   blockBaseSchema.extend({ type: z.literal('reasoning_summary'), summary: z.string() }).strict(),
   blockBaseSchema.extend({ type: z.literal('tool_call'), call: toolCallSchema }).strict(),
@@ -170,7 +170,24 @@ export function safeParseAgentMessageV2(
 }
 
 export function isMessageBlockV2(input: unknown): input is MessageBlockV2 {
-  return messageBlockV2Schema.safeParse(input).success;
+  return safeParseMessageBlockV2(input).success;
+}
+
+export function safeParseMessageBlockV2(
+  input: unknown,
+): z.SafeParseReturnType<unknown, MessageBlockV2> {
+  if (!isJsonValue(input)) return unsafeBlockResult();
+  try {
+    return messageBlockV2Schema.safeParse(input) as z.SafeParseReturnType<unknown, MessageBlockV2>;
+  } catch {
+    return unsafeBlockResult();
+  }
+}
+
+export function parseMessageBlockV2(input: unknown): MessageBlockV2 {
+  const result = safeParseMessageBlockV2(input);
+  if (!result.success) throw result.error;
+  return result.data;
 }
 
 function unsafeMessageResult(): z.SafeParseReturnType<unknown, AgentMessageV2> {
@@ -180,6 +197,17 @@ function unsafeMessageResult(): z.SafeParseReturnType<unknown, AgentMessageV2> {
       code: z.ZodIssueCode.custom,
       path: [],
       message: 'Expected a JSON-safe AgentMessageV2 input',
+    }]),
+  };
+}
+
+function unsafeBlockResult(): z.SafeParseReturnType<unknown, MessageBlockV2> {
+  return {
+    success: false,
+    error: new z.ZodError([{
+      code: z.ZodIssueCode.custom,
+      path: [],
+      message: 'Expected a JSON-safe MessageBlockV2 input',
     }]),
   };
 }

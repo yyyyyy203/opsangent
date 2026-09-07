@@ -10,6 +10,8 @@ export * from './event/event-bus.js';
 export * from './event/event-factory.js';
 export * from './event/v2/event-factory.js';
 export * from './event/v2/in-memory-event-store.js';
+export * from './event/v2/replay-buffer.js';
+export * from './event/v2/message-assembler.js';
 export * from './guard/guard-engine.js';
 export * from './guard/bash-guardian.js';
 export * from './hooks/evidence-budget-hook.js';

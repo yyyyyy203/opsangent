@@ -131,7 +131,7 @@ interface AgentEventEnvelope<T extends AgentEventTypeV2> {
 | `MESSAGE_STARTED` | public/audit | messageId、role、status |
 | `CONTENT_BLOCK_STARTED` | public/audit | messageId、blockId、blockType、index |
 | `CONTENT_BLOCK_DELTA` | public/audit | messageId、blockId、delta、index |
-| `CONTENT_BLOCK_COMPLETED` | public/audit | messageId、blockId、完整块摘要/引用 |
+| `CONTENT_BLOCK_COMPLETED` | public/audit | messageId、blockId、blockSummary；非文本块携带完整结构化 block，文本块由 Delta 收敛 |
 | `MESSAGE_COMPLETED` | public/audit | messageId、usage、completedAt |
 | `MESSAGE_FAILED` | public/audit | messageId、结构化错误 |
 
