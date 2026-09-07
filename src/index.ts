@@ -14,6 +14,8 @@ export * from './event/v2/in-memory-event-store.js';
 export * from './event/v2/projection-runner.js';
 export * from './event/v2/replay-buffer.js';
 export * from './event/v2/message-assembler.js';
+export * from './event/projectors/public-projector.js';
+export * from './event/projectors/v1-projector.js';
 export * from './guard/guard-engine.js';
 export * from './guard/bash-guardian.js';
 export * from './hooks/evidence-budget-hook.js';
