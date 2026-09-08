@@ -2,13 +2,13 @@ import type { AgentEventPayloadMap, AgentEventTypeV2, AgentMessage, ChatModel, C
 import { toAgentError } from '../contracts/errors.js';
 import type { EventCreationContextV2 } from '../contracts/event-publisher.js';
 import type { EventFactoryV2 as EventFactoryImplementation } from '../event/v2/event-factory.js';
-import type { EventPublisherV2 } from '../event/v2/event-publisher.js';
+import type { EventPublisherV2Like } from '../contracts/event-publisher.js';
 
 export interface EventedChatModelOptions {
   provider: string;
   model: string;
   purpose: string;
-  correlationId: string;
+  correlationId: string | ((runId: string) => string);
   messageId?: string;
   clock?: Clock;
   ids?: IdGenerator;
@@ -17,7 +17,7 @@ export interface EventedChatModelOptions {
 export class EventedChatModel implements ChatModel {
   public constructor(
     private readonly delegate: ChatModel,
-    private readonly publisher: EventPublisherV2,
+    private readonly publisher: EventPublisherV2Like,
     private readonly factory: EventFactoryImplementation,
     private readonly config: EventedChatModelOptions,
   ) {}
@@ -31,7 +31,7 @@ export class EventedChatModel implements ChatModel {
     const messageId = this.config.messageId ?? ids.next('message');
     const blockId = ids.next('block');
     const startedAt = clock.now().getTime();
-    const base = { runId: options.runId, correlationId: this.config.correlationId, stepId: options.stepId, attemptId };
+    const base = { runId: options.runId, correlationId: typeof this.config.correlationId === 'function' ? this.config.correlationId(options.runId) : this.config.correlationId, stepId: options.stepId, attemptId };
     await this.publish('MODEL_CALL_STARTED', base, {
       provider: this.config.provider, model: this.config.model, purpose: this.config.purpose, attempt: 1, inputSummary: 'model input available to internal audit only',
     });

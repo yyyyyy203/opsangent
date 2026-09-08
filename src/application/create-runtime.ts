@@ -28,6 +28,7 @@ import { PublicEventProjectorV2 } from '../event/projectors/public-projector.js'
 import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
 import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
 import { EventStreamService } from '../api/event-stream-service.js';
+import { EventedChatModel } from '../model/evented-model.js';
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
@@ -41,6 +42,8 @@ export interface AgentRuntimeOptions {
   ids?: IdGenerator;
   includeExternalBash?: boolean;
   actionMode?: 'dry_run' | 'execute';
+  modelProvider?: string;
+  modelName?: string;
 }
 
 export function createAgentRuntime(options: AgentRuntimeOptions) {
@@ -54,6 +57,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
   const projectionFailuresV2 = new InMemoryProjectionFailureSink();
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
+  const eventFactoryV2 = new EventFactoryV2(clock, ids);
   const auditProjectorV2 = new AuditProjectorV2();
   const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
   eventPublisherV2.subscribe(auditProjectorV2);
@@ -85,7 +89,14 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
-    model: options.model,
+    model: new EventedChatModel(options.model, eventPublisherV2, eventFactoryV2, {
+      provider: options.modelProvider ?? 'configured',
+      model: options.modelName ?? 'configured',
+      purpose: 'inspection',
+      correlationId: (runId) => `run:${runId}`,
+      clock,
+      ids,
+    }),
     toolkit,
     batchExecutor,
     checkpoints,
@@ -100,7 +111,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     admission: new ToolAdmission(toolkit),
-    v2Events: { factory: new EventFactoryV2(clock, ids), publisher: eventPublisherV2, correlationId: (runId: string) => `run:${runId}` },
+    v2Events: { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId: string) => `run:${runId}` },
   });
   return {
     agent,
