@@ -20,6 +20,14 @@ import { Toolkit } from '../tool/toolkit.js';
 import { ToolAdmission } from '../tool/admission.js';
 import { ExternalToolResultService } from './external-tool-result-service.js';
 import { HitlService } from './hitl-service.js';
+import { EventFactoryV2 } from '../event/v2/event-factory.js';
+import { EventPublisherV2, InMemoryProjectionFailureSink } from '../event/v2/event-publisher.js';
+import { InMemoryEventMessageStore } from '../event/v2/in-memory-event-store.js';
+import { ReplayBufferV2 } from '../event/v2/replay-buffer.js';
+import { PublicEventProjectorV2 } from '../event/projectors/public-projector.js';
+import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
+import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
+import { EventStreamService } from '../api/event-stream-service.js';
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
@@ -42,6 +50,15 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const observability = options.observability ?? new NoopObservability();
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
+  const eventStoreV2 = new InMemoryEventMessageStore();
+  const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
+  const projectionFailuresV2 = new InMemoryProjectionFailureSink();
+  const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
+  const auditProjectorV2 = new AuditProjectorV2();
+  const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
+  eventPublisherV2.subscribe(auditProjectorV2);
+  eventPublisherV2.subscribe(langSmithProjectorV2);
+  const publicProjectorV2 = new PublicEventProjectorV2();
   const toolkit = new Toolkit();
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
   for (const tool of options.tools ?? []) toolkit.register(tool);
@@ -83,6 +100,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     admission: new ToolAdmission(toolkit),
+    v2Events: { factory: new EventFactoryV2(clock, ids), publisher: eventPublisherV2, correlationId: (runId: string) => `run:${runId}` },
   });
   return {
     agent,
@@ -99,5 +117,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       events,
       eventFactory,
     ),
+    eventStoreV2,
+    replayV2,
+    eventPublisherV2,
+    auditProjectorV2,
+    projectionFailuresV2,
+    eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
   };
 }

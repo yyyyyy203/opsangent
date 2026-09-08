@@ -3,6 +3,7 @@ import type {
   EventStore,
   PendingAgentEventV2,
 } from '../../contracts/index.js';
+import type { EventPublisherV2Like } from '../../contracts/event-publisher.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
 import { SequenceConflictError } from '../../contracts/event-store.js';
 import type { ReplayBufferV2 } from './replay-buffer.js';
@@ -34,7 +35,7 @@ export class InMemoryProjectionFailureSink implements ProjectionFailureSinkV2 {
   }
 }
 
-export class EventPublisherV2 {
+export class EventPublisherV2 implements EventPublisherV2Like {
   private readonly projectors = new Set<EventProjectorV2>();
   private readonly tails = new Map<string, Promise<AgentEventEnvelopeV2>>();
 

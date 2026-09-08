@@ -2,26 +2,10 @@ import type { Clock, IdGenerator } from '../../contracts/common.js';
 import type {
   AgentEventPayloadMap,
   AgentEventTypeV2,
-  EventDurabilityV2,
-  EventVisibilityV2,
   PendingAgentEventV2,
 } from '../../contracts/index.js';
 import { parseAgentEventV2Payload } from '../../contracts/event-v2/catalog.js';
-
-export interface EventCreationContextV2 {
-  runId: string;
-  correlationId: string;
-  visibility: EventVisibilityV2;
-  durability: EventDurabilityV2;
-  sessionId?: string;
-  replyId?: string;
-  streamId?: string;
-  stepId?: string;
-  attemptId?: string;
-  toolCallId?: string;
-  parentRunId?: string;
-  causationId?: string;
-}
+import type { EventCreationContextV2 } from '../../contracts/event-publisher.js';
 
 export class EventFactoryV2 {
   public constructor(

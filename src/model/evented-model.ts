@@ -1,6 +1,7 @@
-import type { AgentMessage, ChatModel, Clock, IdGenerator, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../contracts/index.js';
+import type { AgentEventPayloadMap, AgentEventTypeV2, AgentMessage, ChatModel, Clock, IdGenerator, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
-import type { EventCreationContextV2, EventFactoryV2 } from '../event/v2/event-factory.js';
+import type { EventCreationContextV2 } from '../contracts/event-publisher.js';
+import type { EventFactoryV2 as EventFactoryImplementation } from '../event/v2/event-factory.js';
 import type { EventPublisherV2 } from '../event/v2/event-publisher.js';
 
 export interface EventedChatModelOptions {
@@ -17,7 +18,7 @@ export class EventedChatModel implements ChatModel {
   public constructor(
     private readonly delegate: ChatModel,
     private readonly publisher: EventPublisherV2,
-    private readonly factory: EventFactoryV2,
+    private readonly factory: EventFactoryImplementation,
     private readonly config: EventedChatModelOptions,
   ) {}
 
@@ -76,16 +77,16 @@ export class EventedChatModel implements ChatModel {
     }
   }
 
-  private publish<T extends Parameters<EventFactoryV2['create']>[0]>(
+  private publish<T extends AgentEventTypeV2>(
     type: T,
     ids: { runId: string; correlationId: string; stepId?: string; attemptId?: string; toolCallId?: string },
-    payload: Parameters<EventFactoryV2['create']>[2] & Record<string, unknown>,
+    payload: AgentEventPayloadMap[T],
   ): Promise<unknown> {
     const context: EventCreationContextV2 = {
       runId: ids.runId, correlationId: ids.correlationId, visibility: type.startsWith('CONTENT_') || type.startsWith('MESSAGE_') ? 'public' : 'audit', durability: type === 'CONTENT_BLOCK_DELTA' ? 'transient' : 'durable',
       ...(ids.stepId === undefined ? {} : { stepId: ids.stepId }), ...(ids.attemptId === undefined ? {} : { attemptId: ids.attemptId }), ...(ids.toolCallId === undefined ? {} : { toolCallId: ids.toolCallId }),
     };
-    const event = this.factory.create(type, context, payload as never);
+    const event = this.factory.create(type, context, payload);
     return this.publisher.publish(event);
   }
 }

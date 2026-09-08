@@ -10,6 +10,12 @@ import type {
   MessageBlock,
   ModelResponse,
   Observability,
+  AgentEventPayloadMap,
+  AgentEventTypeV2,
+  AgentErrorCode,
+  PendingAgentEventV2,
+  EventFactoryV2Like,
+  EventPublisherV2Like,
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
@@ -37,6 +43,7 @@ export interface AgentHarnessDependencies {
   clock: Clock;
   ids: IdGenerator;
   admission: ToolAdmission;
+  v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: string | ((runId: string) => string) };
 }
 
 export class AgentHarness implements DiagnosisAgent {
@@ -94,6 +101,12 @@ export class AgentHarness implements DiagnosisAgent {
       attributes: { profileId: context.profileId },
     });
     await this.publish('RUN_STARTED', context, { profileId: context.profileId });
+    await this.publishV2('RUN_STARTED', context, {
+      profile: context.profileId,
+      trigger: 'manual',
+      deadline: new Date(Date.parse(context.budget.startedAt) + context.budget.maxDurationMs).toISOString(),
+      versionSnapshot: {},
+    });
     let finalText = '';
 
     try {
@@ -114,12 +127,22 @@ export class AgentHarness implements DiagnosisAgent {
         context = compressed.context;
         if (compressed.decision.level !== 'none') {
           await this.publish('CONTEXT_COMPRESSED', context, { ...compressed.decision });
+          const before = JSON.stringify(context.messages).length;
+          await this.publishV2('CONTEXT_COMPRESSED', context, {
+            level: compressed.decision.level,
+            before,
+            after: JSON.stringify(compressed.context.messages).length,
+            offloadedEvidenceIds: [],
+            savedTokens: 0,
+          });
         }
 
         context.budget.iteration += 1;
         const stepId = this.dependencies.ids.next('step');
         await this.publish('STEP_STARTED', context, { iteration: context.budget.iteration }, stepId);
         await this.publish('REASONING_STARTED', context, { stage: context.stage }, stepId);
+        await this.publishV2('STEP_STARTED', context, { iteration: context.budget.iteration, stage: context.stage, budgetSnapshot: { toolCallsUsed: context.budget.toolCallsUsed } }, stepId);
+        await this.publishV2('REASONING_STARTED', context, { stage: context.stage, objective: `inspection:${context.profileId}` }, stepId);
 
         const response = await this.reason(context, stepId, signal);
         const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
@@ -136,6 +159,7 @@ export class AgentHarness implements DiagnosisAgent {
           context.status = 'completed';
           await this.dependencies.checkpoints.save(context);
           await this.publish('RUN_FINISHED', context, { finalText });
+          await this.publishV2('RUN_FINISHED', context, { outcome: 'complete', durationMs: this.elapsed(context) });
           const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
           rootSpan.end(result);
           return result;
@@ -146,13 +170,35 @@ export class AgentHarness implements DiagnosisAgent {
         }
         const admission = admitToolBatch(candidates, context, this.dependencies.admission, this.dependencies.clock, signal);
         for (const repair of admission.repairs) await this.publish('TOOL_PROGRESS', context, repair, stepId);
+        for (const gate of admission.gates) {
+          for (const record of gate.records) {
+            await this.publishV2('TOOL_CALL_ADMISSION_UPDATED', context, {
+              gate: record.gate,
+              outcome: record.outcome,
+              attempt: 1,
+              ...(record.errorCode === undefined ? {} : { errorCode: record.errorCode }),
+            }, stepId, gate.toolCallId);
+          }
+        }
+        for (const call of admission.calls) {
+          await this.publishV2('TOOL_CALL_CREATED', context, { call }, stepId, call.id);
+        }
         for (const result of admission.rejected) await this.publish('TOOL_RESULT', context, result, stepId);
+        for (const result of admission.rejected) {
+          await this.publishV2('TOOL_CALL_REJECTED', context, {
+            toolName: result.toolName,
+            gate: gateForError(result.error?.code),
+            error: eventError(result.error),
+          }, stepId, result.toolCallId);
+          await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
+        }
         const batch = await this.dependencies.batchExecutor.execute(admission.calls, context, stepId, signal);
         const results = [...admission.rejected, ...batch.results];
         for (const deferred of batch.deferredActions) {
           results.push(this.deferredResult(deferred));
         }
         const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
+        for (const result of batch.results) await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
         this.appendToolExchange(context, response.text, candidates, orderedResults);
 
         if (batch.interrupt !== undefined) {
@@ -166,6 +212,12 @@ export class AgentHarness implements DiagnosisAgent {
             await this.publish('REQUIRE_CONFIRM', context, batch.interrupt, stepId);
           }
           await this.publish('RUN_PAUSED', context, { reason: batch.interrupt.interruptType }, stepId);
+          await this.publishV2('RUN_PAUSED', context, {
+            interruptId: batch.interrupt.hookId,
+            reason: batch.interrupt.interruptType,
+            expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
+            checkpointVersion: String(context.contextVersion),
+          }, stepId);
           const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
           rootSpan.end(result);
           return result;
@@ -187,6 +239,7 @@ export class AgentHarness implements DiagnosisAgent {
         retryable: failure.retryable,
         category: failure.details?.category,
       });
+      await this.publishV2('RUN_FAILED', context, { error: { code: failure.code, message: failure.message, retryable: failure.retryable }, stage: context.stage, recoverable: failure.retryable });
       rootSpan.fail(error);
       return { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
     } finally {
@@ -345,4 +398,49 @@ export class AgentHarness implements DiagnosisAgent {
     const sink: EventSink = this.dependencies.events;
     return Promise.resolve(sink.publish(event));
   }
+
+  private publishV2<T extends AgentEventTypeV2>(
+    type: T,
+    context: AgentContext,
+    payload: AgentEventPayloadMap[T],
+    stepId?: string,
+    toolCallId?: string,
+  ): Promise<void> {
+    const v2 = this.dependencies.v2Events;
+    if (v2 === undefined) return Promise.resolve();
+    const pending: PendingAgentEventV2<T> = v2.factory.create(type, {
+      runId: context.runId,
+      correlationId: typeof v2.correlationId === 'function' ? v2.correlationId(context.runId) : v2.correlationId,
+      visibility: type.startsWith('RUN_') || type.startsWith('STEP_') || type === 'REASONING_STARTED' ? 'public' : 'audit',
+      durability: 'durable',
+      ...(stepId === undefined ? {} : { stepId }),
+      ...(toolCallId === undefined ? {} : { toolCallId }),
+    }, payload);
+    return v2.publisher.publish(pending).then(() => undefined);
+  }
+
+  private elapsed(context: AgentContext): number {
+    return Math.max(0, this.dependencies.clock.now().getTime() - Date.parse(context.budget.startedAt));
+  }
+}
+
+function eventError(error: ToolExecutionResult['error']): { code: NonNullable<ToolExecutionResult['error']>['code']; message: string; retryable: boolean } {
+  return error === undefined ? { code: 'TOOL_ERROR', message: 'Tool call rejected.', retryable: false } : {
+    code: error.code, message: error.message, retryable: error.retryable,
+  };
+}
+
+function gateForError(code: AgentErrorCode | undefined): 'tool_existence' | 'json_parse' | 'schema_validation' | 'semantic_validation' {
+  switch (code) {
+    case 'TOOL_NOT_FOUND': return 'tool_existence';
+    case 'TOOL_ARGUMENTS_PARSE_FAILED': return 'json_parse';
+    case 'TOOL_ARGUMENTS_SEMANTIC_INVALID': return 'semantic_validation';
+    default: return 'schema_validation';
+  }
+}
+
+function toolResultPayload(result: ToolExecutionResult): AgentEventPayloadMap['TOOL_RESULT'] {
+  const started = Date.parse(result.startedAt);
+  const finished = result.finishedAt === undefined ? started : Date.parse(result.finishedAt);
+  return { result, durationMs: Math.max(0, finished - started), evidenceIds: result.response?.evidenceIds ?? [] };
 }

@@ -3,6 +3,7 @@ export * from './context.js';
 export * from './errors.js';
 export * from './event.js';
 export * from './event-store.js';
+export * from './event-publisher.js';
 export * from './event-v2/index.js';
 export * from './guard.js';
 export * from './hitl.js';
