@@ -14,15 +14,19 @@
 - 已补 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`：审计记录只保留脱敏结构化摘要；模型、工具、Subagent 使用显式 `spanKey/parentSpanKey` 建立父子关系；模型完成事件记录 usage、cacheHit、TTFT 和耗时；远端观测 start/end/flush 失败不会影响 Agent 主流程。新增投影测试 3 项通过。
 - 默认 runtime 已组装 V2 EventStore、ReplayBuffer、Publisher、Public/Audit/LangSmith 投影，并由 Harness/模型装饰器/工具管线实际产生生命周期、内容流、准入、风险、执行和结果事件；HITL 确认、外部执行和恢复也会产生对应事件，恢复事件使用新的 `streamId`。
 - 四闸门准入结果现在暴露有序 `AdmissionGateRecord[]`；MCP ResilientExecutor 保留原有重试/熔断预算，并增加数据源 retry 与 circuit 状态回调。
+- Subagent 已作为 Tool 适配器接入生命周期事件：子运行拥有独立 `runId`，通过 `parentRunId` 与父运行关联，并发布 `SUBAGENT_STARTED/COMPLETED/FAILED`；新增生命周期单测已通过。
+- `ProjectionRunnerV2` 已按 runId 串行处理并缓存乱序事件；前序失败或缺失时不会让后续事件越过 checkpoint，前序恢复后会继续排队事件。
+- `createAgentRuntime` 支持注入 `EventStore & MessageStore`，或通过 `sqlitePath` 启用 WAL SQLite；默认内存实现仍用于测试，返回的 `close()` 负责关闭 SQLite。
+- 最新增量验证：全量 `pnpm test` 为 36 files / 190 tests passed，1 个真实 Prometheus 测试 skipped；`pnpm typecheck`、`pnpm lint`、`pnpm build` 均通过。
 
 ## 接线前必须解决的缺口
 
 - Public projector 默认递归黑名单不满足设计中的逐字段白名单；结构化消息中的工具参数和任意 JSON 仍需专门公共视图。逐 Delta 正则也不能证明分片凭据不会泄露。
 - V1 projector 直接复用部分 V2 payload，尚未证明旧消费者字段语义兼容；CONTENT_BLOCK_DELTA 未区分 text 与 reasoning_summary。
-- ProjectionRunner 在较早事件失败后允许后续 checkpoint 前进，可能跳过旧事件补报；需要失败恢复测试与持久化消费记录。
+- ProjectionRunner 已解决内存运行时的前序失败/乱序越过 checkpoint 问题；仍需把 pending/失败消费状态持久化，覆盖进程重启后的投影补报。
 - MessageAssembler 内部状态尚未从磁盘恢复；完整消息落库不等同于组装器重启恢复。
 - 已补内存/SQLite 共用测试：同批重复 ID 拒绝且不占序号，无效预留数量不修改状态；SQLite 事件、序号预留与消息写入均使用 BEGIN IMMEDIATE。仍需扩大跨连接并发及损坏记录测试。
-- 当前已知质量门槛：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均已通过。不能把四项命令通过解释为一期完成，因为运行时生产点和 Audit/LangSmith 等范围尚未实现完。
+- 当前已知质量门槛：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均已通过。不能把四项命令通过解释为一期完成，因为消息重启恢复、持久化投影消费、真实模型重试/降级、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍未全部验收。
 - EventStreamService 仍是框架无关 SSE frame 生成器，尚未接入实际 HTTP Controller、前端消费端或 runtime bootstrap 默认组装。
 - LangSmith 投影目前已接入默认 runtime 的核心生产点，但仍需补齐模型/工具/数据源重试与降级事件的端到端验收、投影幂等消费和有界 flush。
 
