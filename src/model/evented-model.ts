@@ -46,9 +46,6 @@ export class EventedChatModel implements ChatModel {
             await this.publish('CONTENT_BLOCK_COMPLETED', base, { messageId, blockId, blockSummary: 'text output', index: 0, block: { type: 'text', blockId, text } });
             await this.publish('MESSAGE_COMPLETED', base, { messageId, completedAt: clock.now().toISOString(), ...(item.value.usage === undefined ? {} : { usage: item.value.usage }) });
           }
-          for (const call of item.value.toolCalls) {
-            await this.publish('TOOL_CALL_CREATED', { ...base, toolCallId: call.id }, { call });
-          }
           await this.publish('MODEL_CALL_COMPLETED', base, {
             provider: this.config.provider, model: this.config.model, attempt: 1,
             ...(item.value.usage === undefined ? {} : { usage: item.value.usage }), durationMs: Math.max(0, clock.now().getTime() - startedAt),

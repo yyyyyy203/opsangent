@@ -1,43 +1,30 @@
 # Event / Message V2 一期验收状态
 
-本文件区分已写实现、已验证行为与尚未验收的要求。此前按 Task 标记 complete 仅表示该批代码提交，不等同于一期验收完成。
+本文件区分已写实现、已验证行为与尚未验收的要求。提交完成不等同于一期验收完成；最终结论以本文件的命令输出和剩余缺口为准。
 
 ## 当前证据
 
-- 分支：codex/event-message-v2；SQLite 基础实现提交：6720495。
-- 契约、内存存储、消息组装、发布、投影及 SQLite 已有实现。
-- 6720495 时测试 165 passed / 1 skipped，typecheck 与 build 通过；真实 Prometheus 测试跳过。
-- 已补事件流服务：`EventStreamService.open` 支持初始回放、`Last-Event-ID`、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 过期时用 `message_snapshot` 恢复用户可见消息。
-- 已补 `ReplayBufferV2.findById`，cursor 先按 eventId 解析，不把客户端 cursor 退化成猜测 sequence。
-- 已修复 V2 基础 lint 债务：内存/SQLite 存储保持 Promise API 且不再使用无 await 的 async 方法；SQLite 写入继续使用 `BEGIN IMMEDIATE`；V2 common/lifecycle/message assembler 的类型问题已清理。
-- 最新验证：`pnpm lint` 通过；`pnpm typecheck` 通过；`pnpm build` 通过；`pnpm test` 为 31 files / 182 tests passed，1 个真实 Prometheus 测试按默认配置 skipped。
-- 已补 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`：审计记录只保留脱敏结构化摘要；模型、工具、Subagent 使用显式 `spanKey/parentSpanKey` 建立父子关系；模型完成事件记录 usage、cacheHit、TTFT 和耗时；远端观测 start/end/flush 失败不会影响 Agent 主流程。新增投影测试 3 项通过。
-- 默认 runtime 已组装 V2 EventStore、ReplayBuffer、Publisher、Public/Audit/LangSmith 投影，并由 Harness/模型装饰器/工具管线实际产生生命周期、内容流、准入、风险、执行和结果事件；HITL 确认、外部执行和恢复也会产生对应事件，恢复事件使用新的 `streamId`。
-- 四闸门准入结果现在暴露有序 `AdmissionGateRecord[]`；MCP ResilientExecutor 保留原有重试/熔断预算，并增加数据源 retry 与 circuit 状态回调。
-- Subagent 已作为 Tool 适配器接入生命周期事件：子运行拥有独立 `runId`，通过 `parentRunId` 与父运行关联，并发布 `SUBAGENT_STARTED/COMPLETED/FAILED`；新增生命周期单测已通过。
-- `ProjectionRunnerV2` 已按 runId 串行处理并缓存乱序事件；前序失败或缺失时不会让后续事件越过 checkpoint，前序恢复后会继续排队事件。
-- `createAgentRuntime` 支持注入 `EventStore & MessageStore`，或通过 `sqlitePath` 启用 WAL SQLite；默认内存实现仍用于测试，返回的 `close()` 负责关闭 SQLite。
-- `RetryingChatModel` 已提供 AsyncGenerator 模型重试适配：仅在首个流事件前对可重试失败重试，支持注入延迟、Abort 和可选 fallback；部分输出后失败不会重复发送已输出内容，并有回归测试。
-- 最新增量验证：全量 `pnpm test` 为 36 files / 190 tests passed，1 个真实 Prometheus 测试 skipped；`pnpm typecheck`、`pnpm lint`、`pnpm build` 均通过。
+- 分支：`codex/event-message-v2`。当前工作树包含一期验收用例和模型层重复工具事件修复。
+- V2 MessageBlock、Event PayloadMap/Schema、内存/SQLite Store、ReplayBuffer、MessageAssembler、Publisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影均已有实现。
+- 默认 runtime 已组装 V2 存储、投影、消息组装和 HTTP/SSE 入口；Harness、模型装饰器、工具执行管线、HITL、Subagent 和数据源韧性链路会产生实际 V2 生命周期事件。
+- 工具调用已遵循“准入成功后发布 `TOOL_CALL_CREATED`”语义；模型层不会提前重复发布工具调用事件。四闸门记录保留在有序 `AdmissionGateRecord[]` 中。
+- `RetryingChatModel` 使用 AsyncGenerator 适配模型重试：首个流事件前才允许重试，部分输出后失败不重放已输出内容，并支持 Abort、延迟注入和 fallback；fallback 会产生 `MODEL_FALLBACK_ACTIVATED`。
+- SQLite 启用 WAL、迁移、条件序列追加、消息版本控制、投影 checkpoint/failure 持久化；`MessageAssemblerV2` 可在重启后恢复已落库的终态消息。
+- `EventStreamService` 和 Node HTTP 适配器支持初始回放、`Last-Event-ID`、live handoff 去重、Abort，以及 transient Delta 淘汰后的完整消息快照恢复。
+- 新增端到端验收覆盖 V1 fixture 读取与 V2→V1 投影、并行工具 ToolCall/ToolResult 配对和公共投影脱敏；定向验收 3/3 通过。
+- 最终质量命令应记录为：`pnpm lint`、`pnpm typecheck`、`pnpm test`（40 个文件通过、1 个真实 Prometheus 文件按默认配置跳过；203 项通过、1 项跳过）和 `pnpm build` 均通过。
 
-## 接线前必须解决的缺口
+## 当前仍需补齐的缺口
 
-- Public projector 默认递归黑名单不满足设计中的逐字段白名单；结构化消息中的工具参数和任意 JSON 仍需专门公共视图。逐 Delta 正则也不能证明分片凭据不会泄露。
-- V1 projector 直接复用部分 V2 payload，尚未证明旧消费者字段语义兼容；CONTENT_BLOCK_DELTA 未区分 text 与 reasoning_summary。
-- ProjectionRunner 已解决内存运行时的前序失败/乱序越过 checkpoint 问题；仍需把 pending/失败消费状态持久化，覆盖进程重启后的投影补报。
-- MessageAssembler 已支持从 MessageStore 恢复已落库消息，终态消息可在组装器重启后安全重放；未完成流式块的细粒度内部状态仍未持久化，恢复边界以已落库快照为准。
-- 已补内存/SQLite 共用测试：同批重复 ID 拒绝且不占序号，无效预留数量不修改状态；SQLite 事件、序号预留与消息写入均使用 BEGIN IMMEDIATE。仍需扩大跨连接并发及损坏记录测试。
-- 当前已知质量门槛：最近增量已通过 `pnpm lint`、`pnpm typecheck`；前一阶段全量 `pnpm test` 与 `pnpm build` 通过。完整改动合并后仍需重新执行四项命令，不能把单测通过解释为一期完成，因为持久化投影消费、真实模型 fallback 事件、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍未全部验收。
-- EventStreamService 仍是框架无关 SSE frame 生成器，尚未接入实际 HTTP Controller、前端消费端或 runtime bootstrap 默认组装。
-- LangSmith 投影目前已接入默认 runtime 的核心生产点，但仍需补齐模型/工具/数据源重试与降级事件的端到端验收、投影幂等消费和有界 flush。
+- Legacy `EventBus` 目前仍被 Harness/Tool Pipeline 的兼容路径直接发布，同时 V2 投影也可生成 V1 事件；下一轮应收敛为“V2 EventPublisher → V1CompatibilityProjector → EventBus”，避免双写和语义漂移。
+- `ProjectionRunnerV2` 的运行中 pending 队列仍在内存；SQLite 已持久化 checkpoint 和失败记录，但进程重启后的补报需要显式调用 `replayRun`，尚未做自动扫描恢复。
+- `MessageAssemblerV2` 已恢复终态快照；未完成流式消息的细粒度 assembly 状态仍未持久化，进程在 Delta 和 Completed 之间退出时不能承诺字符级续流。
+- Public/V1 投影已有按事件类型的安全视图和脱敏测试，但 V1 payload 语义映射、reasoning block、所有事件的逐字段 allowlist 仍需继续扩展。
+- MCP 连接、上下文压缩 L0/L1/L2、MemoryFacade 的生命周期事件契约已定义，当前尚未全部由真实运行时操作触发；Memory 仍是内存实现。
+- 当前 HTTP 层是可验证的 Node/SSE 服务入口，Simulator Web 和 Agent Web 前端仍未交付；真实 Prometheus 验收按默认配置跳过，真实模型和生产凭据也未接入。
 
-## 剩余实施范围
+## 结论
 
-1. Task 8 剩余：SSE 服务已具备核心回放能力，但仍需全量测试运行、build 验证、与 bootstrap/runtime 的真实装配，以及更严格的公共投影安全测试联动。
-2. Task 9：本地审计与 LangSmith 投影，显式父子 span、重试、脱敏、持久化补报和故障隔离。
-3. Task 10–11：真实模型、工具准入、执行、重试和熔断的 V2 事件生产点。
-4. Task 12：HITL 条件状态转换、确认幂等/过期、外部执行不确定性、暂停后新 streamId 恢复。
-5. Task 13：权威 Harness、Subagent、MCP、上下文和记忆接线。
-6. Task 14：bootstrap、V1 fixture、端到端验收、知识库及四项质量命令。
+Event/Message V2 的协议地基、主要运行时生产点、持久化/回放、公共与审计投影、AsyncGenerator 模型重试及当前端到端验收已经落地并通过回归。它可以作为后续巡检 Agent 的稳定事件/消息基础。
 
-一期目标保持完整。上述未验证项全部解决并验收之前，不标记一期完成。
+但按完整一期计划，以上缺口仍然存在，因此当前结论是“核心已验收，完整生产一期未宣称完成”。

@@ -424,6 +424,8 @@ TOOL_CALL_CREATED(metrics_subagent)
 
 ## 13. 当前实现状态
 
-截至 2026-09-08，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、V1/Public 初版投影和框架无关 SSE 回放服务已经开始落地。SSE 当前以 `SseFrame` 形式输出，由 HTTP 层负责写入具体响应；`Last-Event-ID` 通过 eventId 解析，transient Delta 超出窗口时用用户可见 Message 快照恢复。
+截至 2026-09-09，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 生产点、AsyncGenerator 重试适配和 Node HTTP/SSE 回放服务已经落地。SSE 使用 `eventId` 作为 cursor；transient Delta 超出窗口时用已保存的用户可见 Message 快照恢复。默认 runtime 可以在内存或 SQLite 之间组装，SQLite 保存事件、消息终态、投影 checkpoint 和失败记录。
 
-一期仍未完成：Audit/LangSmith 投影、模型调用事件、工具四闸门/重试/熔断事件、HITL 暂停恢复事件、Subagent/MCP/上下文压缩/记忆生命周期、bootstrap 组装、V1 fixture 和端到端验收仍需继续实现。本文是目标设计与当前状态说明；具体完成度以 `docs/event-message-v2-acceptance-status.md` 的验证记录为准。
+V2 核心验收已覆盖 V1 fixture 读取、V2→V1 投影、并行工具配对、公共脱敏、模型 fallback、SQLite 重启恢复和 HTTP/SSE 入口；最终全量测试为 40 个文件通过、1 个真实 Prometheus 文件跳过，203 项通过、1 项跳过，lint/typecheck/build 均通过。
+
+完整生产一期仍有边界：Legacy EventBus 尚未完全收敛为 V2→V1 单向投影；投影 pending 队列和未完成消息 assembly 未自动持久化恢复；MCP/压缩/Memory 生命周期事件尚未全部由真实操作触发；前端、真实模型/生产数据源和真实 Prometheus 默认验收仍待后续接入。本文是目标设计与当前状态说明；具体完成度以 [`docs/event-message-v2-acceptance-status.md`](../event-message-v2-acceptance-status.md) 的验证记录为准。

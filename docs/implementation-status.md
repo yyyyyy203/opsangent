@@ -1,12 +1,12 @@
 # 实现进度与验证记录
 
-## 最新增量：Event / Message V2 协议、存储与 SSE 回放基础
+## 最新增量：Event / Message V2 核心验收与 AsyncGenerator 收口
 
-2026-09-08：继续实施 [Event and Message V2 Implementation Plan](./superpowers/plans/2026-09-07-event-message-v2.md)。当前已落地 V2 MessageBlock 契约、V2 Event PayloadMap/Schema、EventStore/MessageStore 抽象、内存与 SQLite 实现、ReplayBuffer、MessageAssembler、EventPublisher、V1/Public 初版投影，以及框架无关的 SSE 编码和 `EventStreamService.open`。
+2026-09-09：完成 Event/Message V2 核心验收收口。V2 MessageBlock 契约、Event PayloadMap/Schema、EventStore/MessageStore、内存与 SQLite 持久化、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 运行时事件和 Node HTTP/SSE 入口均已落地。
 
-本轮新增 `EventStreamService`：支持初始回放、`Last-Event-ID` cursor、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 淘汰后返回 `message_snapshot`。同时补齐 `ReplayBufferV2.findById`，并清理 V2 基础 lint 债务，保证内存/SQLite 存储的 Promise API 仍以 rejected Promise 暴露同步错误。新增 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`，支持脱敏审计、显式父子 span、模型用量/缓存/TTFT 记录和观测失败隔离。
+本轮补充 V1 fixture、V2→V1 投影、并行工具 ToolCall/ToolResult 配对、公共投影脱敏验收，并修复模型层提前发布 `TOOL_CALL_CREATED` 导致的重复事件。`RetryingChatModel` 保持 AsyncGenerator 语义：首个流事件前才重试，部分输出后不重放，支持 Abort、fallback 和模型尝试事件。SQLite runtime 支持 WAL、checkpoint/failure 持久化、终态消息重启恢复和事件重放。
 
-已验证：前一阶段全量测试为 36 个文件 190 项通过、1 项真实 Prometheus 默认跳过，`lint`、`typecheck`、`build` 均通过。随后已补齐 Subagent 子运行生命周期事件、投影乱序/失败恢复保护、消息终态恢复、可注入或 SQLite 的 V2 runtime 存储组装，以及可选的 AsyncGenerator `RetryingChatModel`；其新增单测已通过。当前变更合并后仍需重新执行全量四项质量命令，一期仍未完成，持久化投影消费、真实模型 fallback 事件、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍需继续。
+最终验证记录：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；全量测试为 40 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，203 项通过、1 项跳过。核心协议已验收，但完整生产一期仍保留若干明确缺口，详见 [Event / Message V2 一期验收状态](./event-message-v2-acceptance-status.md)。
 
 ## 设计决策：Event / Message V2 作为一期协议地基
 
