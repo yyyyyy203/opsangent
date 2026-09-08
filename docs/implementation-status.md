@@ -6,7 +6,7 @@
 
 本轮新增 `EventStreamService`：支持初始回放、`Last-Event-ID` cursor、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 淘汰后返回 `message_snapshot`。同时补齐 `ReplayBufferV2.findById`，并清理 V2 基础 lint 债务，保证内存/SQLite 存储的 Promise API 仍以 rejected Promise 暴露同步错误。新增 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`，支持脱敏审计、显式父子 span、模型用量/缓存/TTFT 记录和观测失败隔离。
 
-已验证：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均通过；当前全量测试为 36 个文件 190 项通过、1 项真实 Prometheus 默认跳过。随后已补齐 Subagent 子运行生命周期事件、投影乱序/失败恢复保护，以及可注入或 SQLite 的 V2 runtime 存储组装；一期仍未完成，消息重启恢复、持久化投影消费、真实模型重试/降级、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍需继续。
+已验证：前一阶段全量测试为 36 个文件 190 项通过、1 项真实 Prometheus 默认跳过，`lint`、`typecheck`、`build` 均通过。随后已补齐 Subagent 子运行生命周期事件、投影乱序/失败恢复保护、消息终态恢复、可注入或 SQLite 的 V2 runtime 存储组装，以及可选的 AsyncGenerator `RetryingChatModel`；其新增单测已通过。当前变更合并后仍需重新执行全量四项质量命令，一期仍未完成，持久化投影消费、真实模型 fallback 事件、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍需继续。
 
 ## 设计决策：Event / Message V2 作为一期协议地基
 

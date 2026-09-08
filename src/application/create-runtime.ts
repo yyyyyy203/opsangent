@@ -29,6 +29,8 @@ import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
 import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
 import { EventStreamService } from '../api/event-stream-service.js';
 import { EventedChatModel } from '../model/evented-model.js';
+import { RetryingChatModel, type RetryingChatModelOptions } from '../model/retrying-model.js';
+import { ObservabilityModelAttemptObserver } from '../observability/model-attempt-observer.js';
 import { SqliteDatabase, SqliteEventMessageStore } from '../infrastructure/sqlite/index.js';
 
 type EventMessageStore = EventStore & MessageStore;
@@ -47,6 +49,7 @@ export interface AgentRuntimeOptions {
   actionMode?: 'dry_run' | 'execute';
   modelProvider?: string;
   modelName?: string;
+  modelRetry?: RetryingChatModelOptions;
   /** Use a durable V2 event/message store. Defaults to the in-memory store for tests. */
   eventMessageStore?: EventMessageStore;
   /** SQLite path used when eventMessageStore is not supplied. */
@@ -74,6 +77,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   eventPublisherV2.subscribe(auditProjectorV2);
   eventPublisherV2.subscribe(langSmithProjectorV2);
   const publicProjectorV2 = new PublicEventProjectorV2();
+  const model = options.modelRetry === undefined
+    ? options.model
+    : new RetryingChatModel(options.model, {
+      ...options.modelRetry,
+      observer: options.modelRetry.observer ?? new ObservabilityModelAttemptObserver(observability),
+    });
   const toolkit = new Toolkit();
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
   for (const tool of options.tools ?? []) toolkit.register(tool);
@@ -101,7 +110,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
-    model: new EventedChatModel(options.model, eventPublisherV2, eventFactoryV2, {
+    model: new EventedChatModel(model, eventPublisherV2, eventFactoryV2, {
       provider: options.modelProvider ?? 'configured',
       model: options.modelName ?? 'configured',
       purpose: 'inspection',

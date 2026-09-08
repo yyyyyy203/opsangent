@@ -17,6 +17,7 @@
 - Subagent 已作为 Tool 适配器接入生命周期事件：子运行拥有独立 `runId`，通过 `parentRunId` 与父运行关联，并发布 `SUBAGENT_STARTED/COMPLETED/FAILED`；新增生命周期单测已通过。
 - `ProjectionRunnerV2` 已按 runId 串行处理并缓存乱序事件；前序失败或缺失时不会让后续事件越过 checkpoint，前序恢复后会继续排队事件。
 - `createAgentRuntime` 支持注入 `EventStore & MessageStore`，或通过 `sqlitePath` 启用 WAL SQLite；默认内存实现仍用于测试，返回的 `close()` 负责关闭 SQLite。
+- `RetryingChatModel` 已提供 AsyncGenerator 模型重试适配：仅在首个流事件前对可重试失败重试，支持注入延迟、Abort 和可选 fallback；部分输出后失败不会重复发送已输出内容，并有回归测试。
 - 最新增量验证：全量 `pnpm test` 为 36 files / 190 tests passed，1 个真实 Prometheus 测试 skipped；`pnpm typecheck`、`pnpm lint`、`pnpm build` 均通过。
 
 ## 接线前必须解决的缺口
@@ -24,9 +25,9 @@
 - Public projector 默认递归黑名单不满足设计中的逐字段白名单；结构化消息中的工具参数和任意 JSON 仍需专门公共视图。逐 Delta 正则也不能证明分片凭据不会泄露。
 - V1 projector 直接复用部分 V2 payload，尚未证明旧消费者字段语义兼容；CONTENT_BLOCK_DELTA 未区分 text 与 reasoning_summary。
 - ProjectionRunner 已解决内存运行时的前序失败/乱序越过 checkpoint 问题；仍需把 pending/失败消费状态持久化，覆盖进程重启后的投影补报。
-- MessageAssembler 内部状态尚未从磁盘恢复；完整消息落库不等同于组装器重启恢复。
+- MessageAssembler 已支持从 MessageStore 恢复已落库消息，终态消息可在组装器重启后安全重放；未完成流式块的细粒度内部状态仍未持久化，恢复边界以已落库快照为准。
 - 已补内存/SQLite 共用测试：同批重复 ID 拒绝且不占序号，无效预留数量不修改状态；SQLite 事件、序号预留与消息写入均使用 BEGIN IMMEDIATE。仍需扩大跨连接并发及损坏记录测试。
-- 当前已知质量门槛：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均已通过。不能把四项命令通过解释为一期完成，因为消息重启恢复、持久化投影消费、真实模型重试/降级、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍未全部验收。
+- 当前已知质量门槛：最近增量已通过 `pnpm lint`、`pnpm typecheck`；前一阶段全量 `pnpm test` 与 `pnpm build` 通过。完整改动合并后仍需重新执行四项命令，不能把单测通过解释为一期完成，因为持久化投影消费、真实模型 fallback 事件、HTTP/SSE bootstrap 和完整数据源 Subagent 接线仍未全部验收。
 - EventStreamService 仍是框架无关 SSE frame 生成器，尚未接入实际 HTTP Controller、前端消费端或 runtime bootstrap 默认组装。
 - LangSmith 投影目前已接入默认 runtime 的核心生产点，但仍需补齐模型/工具/数据源重试与降级事件的端到端验收、投影幂等消费和有界 flush。
 
