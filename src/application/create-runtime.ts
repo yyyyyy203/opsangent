@@ -1,5 +1,5 @@
 import { AgentHarness } from '../agent/agent-harness.js';
-import type { ChatModel, CheckpointStore, Clock, Guardian, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import type { ChatModel, CheckpointStore, Clock, EventStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
 import { EventBus } from '../event/event-bus.js';
@@ -29,6 +29,9 @@ import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
 import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
 import { EventStreamService } from '../api/event-stream-service.js';
 import { EventedChatModel } from '../model/evented-model.js';
+import { SqliteDatabase, SqliteEventMessageStore } from '../infrastructure/sqlite/index.js';
+
+type EventMessageStore = EventStore & MessageStore;
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
@@ -44,6 +47,10 @@ export interface AgentRuntimeOptions {
   actionMode?: 'dry_run' | 'execute';
   modelProvider?: string;
   modelName?: string;
+  /** Use a durable V2 event/message store. Defaults to the in-memory store for tests. */
+  eventMessageStore?: EventMessageStore;
+  /** SQLite path used when eventMessageStore is not supplied. */
+  sqlitePath?: string;
 }
 
 export function createAgentRuntime(options: AgentRuntimeOptions) {
@@ -53,7 +60,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const observability = options.observability ?? new NoopObservability();
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
-  const eventStoreV2 = new InMemoryEventMessageStore();
+  const sqliteDatabase = options.eventMessageStore === undefined && options.sqlitePath !== undefined
+    ? SqliteDatabase.open(options.sqlitePath)
+    : undefined;
+  const eventStoreV2: EventMessageStore = options.eventMessageStore
+    ?? (sqliteDatabase === undefined ? new InMemoryEventMessageStore() : new SqliteEventMessageStore(sqliteDatabase));
   const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
   const projectionFailuresV2 = new InMemoryProjectionFailureSink();
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
@@ -136,5 +147,6 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     auditProjectorV2,
     projectionFailuresV2,
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
+    close: () => sqliteDatabase?.close(),
   };
 }
