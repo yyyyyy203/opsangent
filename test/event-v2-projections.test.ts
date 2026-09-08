@@ -37,6 +37,9 @@ describe('V1CompatibilityProjector', () => {
       messageId: 'message-1', blockId: 'block-1', delta: 'hello', index: 0,
     }))[0]).toMatchObject({ type: 'TEXT_DELTA', payload: { delta: 'hello' } });
     expect(projector.project(event('MEMORY_RETRIEVAL_STARTED', { scopes: ['working'], filters: {}, limit: 2 }, 'audit'))).toEqual([]);
+    expect(projector.project(event('CONTENT_BLOCK_DELTA', {
+      messageId: 'message-1', blockId: 'thinking-1', delta: 'internal reasoning', index: 0, blockType: 'reasoning_summary',
+    }))).toEqual([]);
   });
 });
 

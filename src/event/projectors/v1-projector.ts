@@ -28,6 +28,7 @@ export class V1CompatibilityProjector {
       case 'RUN_FAILED':
         return { type: 'RUN_FAILED', payload: event.payload.error };
       case 'CONTENT_BLOCK_DELTA':
+        if (event.payload.blockType !== undefined && event.payload.blockType !== 'text') return null;
         return { type: 'TEXT_DELTA', payload: { delta: event.payload.delta } };
       case 'TOOL_CALL_CREATED':
         return { type: 'TOOL_CALL_CREATED', payload: event.payload.call };

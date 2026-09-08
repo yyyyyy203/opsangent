@@ -31,6 +31,9 @@ import { EventStreamService } from '../api/event-stream-service.js';
 import { EventedChatModel } from '../model/evented-model.js';
 import { RetryingChatModel, type RetryingChatModelOptions } from '../model/retrying-model.js';
 import { ObservabilityModelAttemptObserver } from '../observability/model-attempt-observer.js';
+import { MessageAssemblerV2 } from '../event/v2/message-assembler.js';
+import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/v2/projection-runner.js';
+import { SqliteProjectionCheckpointStore, SqliteProjectionFailureSink } from '../infrastructure/sqlite/index.js';
 import { SqliteDatabase, SqliteEventMessageStore } from '../infrastructure/sqlite/index.js';
 
 type EventMessageStore = EventStore & MessageStore;
@@ -69,13 +72,16 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const eventStoreV2: EventMessageStore = options.eventMessageStore
     ?? (sqliteDatabase === undefined ? new InMemoryEventMessageStore() : new SqliteEventMessageStore(sqliteDatabase));
   const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
-  const projectionFailuresV2 = new InMemoryProjectionFailureSink();
+  const projectionFailuresV2 = sqliteDatabase === undefined ? new InMemoryProjectionFailureSink() : new SqliteProjectionFailureSink(sqliteDatabase);
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
   const eventFactoryV2 = new EventFactoryV2(clock, ids);
+  const projectionCheckpointsV2 = sqliteDatabase === undefined ? new InMemoryProjectionCheckpointStore() : new SqliteProjectionCheckpointStore(sqliteDatabase);
   const auditProjectorV2 = new AuditProjectorV2();
+  const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
-  eventPublisherV2.subscribe(auditProjectorV2);
-  eventPublisherV2.subscribe(langSmithProjectorV2);
+  const langSmithProjectionRunnerV2 = new ProjectionRunnerV2(langSmithProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
+  eventPublisherV2.subscribe(auditProjectionRunnerV2);
+  eventPublisherV2.subscribe(langSmithProjectionRunnerV2);
   const publicProjectorV2 = new PublicEventProjectorV2();
   const model = options.modelRetry === undefined
     ? options.model
@@ -155,6 +161,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     eventPublisherV2,
     auditProjectorV2,
     projectionFailuresV2,
+    projectionCheckpointsV2,
+    auditProjectionRunnerV2,
+    langSmithProjectionRunnerV2,
+    messageAssemblerV2: new MessageAssemblerV2(eventStoreV2),
+    replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
     close: () => sqliteDatabase?.close(),
   };

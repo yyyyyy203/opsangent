@@ -62,7 +62,7 @@ export class EventedChatModel implements ChatModel {
             await this.publish('CONTENT_BLOCK_STARTED', base, { messageId, blockId, blockType: 'text', index: 0 });
           }
           text += item.value.delta;
-          await this.publish('CONTENT_BLOCK_DELTA', base, { messageId, blockId, delta: item.value.delta, index: 0 });
+          await this.publish('CONTENT_BLOCK_DELTA', base, { messageId, blockId, delta: item.value.delta, index: 0, blockType: 'text' });
         }
         yield item.value;
       }

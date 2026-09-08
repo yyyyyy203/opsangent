@@ -65,6 +65,24 @@ export class EventPublisherV2 implements EventPublisherV2Like {
     }
   }
 
+  /** Re-dispatches persisted events so projection runners can recover after a process restart. */
+  public async replayRun(runId: string, afterSequence = 0, limit = 1_000): Promise<number> {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new RangeError('afterSequence must be a non-negative safe integer');
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('replay limit must be a positive safe integer');
+    const previous = this.tails.get(runId);
+    const current = (previous ?? Promise.resolve()).catch(() => undefined).then(async () => {
+      const events = await this.store.readRun(runId, afterSequence, limit);
+      for (const event of events) await this.dispatch(event);
+      return events.length;
+    });
+    const tail = current.then(() => ({}) as AgentEventEnvelopeV2);
+    this.tails.set(runId, tail);
+    try { return await current; }
+    finally {
+      if (this.tails.get(runId) === tail) this.tails.delete(runId);
+    }
+  }
+
   private async publishOrdered(pending: PendingAgentEventV2): Promise<AgentEventEnvelopeV2> {
     let expected = await this.store.currentSequence(pending.runId);
     let event: AgentEventEnvelopeV2;
