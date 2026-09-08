@@ -65,4 +65,20 @@ describe('MessageAssemblerV2', () => {
     expect(failed?.status).toBe('failed');
     expect(failed?.blocks.map((block) => block.type)).toEqual(['evidence_ref', 'error']);
   });
+
+  it('restores a persisted terminal message after assembler restart', async () => {
+    sequence = 0;
+    const store = new InMemoryEventMessageStore();
+    const first = new MessageAssemblerV2(store);
+    await first.apply(event('MESSAGE_STARTED', { messageId: 'message-restart', role: 'assistant', status: 'streaming' }));
+    await first.apply(event('CONTENT_BLOCK_STARTED', { messageId: 'message-restart', blockId: 'block-1', blockType: 'text', index: 0 }));
+    await first.apply(event('CONTENT_BLOCK_DELTA', { messageId: 'message-restart', blockId: 'block-1', delta: '已持久化', index: 0 }));
+    await first.apply(event('CONTENT_BLOCK_COMPLETED', { messageId: 'message-restart', blockId: 'block-1', blockSummary: '已持久化', index: 0 }));
+    const completed = await first.apply(event('MESSAGE_COMPLETED', { messageId: 'message-restart', completedAt: '2026-09-07T10:00:02.000Z' }));
+
+    const restarted = new MessageAssemblerV2(store);
+    const restored = await restarted.apply(event('MESSAGE_STARTED', { messageId: 'message-restart', role: 'assistant', status: 'streaming' }));
+    expect(restored).toEqual(completed);
+    await expect(restarted.apply(event('CONTENT_BLOCK_DELTA', { messageId: 'message-restart', blockId: 'block-1', delta: '禁止追加', index: 0 }))).rejects.toThrow('already terminal');
+  });
 });

@@ -42,7 +42,7 @@ export class MessageAssemblerV2 {
     if (!isMessageEvent(event)) return null;
     const messageId = event.payload.messageId;
     if (event.type === 'MESSAGE_STARTED') return this.start(event);
-    const current = this.states.get(messageId);
+    const current = await this.getOrRestore(messageId);
     if (current === undefined) throw new MessageAssemblyError(`message ${messageId} has not started`);
     if (current.seenEventIds.has(event.eventId)) return structuredClone(current.message);
     if (current.message.status !== 'streaming') throw new MessageAssemblyError(`message ${messageId} is already terminal`);
@@ -92,6 +92,12 @@ export class MessageAssemblerV2 {
     const existing = this.states.get(messageId);
     if (existing?.seenEventIds.has(event.eventId) === true) return structuredClone(existing.message);
     if (existing !== undefined) throw new MessageAssemblyError(`message ${messageId} has already started`);
+    const existingStored = await this.store.getMessage(messageId);
+    if (existingStored !== null) {
+      if (existingStored.message.runId !== event.runId) throw new MessageAssemblyError(`message ${messageId} belongs to another run`);
+      this.restoreStored(existingStored.message, existingStored.version);
+      return structuredClone(existingStored.message);
+    }
     const message: AgentMessageV2 = {
       schemaVersion: 2,
       id: messageId,
@@ -105,14 +111,40 @@ export class MessageAssemblerV2 {
       ...(event.replyId === undefined ? {} : { replyId: event.replyId }),
       ...(event.stepId === undefined ? {} : { stepId: event.stepId }),
     };
-    const stored = await this.store.saveMessage(message, null);
+    const saved = await this.store.saveMessage(message, null);
     this.states.set(messageId, {
-      message: stored.message,
-      version: stored.version,
+      message: saved.message,
+      version: saved.version,
       blocks: new Map(),
       seenEventIds: new Set([event.eventId]),
     });
-    return structuredClone(stored.message);
+    return structuredClone(saved.message);
+  }
+
+  private async getOrRestore(messageId: string): Promise<AssemblyStateV2> {
+    const current = this.states.get(messageId);
+    if (current !== undefined) return current;
+    const stored = await this.store.getMessage(messageId);
+    if (stored === null) throw new MessageAssemblyError(`message ${messageId} has not started`);
+    return this.restoreStored(stored.message, stored.version);
+  }
+
+  private restoreStored(message: AgentMessageV2, version: number): AssemblyStateV2 {
+    const restored: AssemblyStateV2 = {
+      message: structuredClone(message),
+      version,
+      blocks: new Map(message.blocks.map((block, index) => [block.blockId, {
+        blockId: block.blockId,
+        type: block.type,
+        index,
+        text: block.type === 'text' ? block.text : block.type === 'reasoning_summary' ? block.summary : '',
+        completed: true,
+        block: structuredClone(block),
+      }])),
+      seenEventIds: new Set(),
+    };
+    this.states.set(message.id, restored);
+    return restored;
   }
 
   private startBlock(state: AssemblyStateV2, payload: ContentBlockStartedPayloadV2): void {
