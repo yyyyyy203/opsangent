@@ -47,7 +47,23 @@ export class PublicEventProjectorV2 {
   private publicPayload(event: AgentEventEnvelopeV2): JsonObject | null {
     switch (event.type) {
       case 'RUN_STARTED':
-        return sanitizeRecord({ ...event.payload, versionSnapshot: {} });
+        return sanitizeRecord({ profile: event.payload.profile, trigger: event.payload.trigger, deadline: event.payload.deadline, versionSnapshot: {} });
+      case 'STEP_STARTED':
+        return sanitizeRecord({ iteration: event.payload.iteration, stage: event.payload.stage, budgetSnapshot: pickNumbers(event.payload.budgetSnapshot) });
+      case 'REASONING_STARTED':
+        return sanitizeRecord({ stage: event.payload.stage, objective: safeText(event.payload.objective) });
+      case 'MESSAGE_STARTED':
+        return sanitizeRecord({ messageId: event.payload.messageId, role: event.payload.role, status: event.payload.status });
+      case 'CONTENT_BLOCK_STARTED':
+        return sanitizeRecord({ messageId: event.payload.messageId, blockId: event.payload.blockId, blockType: event.payload.blockType, index: event.payload.index });
+      case 'CONTENT_BLOCK_DELTA':
+        return sanitizeRecord({ messageId: event.payload.messageId, blockId: event.payload.blockId, delta: safeText(event.payload.delta), index: event.payload.index });
+      case 'CONTENT_BLOCK_COMPLETED':
+        return sanitizeRecord({ messageId: event.payload.messageId, blockId: event.payload.blockId, blockSummary: safeText(event.payload.blockSummary), index: event.payload.index });
+      case 'MESSAGE_COMPLETED':
+        return sanitizeRecord({ messageId: event.payload.messageId, ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage as unknown as JsonObject }), completedAt: event.payload.completedAt });
+      case 'MESSAGE_FAILED':
+        return sanitizeRecord({ messageId: event.payload.messageId, error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable } });
       case 'TOOL_CALL_CREATED':
         return sanitizeRecord({
           ...event.payload,
@@ -85,10 +101,30 @@ export class PublicEventProjectorV2 {
           blockId: event.payload.blockId,
           ...(event.payload.textDelta === undefined ? {} : { textDelta: event.payload.textDelta }),
         });
+      case 'TOOL_STARTED':
+        return sanitizeRecord({ toolName: event.payload.toolName, source: event.payload.source, attempt: event.payload.attempt, ...(event.payload.deadline === undefined ? {} : { deadline: event.payload.deadline }) });
+      case 'TOOL_PROGRESS':
+        return sanitizeRecord({ progress: event.payload.progress, displaySummary: safeText(event.payload.displaySummary) });
+      case 'EVIDENCE_COLLECTED':
+        return sanitizeRecord({ evidenceIds: event.payload.evidenceIds, coverage: event.payload.coverage, source: event.payload.source, summary: safeText(event.payload.summary) });
+      case 'EVIDENCE_COLLECTION_STARTED':
+        return sanitizeRecord({ source: event.payload.source, queryWindow: safeText(event.payload.queryWindow), planItemId: event.payload.planItemId });
+      case 'DIAGNOSIS_COMPLETED':
+        return sanitizeRecord({ outcome: event.payload.outcome, reportId: event.payload.reportId, evidenceIds: event.payload.evidenceIds, limitations: event.payload.limitations.map(safeText) });
       default:
-        return sanitizeRecord(event.payload as unknown as JsonObject);
+        return {};
     }
   }
+}
+
+function safeText(value: string): string {
+  return FORBIDDEN_VALUE.test(value) || INTERNAL_ADDRESS.test(value) ? '[REDACTED]' : value.slice(0, 500);
+}
+
+function pickNumbers(value: JsonObject): JsonObject {
+  const output: JsonObject = {};
+  for (const [key, item] of Object.entries(value)) if (typeof item === 'number' && Number.isFinite(item)) output[key] = item;
+  return output;
 }
 
 function sanitizeRecord(value: JsonObject): JsonObject {
