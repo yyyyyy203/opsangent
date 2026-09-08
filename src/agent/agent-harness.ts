@@ -202,7 +202,6 @@ export class AgentHarness implements DiagnosisAgent {
           results.push(this.deferredResult(deferred));
         }
         const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
-        for (const result of batch.results) await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
         this.appendToolExchange(context, response.text, candidates, orderedResults);
 
         if (batch.interrupt !== undefined) {

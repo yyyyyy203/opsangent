@@ -6,6 +6,9 @@ import type {
   ToolCall,
   ToolResponse,
   ToolExecutionResult,
+  AgentEventPayloadMap,
+  EventFactoryV2Like,
+  EventPublisherV2Like,
 } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
@@ -34,6 +37,7 @@ export class ToolExecutionPipeline {
     private readonly observability: Observability,
     private readonly clock: Clock,
     private readonly options: ExecutionPipelineOptions,
+    private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
   ) {}
 
   public async execute(
@@ -55,6 +59,11 @@ export class ToolExecutionPipeline {
       };
     }
     await this.events.publish(this.eventFactory.create('TOOL_RESULT', context.runId, outcome.result, stepId));
+    await this.publishV2('TOOL_RESULT', context, {
+      result: outcome.result,
+      durationMs: durationOf(outcome.result),
+      evidenceIds: outcome.result.response?.evidenceIds ?? [],
+    }, stepId, call.id);
     return outcome;
   }
 
@@ -88,6 +97,11 @@ export class ToolExecutionPipeline {
     }
     const normalizedCall = { ...call, input: semantics?.value ?? validation.value ?? call.input };
     const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: normalizedCall });
+    await this.publishV2('RISK_EVALUATED', context, {
+      findings: risk.findings.map((finding) => ({ ruleId: finding.ruleId, severity: finding.severity, description: finding.description, toolName: finding.toolName })),
+      mergedRisk: risk.severity,
+      policyVersion: 'guard-v1',
+    }, stepId, call.id);
     const hookContext: HookContext = {
       context,
       stepId,
@@ -143,6 +157,12 @@ export class ToolExecutionPipeline {
       networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
     };
     await this.events.publish(this.eventFactory.create('TOOL_STARTED', context.runId, call, stepId));
+    await this.publishV2('TOOL_STARTED', context, {
+      toolName: tool.name,
+      source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
+      attempt: 1,
+      deadline: new Date(toolContextDeadline(context)).toISOString(),
+    }, stepId, call.id);
     const span = this.observability.startSpan({
       name: `tool.${tool.name}`,
       kind: 'tool',
@@ -154,9 +174,11 @@ export class ToolExecutionPipeline {
 
     try {
       const response = await this.runner.execute(tool, hookContext.input, toolContext, {
-        onChunk: async (chunk) => this.events.publish(
-          this.eventFactory.create('TOOL_PROGRESS', context.runId, { toolCallId: call.id, chunk }, stepId),
-        ),
+        onChunk: async (chunk) => {
+          await this.events.publish(this.eventFactory.create('TOOL_PROGRESS', context.runId, { toolCallId: call.id, chunk }, stepId));
+          if (chunk.type === 'text_delta') await this.publishV2('TOOL_OUTPUT_DELTA', context, { blockId: `tool-output:${call.id}`, textDelta: chunk.delta }, stepId, call.id);
+          if (chunk.type === 'progress') await this.publishV2('TOOL_PROGRESS', context, { progress: chunk.percent === undefined ? 0 : Math.max(0, Math.min(1, chunk.percent / 100)), displaySummary: chunk.message }, stepId, call.id);
+        },
       });
       const result = this.result(call, response.isError === true ? 'failed' : 'success', startedAt, response);
       hookContext.result = result;
@@ -180,6 +202,7 @@ export class ToolExecutionPipeline {
         : toAgentError(error);
       const result = this.result(call, signal.aborted ? 'aborted' : 'failed', startedAt, undefined, agentError);
       span.fail(agentError);
+      await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id);
       return { type: 'completed', result, risk };
     }
   }
@@ -201,4 +224,23 @@ export class ToolExecutionPipeline {
       ...(error === undefined ? {} : { error }),
     };
   }
+
+  private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], stepId: string, toolCallId?: string): Promise<void> {
+    if (this.v2Events === undefined) return Promise.resolve();
+    const pending = this.v2Events.factory.create(type, {
+      runId: context.runId, correlationId: this.v2Events.correlationId(context.runId), visibility: 'audit', durability: type === 'TOOL_OUTPUT_DELTA' ? 'transient' : 'durable', stepId,
+      ...(toolCallId === undefined ? {} : { toolCallId }),
+    }, payload);
+    return this.v2Events.publisher.publish(pending).then(() => undefined);
+  }
+}
+
+function durationOf(result: ToolExecutionResult): number {
+  const start = Date.parse(result.startedAt);
+  const end = result.finishedAt === undefined ? start : Date.parse(result.finishedAt);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+}
+
+function toolContextDeadline(context: AgentContext): number {
+  return Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
 }

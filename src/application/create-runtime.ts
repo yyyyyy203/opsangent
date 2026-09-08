@@ -86,6 +86,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     observability,
     clock,
     { actionMode: options.actionMode ?? 'dry_run' },
+    { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
