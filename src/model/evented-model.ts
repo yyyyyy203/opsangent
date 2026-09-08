@@ -31,7 +31,15 @@ export class EventedChatModel implements ChatModel {
     const messageId = this.config.messageId ?? ids.next('message');
     const blockId = ids.next('block');
     const startedAt = clock.now().getTime();
-    const base = { runId: options.runId, correlationId: typeof this.config.correlationId === 'function' ? this.config.correlationId(options.runId) : this.config.correlationId, stepId: options.stepId, attemptId };
+    const base = {
+      runId: options.runId,
+      ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      ...(options.replyId === undefined ? {} : { replyId: options.replyId }),
+      ...(options.streamId === undefined ? {} : { streamId: options.streamId }),
+      correlationId: typeof this.config.correlationId === 'function' ? this.config.correlationId(options.runId) : this.config.correlationId,
+      stepId: options.stepId,
+      attemptId,
+    };
     await this.publish('MODEL_CALL_STARTED', base, {
       provider: this.config.provider, model: this.config.model, purpose: this.config.purpose, attempt: 1, inputSummary: 'model input available to internal audit only',
     });
@@ -76,11 +84,14 @@ export class EventedChatModel implements ChatModel {
 
   private publish<T extends AgentEventTypeV2>(
     type: T,
-    ids: { runId: string; correlationId: string; stepId?: string; attemptId?: string; toolCallId?: string },
+    ids: { runId: string; sessionId?: string; replyId?: string; streamId?: string; correlationId: string; stepId?: string; attemptId?: string; toolCallId?: string },
     payload: AgentEventPayloadMap[T],
   ): Promise<unknown> {
     const context: EventCreationContextV2 = {
       runId: ids.runId, correlationId: ids.correlationId, visibility: type.startsWith('CONTENT_') || type.startsWith('MESSAGE_') ? 'public' : 'audit', durability: type === 'CONTENT_BLOCK_DELTA' ? 'transient' : 'durable',
+      ...(ids.sessionId === undefined ? {} : { sessionId: ids.sessionId }),
+      ...(ids.replyId === undefined ? {} : { replyId: ids.replyId }),
+      ...(ids.streamId === undefined ? {} : { streamId: ids.streamId }),
       ...(ids.stepId === undefined ? {} : { stepId: ids.stepId }), ...(ids.attemptId === undefined ? {} : { attemptId: ids.attemptId }), ...(ids.toolCallId === undefined ? {} : { toolCallId: ids.toolCallId }),
     };
     const event = this.factory.create(type, context, payload);

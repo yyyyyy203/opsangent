@@ -43,6 +43,9 @@ export type SemanticValidation =
 export interface ToolCallOptions {
   runId: string;
   stepId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
   deadline?: number;

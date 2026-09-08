@@ -10,7 +10,12 @@ import type { ReplayBufferV2 } from './replay-buffer.js';
 
 export interface EventProjectorV2 {
   name: string;
-  project(event: AgentEventEnvelopeV2): Promise<void> | void;
+  project(event: AgentEventEnvelopeV2, options?: EventProjectionOptionsV2): Promise<void> | void;
+  completeReplay?(runId: string, sequence: number): Promise<void> | void;
+}
+
+export interface EventProjectionOptionsV2 {
+  allowSequenceGaps?: boolean;
 }
 
 export interface ProjectionFailureRecordV2 {
@@ -21,6 +26,11 @@ export interface ProjectionFailureRecordV2 {
   errorCode: string;
   message: string;
   attempts: number;
+}
+
+export interface EventReplayOptionsV2 {
+  limit?: number;
+  projectorNames?: readonly string[];
 }
 
 export interface ProjectionFailureSinkV2 {
@@ -66,13 +76,19 @@ export class EventPublisherV2 implements EventPublisherV2Like {
   }
 
   /** Re-dispatches persisted events so projection runners can recover after a process restart. */
-  public async replayRun(runId: string, afterSequence = 0, limit = 1_000): Promise<number> {
+  public async replayRun(runId: string, afterSequence = 0, limit = 1_000, options: EventReplayOptionsV2 = {}): Promise<number> {
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) throw new RangeError('afterSequence must be a non-negative safe integer');
     if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('replay limit must be a positive safe integer');
     const previous = this.tails.get(runId);
     const current = (previous ?? Promise.resolve()).catch(() => undefined).then(async () => {
       const events = await this.store.readRun(runId, afterSequence, limit);
-      for (const event of events) await this.dispatch(event);
+      for (const event of events) await this.dispatch(event, options.projectorNames, { allowSequenceGaps: true });
+      const lastEventSequence = events.at(-1)?.sequence ?? afterSequence;
+      const nextDurable = await this.store.readRun(runId, lastEventSequence, 1);
+      if (nextDurable.length === 0) {
+        const currentSequence = await this.store.currentSequence(runId);
+        await this.completeReplay(runId, currentSequence, options.projectorNames);
+      }
       return events.length;
     });
     const tail = current.then(() => ({}) as AgentEventEnvelopeV2);
@@ -81,6 +97,17 @@ export class EventPublisherV2 implements EventPublisherV2Like {
     finally {
       if (this.tails.get(runId) === tail) this.tails.delete(runId);
     }
+  }
+
+  /** Replays discovered Runs for explicitly selected projectors. */
+  public async replayAll(options: EventReplayOptionsV2 = {}): Promise<number> {
+    if (this.store.listRunIds === undefined) return 0;
+    const limit = options.limit ?? 1_000;
+    if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('replay limit must be a positive safe integer');
+    const runIds = await this.store.listRunIds();
+    let replayed = 0;
+    for (const runId of runIds) replayed += await this.replayRun(runId, 0, limit, options);
+    return replayed;
   }
 
   private async publishOrdered(pending: PendingAgentEventV2): Promise<AgentEventEnvelopeV2> {
@@ -110,9 +137,10 @@ export class EventPublisherV2 implements EventPublisherV2Like {
     return event;
   }
 
-  private async dispatch(event: AgentEventEnvelopeV2): Promise<void> {
-    const projectors = [...this.projectors];
-    const outcomes = await Promise.allSettled(projectors.map(async (projector) => projector.project(structuredClone(event))));
+  private async dispatch(event: AgentEventEnvelopeV2, projectorNames?: readonly string[], options?: EventProjectionOptionsV2): Promise<void> {
+    const allowed = projectorNames === undefined ? undefined : new Set(projectorNames);
+    const projectors = [...this.projectors].filter((projector) => allowed === undefined || allowed.has(projector.name));
+    const outcomes = await Promise.allSettled(projectors.map(async (projector) => projector.project(structuredClone(event), options)));
     const records: Promise<unknown>[] = [];
     outcomes.forEach((outcome, index) => {
       if (outcome.status === 'fulfilled') return;
@@ -121,6 +149,12 @@ export class EventPublisherV2 implements EventPublisherV2Like {
       records.push(Promise.resolve().then(() => this.failures.record(toFailure(event, projector.name, outcome.reason, 1))));
     });
     await Promise.allSettled(records);
+  }
+
+  private async completeReplay(runId: string, sequence: number, projectorNames?: readonly string[]): Promise<void> {
+    const allowed = projectorNames === undefined ? undefined : new Set(projectorNames);
+    const projectors = [...this.projectors].filter((projector) => allowed === undefined || allowed.has(projector.name));
+    await Promise.all(projectors.map((projector) => Promise.resolve(projector.completeReplay?.(runId, sequence))));
   }
 }
 

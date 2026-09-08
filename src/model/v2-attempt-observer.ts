@@ -53,6 +53,9 @@ export class V2ModelAttemptObserver implements ModelAttemptObserver {
     const attemptId = this.attemptIds.get(this.key(event));
     const context: EventCreationContextV2 = {
       runId: event.runId,
+      ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+      ...(event.replyId === undefined ? {} : { replyId: event.replyId }),
+      ...(event.streamId === undefined ? {} : { streamId: event.streamId }),
       correlationId: typeof this.options.correlationId === 'function' ? this.options.correlationId(event.runId) : this.options.correlationId,
       visibility: 'audit',
       durability: 'durable',

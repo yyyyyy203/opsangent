@@ -4,6 +4,9 @@ export interface SpanStart {
   name: string;
   kind: SpanKind;
   runId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   spanKey?: string;
   parentSpanKey?: string;
   correlationId?: string;

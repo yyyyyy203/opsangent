@@ -26,6 +26,9 @@ export class LangSmithObservability implements Observability {
     const metadata = {
       ...input.attributes,
       agentRunId: input.runId,
+      ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+      ...(input.replyId === undefined ? {} : { replyId: input.replyId }),
+      ...(input.streamId === undefined ? {} : { streamId: input.streamId }),
       ...(input.spanKey === undefined ? {} : { spanKey: input.spanKey }),
       ...(input.parentSpanKey === undefined ? {} : { parentSpanKey: input.parentSpanKey }),
       ...(input.correlationId === undefined ? {} : { correlationId: input.correlationId }),

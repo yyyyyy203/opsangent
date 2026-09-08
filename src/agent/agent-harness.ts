@@ -66,7 +66,11 @@ export class AgentHarness implements DiagnosisAgent {
   public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const context = await this.dependencies.checkpoints.load(runId);
     if (context === null) throw new Error(`Checkpoint not found: ${runId}`);
-    await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId: this.dependencies.ids.next('stream') });
+    context.sessionId ??= this.dependencies.ids.next('session');
+    context.replyId ??= this.dependencies.ids.next('reply');
+    const newStreamId = this.dependencies.ids.next('stream');
+    context.streamId = newStreamId;
+    await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId });
     return yield* this.streamContext(context, signal, true);
   }
 
@@ -112,12 +116,14 @@ export class AgentHarness implements DiagnosisAgent {
       });
     }
     let finalText = '';
+    let activeStepId: string | undefined;
+    let activeStepStartedAt: number | undefined;
 
     try {
       delete context.failure;
       const pausedForExternalExecution = await this.resumePendingToolCall(context, signal);
       if (pausedForExternalExecution) {
-        const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+        const result = this.result(context, finalText);
         rootSpan.end(result);
         return result;
       }
@@ -143,6 +149,8 @@ export class AgentHarness implements DiagnosisAgent {
 
         context.budget.iteration += 1;
         const stepId = this.dependencies.ids.next('step');
+        activeStepId = stepId;
+        activeStepStartedAt = this.dependencies.clock.now().getTime();
         await this.publish('STEP_STARTED', context, { iteration: context.budget.iteration }, stepId);
         await this.publish('REASONING_STARTED', context, { stage: context.stage }, stepId);
         await this.publishV2('STEP_STARTED', context, { iteration: context.budget.iteration, stage: context.stage, budgetSnapshot: { toolCallsUsed: context.budget.toolCallsUsed } }, stepId);
@@ -162,9 +170,16 @@ export class AgentHarness implements DiagnosisAgent {
           this.appendToolExchange(context, response.text, candidates, []);
           context.status = 'completed';
           await this.dependencies.checkpoints.save(context);
+          await this.publishV2('STEP_COMPLETED', context, {
+            iteration: context.budget.iteration,
+            exitDecision: 'complete',
+            durationMs: this.stepDuration(activeStepStartedAt),
+          }, stepId);
+          activeStepId = undefined;
+          activeStepStartedAt = undefined;
           await this.publish('RUN_FINISHED', context, { finalText });
           await this.publishV2('RUN_FINISHED', context, { outcome: 'complete', durationMs: this.elapsed(context) });
-          const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+          const result = this.result(context, finalText);
           rootSpan.end(result);
           return result;
         }
@@ -173,7 +188,12 @@ export class AgentHarness implements DiagnosisAgent {
           await this.publish('TOOL_CALL_CREATED', context, { id: call.id, name: call.name }, stepId);
         }
         const admission = admitToolBatch(candidates, context, this.dependencies.admission, this.dependencies.clock, signal);
-        for (const repair of admission.repairs) await this.publish('TOOL_PROGRESS', context, repair, stepId);
+        for (const repair of admission.repairs) {
+          await this.publish('TOOL_PROGRESS', context, repair, stepId);
+          await this.publishV2('TOOL_CALL_REPAIR_COMPLETED', context, {
+            strategy: 'json_syntax_repair', changedPaths: repair.repairs, attempt: 1,
+          }, stepId, repair.toolCallId);
+        }
         for (const gate of admission.gates) {
           for (const record of gate.records) {
             await this.publishV2('TOOL_CALL_ADMISSION_UPDATED', context, {
@@ -235,14 +255,33 @@ export class AgentHarness implements DiagnosisAgent {
             expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
             checkpointVersion: String(context.contextVersion),
           }, stepId);
-          const result = { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+          await this.publishV2('STEP_COMPLETED', context, {
+            iteration: context.budget.iteration,
+            exitDecision: context.status === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'external_execution',
+            durationMs: this.stepDuration(activeStepStartedAt),
+          }, stepId);
+          activeStepId = undefined;
+          activeStepStartedAt = undefined;
+          const result = this.result(context, finalText);
           rootSpan.end(result);
           return result;
         }
 
         context.pendingToolCalls = [];
-        context.stage = this.nextStage(admission.calls);
+        const nextStage = this.nextStage(admission.calls);
+        if (nextStage !== context.stage) {
+          const previousStage = context.stage;
+          context.stage = nextStage;
+          await this.publishV2('STAGE_CHANGED', context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
+        }
         await this.dependencies.checkpoints.save(context);
+        await this.publishV2('STEP_COMPLETED', context, {
+          iteration: context.budget.iteration,
+          exitDecision: 'continue',
+          durationMs: this.stepDuration(activeStepStartedAt),
+        }, stepId);
+        activeStepId = undefined;
+        activeStepStartedAt = undefined;
       }
       throw new Error('Agent iteration budget exhausted.');
     } catch (error) {
@@ -256,9 +295,26 @@ export class AgentHarness implements DiagnosisAgent {
         retryable: failure.retryable,
         category: failure.details?.category,
       });
-      await this.publishV2('RUN_FAILED', context, { error: { code: failure.code, message: failure.message, retryable: failure.retryable }, stage: context.stage, recoverable: failure.retryable });
+      const failureCategory = typeof failure.details?.category === 'string' ? failure.details.category : undefined;
+      if (activeStepId !== undefined && context.budget.iteration > 0) {
+        await this.publishV2('STEP_FAILED', context, {
+          iteration: context.budget.iteration,
+          error: eventError(failure),
+          retryable: failure.retryable,
+        }, activeStepId);
+      }
+      await this.publishV2('RUN_FAILED', context, {
+        error: {
+          code: failure.code,
+          message: failure.message,
+          retryable: failure.retryable,
+          ...(failureCategory === undefined ? {} : { details: { category: failureCategory } }),
+        },
+        stage: context.stage,
+        recoverable: failure.retryable,
+      });
       rootSpan.fail(error);
-      return { runId: context.runId, status: context.status, finalText, contextVersion: context.contextVersion };
+      return this.result(context, finalText);
     } finally {
       await this.dependencies.observability.flush();
     }
@@ -313,7 +369,13 @@ export class AgentHarness implements DiagnosisAgent {
     });
     const deadline = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
     const stream = this.dependencies.model.stream(context.messages, this.dependencies.toolkit.list(), {
-      signal, runId: context.runId, stepId, deadline,
+      signal,
+      runId: context.runId,
+      stepId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+      deadline,
     });
     try {
       while (true) {
@@ -341,6 +403,9 @@ export class AgentHarness implements DiagnosisAgent {
     };
     return {
       runId,
+      sessionId: options.sessionId ?? this.dependencies.ids.next('session'),
+      replyId: options.replyId ?? this.dependencies.ids.next('reply'),
+      streamId: this.dependencies.ids.next('stream'),
       status: 'running',
       stage: 'triage',
       profileId: options.profileId,
@@ -360,6 +425,18 @@ export class AgentHarness implements DiagnosisAgent {
         maxDurationMs: options.maxDurationMs ?? 120_000,
       },
       contextVersion: 1,
+    };
+  }
+
+  private result(context: AgentContext, finalText: string): DiagnosisRunResult {
+    return {
+      runId: context.runId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+      status: context.status,
+      finalText,
+      contextVersion: context.contextVersion,
     };
   }
 
@@ -411,6 +488,7 @@ export class AgentHarness implements DiagnosisAgent {
     payload: AgentEvent['payload'],
     stepId?: string,
   ): Promise<void> {
+    if (this.dependencies.v2Events !== undefined) return Promise.resolve();
     const event = this.dependencies.eventFactory.create(type, context.runId, payload, stepId);
     const sink: EventSink = this.dependencies.events;
     return Promise.resolve(sink.publish(event));
@@ -427,6 +505,9 @@ export class AgentHarness implements DiagnosisAgent {
     if (v2 === undefined) return Promise.resolve();
     const pending: PendingAgentEventV2<T> = v2.factory.create(type, {
       runId: context.runId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       correlationId: typeof v2.correlationId === 'function' ? v2.correlationId(context.runId) : v2.correlationId,
       visibility: type.startsWith('RUN_') || type.startsWith('STEP_') || type === 'REASONING_STARTED' ? 'public' : 'audit',
       durability: 'durable',
@@ -438,6 +519,10 @@ export class AgentHarness implements DiagnosisAgent {
 
   private elapsed(context: AgentContext): number {
     return Math.max(0, this.dependencies.clock.now().getTime() - Date.parse(context.budget.startedAt));
+  }
+
+  private stepDuration(startedAt: number | undefined): number {
+    return startedAt === undefined ? 0 : Math.max(0, this.dependencies.clock.now().getTime() - startedAt);
   }
 }
 

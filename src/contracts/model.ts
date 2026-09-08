@@ -17,6 +17,9 @@ export interface ModelCallOptions {
   signal: AbortSignal;
   runId: string;
   stepId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   deadline?: number;
 }
 

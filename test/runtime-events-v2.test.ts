@@ -15,7 +15,7 @@ describe('runtime V2 event wiring', () => {
     expect(events.map((item) => item.type)).toEqual([
       'RUN_STARTED', 'STEP_STARTED', 'REASONING_STARTED', 'MODEL_CALL_STARTED',
       'MESSAGE_STARTED', 'CONTENT_BLOCK_STARTED', 'CONTENT_BLOCK_COMPLETED',
-      'MESSAGE_COMPLETED', 'MODEL_CALL_COMPLETED', 'RUN_FINISHED',
+      'MESSAGE_COMPLETED', 'MODEL_CALL_COMPLETED', 'STEP_COMPLETED', 'RUN_FINISHED',
     ]);
     expect(runtime.replayV2.readAfter(result.runId, 0).map((item) => item.type)).toContain('CONTENT_BLOCK_DELTA');
     expect(events.every((item) => item.runId === result.runId)).toBe(true);
@@ -58,5 +58,21 @@ describe('runtime V2 event wiring', () => {
     expect(events.map((item) => item.type)).toContain('MODEL_CALL_FAILED');
     expect(events.map((item) => item.type)).toContain('MODEL_FALLBACK_ACTIVATED');
     expect(events.at(-1)?.type).toBe('RUN_FINISHED');
+  });
+
+  it('records a failed step before the terminal run failure', async () => {
+    const model: ChatModel = {
+      async *stream() {
+        await Promise.resolve();
+        yield* [];
+        throw new ModelFailure('server', 'unavailable', false);
+      },
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [] });
+    const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
+    const events = await runtime.eventStoreV2.readRun(result.runId, 0, 100);
+    const types = events.map((item) => item.type);
+    expect(types).toContain('STEP_FAILED');
+    expect(types.indexOf('STEP_FAILED')).toBeLessThan(types.indexOf('RUN_FAILED'));
   });
 });

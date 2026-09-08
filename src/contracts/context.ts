@@ -17,6 +17,9 @@ export interface BudgetState {
 
 export interface AgentContext {
   runId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   status: RunStatus;
   stage: DiagnosisStage;
   profileId: string;

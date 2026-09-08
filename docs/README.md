@@ -27,7 +27,7 @@
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：已有基础 Harness、Tool 执行管线、四道闸门及有界 LLM 纠错、Hook/Guard、内存存储和 LangSmith 适配器骨架；Event/Message 仍是 V1。Event/Message V2 已确定为一期首个完整协议层，生产 Registry、真实数据源 MCP/Subagent、SQLite、API、前端与模拟环境仍待实现，详见实现进度。
+- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地；真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期接入仍按实现进度推进。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
 

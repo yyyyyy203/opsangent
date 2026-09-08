@@ -144,10 +144,7 @@ export class EventStreamService {
     return stored
       .map(({ message }) => message)
       .filter((message) => message.visibility !== 'audit')
-      .map((message) => ({
-        ...message,
-        blocks: message.blocks.filter((block) => block.type !== 'raw_tool_call'),
-      }));
+      .map((message) => publicMessageSnapshot(message));
   }
 
   private messageSnapshotFrame(runId: string, messages: AgentMessageV2[]): SseFrame {
@@ -161,6 +158,18 @@ export class EventStreamService {
     seenSequences.add(event.sequence);
     return { id: event.eventId, event: event.type, data: event as unknown as JsonObject };
   }
+}
+
+function publicMessageSnapshot(message: AgentMessageV2): AgentMessageV2 {
+  const snapshot = structuredClone(message);
+  delete snapshot.metadata;
+  snapshot.blocks = snapshot.blocks
+    .filter((block) => block.type !== 'raw_tool_call')
+    .map((block) => {
+      delete block.metadata;
+      return block;
+    });
+  return snapshot;
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {

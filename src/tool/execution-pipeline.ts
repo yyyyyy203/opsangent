@@ -1,5 +1,6 @@
 import type {
   AgentContext,
+  AgentEvent,
   Clock,
   EventSink,
   Observability,
@@ -58,7 +59,7 @@ export class ToolExecutionPipeline {
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
       };
     }
-    await this.events.publish(this.eventFactory.create('TOOL_RESULT', context.runId, outcome.result, stepId));
+    await this.publishLegacy(() => this.eventFactory.create('TOOL_RESULT', context.runId, outcome.result, stepId));
     await this.publishV2('TOOL_RESULT', context, {
       result: outcome.result,
       durationMs: durationOf(outcome.result),
@@ -144,19 +145,22 @@ export class ToolExecutionPipeline {
         },
       };
       const result = this.result(call, 'awaiting_external', startedAt);
-      await this.events.publish(this.eventFactory.create('EXTERNAL_TOOL_REQUESTED', context.runId, interrupt, stepId));
+      await this.publishLegacy(() => this.eventFactory.create('EXTERNAL_TOOL_REQUESTED', context.runId, interrupt, stepId));
       return { type: 'interrupted', result, risk, interrupt };
     }
 
     const toolContext = {
       runId: context.runId,
       stepId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       signal,
       mode: tool.kind === 'action' ? this.options.actionMode : 'execute' as const,
       deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,
       networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
     };
-    await this.events.publish(this.eventFactory.create('TOOL_STARTED', context.runId, call, stepId));
+    await this.publishLegacy(() => this.eventFactory.create('TOOL_STARTED', context.runId, call, stepId));
     await this.publishV2('TOOL_STARTED', context, {
       toolName: tool.name,
       source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
@@ -175,7 +179,7 @@ export class ToolExecutionPipeline {
     try {
       const response = await this.runner.execute(tool, hookContext.input, toolContext, {
         onChunk: async (chunk) => {
-          await this.events.publish(this.eventFactory.create('TOOL_PROGRESS', context.runId, { toolCallId: call.id, chunk }, stepId));
+          await this.publishLegacy(() => this.eventFactory.create('TOOL_PROGRESS', context.runId, { toolCallId: call.id, chunk }, stepId));
           if (chunk.type === 'text_delta') await this.publishV2('TOOL_OUTPUT_DELTA', context, { blockId: `tool-output:${call.id}`, textDelta: chunk.delta }, stepId, call.id);
           if (chunk.type === 'progress') await this.publishV2('TOOL_PROGRESS', context, { progress: chunk.percent === undefined ? 0 : Math.max(0, Math.min(1, chunk.percent / 100)), displaySummary: chunk.message }, stepId, call.id);
         },
@@ -228,10 +232,22 @@ export class ToolExecutionPipeline {
   private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], stepId: string, toolCallId?: string): Promise<void> {
     if (this.v2Events === undefined) return Promise.resolve();
     const pending = this.v2Events.factory.create(type, {
-      runId: context.runId, correlationId: this.v2Events.correlationId(context.runId), visibility: 'audit', durability: type === 'TOOL_OUTPUT_DELTA' ? 'transient' : 'durable', stepId,
+      runId: context.runId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+      correlationId: this.v2Events.correlationId(context.runId),
+      visibility: 'audit',
+      durability: type === 'TOOL_OUTPUT_DELTA' ? 'transient' : 'durable',
+      stepId,
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
     return this.v2Events.publisher.publish(pending).then(() => undefined);
+  }
+
+  private publishLegacy(create: () => AgentEvent): Promise<void> {
+    if (this.v2Events !== undefined) return Promise.resolve();
+    return Promise.resolve(this.events.publish(create()));
   }
 }
 

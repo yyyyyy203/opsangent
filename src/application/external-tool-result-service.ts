@@ -90,15 +90,20 @@ export class ExternalToolResultService {
     context.stage = pending.name === 'bash' ? 'verification' : context.stage;
     context.contextVersion += 1;
     await this.checkpoints.save(context);
-    await this.events.publish(this.eventFactory.create(
-      'TOOL_RESULT',
-      context.runId,
-      replacement,
-      `external-${pending.id}`,
-    ));
+    if (this.v2Events === undefined) {
+      await this.events.publish(this.eventFactory.create(
+        'TOOL_RESULT',
+        context.runId,
+        replacement,
+        `external-${pending.id}`,
+      ));
+    }
     if (this.v2Events !== undefined) {
       const pendingEvent = this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
         runId: context.runId,
+        ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+        ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+        ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
         correlationId: this.v2Events.correlationId(context.runId),
         visibility: 'audit',
         durability: 'durable',
@@ -109,6 +114,16 @@ export class ExternalToolResultService {
         externalExecutionType: 'host_submission',
       });
       await this.v2Events.publisher.publish(pendingEvent);
+      await this.v2Events.publisher.publish(this.v2Events.factory.create('TOOL_RESULT', {
+        runId: context.runId,
+        ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+        ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+        ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+        correlationId: this.v2Events.correlationId(context.runId),
+        visibility: 'audit',
+        durability: 'durable',
+        toolCallId: pending.id,
+      }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }));
     }
   }
 }

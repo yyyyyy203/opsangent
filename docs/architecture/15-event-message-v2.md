@@ -309,7 +309,7 @@ Message 是可持久化的逻辑消息，Event 是消息和运行状态发生变
       └── V1CompatibilityProjector：为旧消费者生成 V1 事件
 ```
 
-durable 事件进入 EventStore，transient Delta 进入有界 ReplayBuffer 并在 Message 快照中收敛。投影器必须是确定性、可重放、可单测的纯转换或幂等消费者。投影状态带最后消费 `sequence`；durable 事实重启后从 EventStore 补放，transient Delta 超出窗口后用 Message 快照恢复。LangSmith 不可用时不影响 Run；失败记录本地并有界重试。
+durable 事件进入 EventStore，transient Delta 进入有界 ReplayBuffer 并在 Message 快照中收敛。投影器必须是确定性、可重放、可单测的纯转换或幂等消费者。投影状态带最后消费 `sequence`；启动时 runtime 通过 `ready` 自动补放可发现的 Run。在线投影仍严格保持顺序，显式 replay 才允许跳过未持久化 transient 造成的序列空洞，并在完整回放后推进 checkpoint 水位。未完成 Message assembly 会保存受控的内部状态，终态时移除；LangSmith 不可用时不影响 Run，历史 LangSmith 补报不由默认启动恢复自动触发。
 
 SSE 使用 `eventId` 作为 `id`，客户端通过 `Last-Event-ID` 请求补放。若请求早于 Delta 保留窗口，服务端返回最新完整 Message 快照和后续 durable 事件，而不是假装所有字符 Delta 仍可恢复。
 
@@ -424,8 +424,8 @@ TOOL_CALL_CREATED(metrics_subagent)
 
 ## 13. 当前实现状态
 
-截至 2026-09-09，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 生产点、AsyncGenerator 重试适配和 Node HTTP/SSE 回放服务已经落地。SSE 使用 `eventId` 作为 cursor；transient Delta 超出窗口时用已保存的用户可见 Message 快照恢复。默认 runtime 可以在内存或 SQLite 之间组装，SQLite 保存事件、消息终态、投影 checkpoint 和失败记录。
+截至 2026-09-09，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 生产点、身份链路、AsyncGenerator 重试适配和 Node HTTP/SSE 回放服务已经落地。SSE 使用 `eventId` 作为 cursor；transient Delta 超出窗口时用已保存的用户可见 Message 快照恢复。默认 runtime 可以在内存或 SQLite 之间组装，SQLite 保存事件、消息中间/终态、投影 checkpoint 和失败记录，并通过 `ready` 完成本地投影启动恢复。
 
-V2 核心验收已覆盖 V1 fixture 读取、V2→V1 投影、并行工具配对、公共脱敏、模型 fallback、SQLite 重启恢复和 HTTP/SSE 入口；最终全量测试为 40 个文件通过、1 个真实 Prometheus 文件跳过，203 项通过、1 项跳过，lint/typecheck/build 均通过。
+V2 核心验收已覆盖 V1 fixture 读取、V2→V1 单向投影、并行工具配对、公共事件/消息快照脱敏、模型 fallback 与身份链路、SQLite 重启及 transient 序列空洞恢复和 HTTP/SSE 入口；全量测试为 41 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，211 项通过、1 项跳过，lint/typecheck/build 均通过。
 
-完整生产一期仍有边界：Legacy EventBus 尚未完全收敛为 V2→V1 单向投影；投影 pending 队列和未完成消息 assembly 未自动持久化恢复；MCP/压缩/Memory 生命周期事件尚未全部由真实操作触发；前端、真实模型/生产数据源和真实 Prometheus 默认验收仍待后续接入。本文是目标设计与当前状态说明；具体完成度以 [`docs/event-message-v2-acceptance-status.md`](../event-message-v2-acceptance-status.md) 的验证记录为准。
+完整生产一期仍有边界：MCP/压缩/Memory 生命周期事件尚未全部由真实操作触发；跨多页超大 Run 的后台回放调度、前端、真实模型/生产数据源和真实 Prometheus 默认验收仍待后续接入。本文是目标设计与当前状态说明；具体完成度以 [`docs/event-message-v2-acceptance-status.md`](../event-message-v2-acceptance-status.md) 的验证记录为准。

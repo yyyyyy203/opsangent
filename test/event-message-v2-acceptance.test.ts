@@ -49,4 +49,25 @@ describe('Event/Message V2一期 acceptance', () => {
     };
     expect(projector.project(event)).toBeNull();
   });
+
+  it('keeps session, reply, and stream identities on the run result and every V2 event', async () => {
+    let id = 0;
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'done', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      ids: { next: (prefix) => ['reply', 'stream'].includes(prefix) ? `${prefix}-fixed` : `${prefix}-${++id}` },
+    });
+    const result = await runtime.agent.reply({
+      sessionId: 'session-fixed',
+      message: 'inspect',
+      profileId: 'group-buy-market',
+    });
+    const events = await runtime.eventStoreV2.readRun(result.runId, 0, 100);
+
+    expect(result).toMatchObject({ sessionId: 'session-fixed', replyId: 'reply-fixed', streamId: 'stream-fixed' });
+    expect(events.every((event) => event.sessionId === 'session-fixed')).toBe(true);
+    expect(events.every((event) => event.replyId === 'reply-fixed')).toBe(true);
+    expect(events.every((event) => event.streamId === 'stream-fixed')).toBe(true);
+  });
 });

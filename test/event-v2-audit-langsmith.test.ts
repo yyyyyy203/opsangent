@@ -90,7 +90,7 @@ describe('LangSmithEventProjectorV2', () => {
 
     await projector.project(event('RUN_STARTED', {
       profile: 'group-buy-market', trigger: 'manual', deadline: '2026-09-07T10:30:00.000Z', versionSnapshot: {},
-    }));
+    }, { sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-1' }));
     await projector.project(event('MODEL_CALL_STARTED', {
       provider: 'openai-compatible', model: 'deepseek-chat', purpose: 'diagnosis', attempt: 1, inputSummary: 'safe summary',
     }, { attemptId: 'attempt-1' }));
@@ -102,7 +102,7 @@ describe('LangSmithEventProjectorV2', () => {
     }, { parentRunId: 'run-1', toolCallId: 'tool-1' }));
 
     expect(observability.starts).toEqual([
-      expect.objectContaining({ name: 'agent.run', kind: 'chain', runId: 'run-1', spanKey: 'run:run-1' }),
+      expect.objectContaining({ name: 'agent.run', kind: 'chain', runId: 'run-1', spanKey: 'run:run-1', sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-1' }),
       expect.objectContaining({ name: 'model.deepseek-chat', kind: 'llm', runId: 'run-1', spanKey: 'model:run-1:attempt-1', parentSpanKey: 'run:run-1' }),
       expect.objectContaining({ name: 'tool.metrics_subagent', kind: 'tool', runId: 'run-1', spanKey: 'tool:run-1:tool-1:tool-attempt-1', parentSpanKey: 'run:run-1' }),
       expect.objectContaining({ name: 'subagent.metrics', kind: 'chain', runId: 'child-run-1', spanKey: 'run:child-run-1', parentSpanKey: 'run:run-1' }),

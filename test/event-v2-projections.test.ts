@@ -75,4 +75,19 @@ describe('PublicEventProjectorV2', () => {
       messageId: 'message-1', blockId: 'block-1', delta: 'open http://127.0.0.1/admin', index: 0,
     }))).toBeNull();
   });
+
+  it('preserves safe run identities and lifecycle payloads in the public view', () => {
+    const input = event('RUN_RESUMED', {
+      checkpointVersion: '3', resumeReason: 'explicit_resume', newStreamId: 'stream-2',
+    });
+    input.sessionId = 'session-1';
+    input.replyId = 'reply-1';
+    input.streamId = 'stream-2';
+    const projected = new PublicEventProjectorV2().project(input);
+    expect(projected).toMatchObject({
+      sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-2',
+      type: 'RUN_RESUMED',
+      payload: { checkpointVersion: '3', resumeReason: 'explicit_resume', newStreamId: 'stream-2' },
+    });
+  });
 });

@@ -4,9 +4,9 @@
 
 2026-09-09：完成 Event/Message V2 核心验收收口。V2 MessageBlock 契约、Event PayloadMap/Schema、EventStore/MessageStore、内存与 SQLite 持久化、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 运行时事件和 Node HTTP/SSE 入口均已落地。
 
-本轮补充 V1 fixture、V2→V1 投影、并行工具 ToolCall/ToolResult 配对、公共投影脱敏验收，并修复模型层提前发布 `TOOL_CALL_CREATED` 导致的重复事件。`RetryingChatModel` 保持 AsyncGenerator 语义：首个流事件前才重试，部分输出后不重放，支持 Abort、fallback 和模型尝试事件。SQLite runtime 支持 WAL、checkpoint/failure 持久化、终态消息重启恢复和事件重放。
+本轮补充 V1 fixture、V2→V1 单向投影、并行工具 ToolCall/ToolResult 配对、公共事件/消息快照脱敏、模型身份链路、SQLite 重启和 transient 序列空洞恢复验收，并修复模型层提前发布 `TOOL_CALL_CREATED` 导致的重复事件。`RetryingChatModel` 保持 AsyncGenerator 语义：首个流事件前才重试，部分输出后不重放，支持 Abort、fallback 和模型尝试事件。消息 assembly 中间状态可恢复；V2 runtime 暴露 `ready` 执行本地投影启动回放，LangSmith 历史补报保持显式选择。
 
-最终验证记录：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；全量测试为 40 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，203 项通过、1 项跳过。核心协议已验收，但完整生产一期仍保留若干明确缺口，详见 [Event / Message V2 一期验收状态](./event-message-v2-acceptance-status.md)。
+最终验证记录：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；全量测试为 41 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，211 项通过、1 项跳过。核心协议已验收，但完整生产一期仍保留若干明确缺口，详见 [Event / Message V2 一期验收状态](./event-message-v2-acceptance-status.md)。
 
 ## 设计决策：Event / Message V2 作为一期协议地基
 

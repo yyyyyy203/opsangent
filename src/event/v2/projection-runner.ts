@@ -1,6 +1,7 @@
 import type { AgentEventEnvelopeV2 } from '../../contracts/index.js';
 import type {
   EventProjectorV2,
+  EventProjectionOptionsV2,
   ProjectionFailureSinkV2,
 } from './event-publisher.js';
 import { toFailure } from './event-publisher.js';
@@ -60,12 +61,13 @@ export class ProjectionRunnerV2 implements EventProjectorV2 {
     }
   }
 
-  public async project(event: AgentEventEnvelopeV2): Promise<void> {
+  public async project(event: AgentEventEnvelopeV2, options: EventProjectionOptionsV2 = {}): Promise<void> {
+    const allowSequenceGaps = options.allowSequenceGaps === true;
     const events = this.pending.get(event.runId) ?? new Map<number, AgentEventEnvelopeV2>();
     events.set(event.sequence, structuredClone(event));
     this.pending.set(event.runId, events);
     const previous = this.tails.get(event.runId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => this.processPending(event.runId));
+    const current = previous.catch(() => undefined).then(async () => this.processPending(event.runId, allowSequenceGaps));
     this.tails.set(event.runId, current);
     try {
       await current;
@@ -74,13 +76,31 @@ export class ProjectionRunnerV2 implements EventProjectorV2 {
     }
   }
 
-  private async processPending(runId: string): Promise<void> {
+  public async completeReplay(runId: string, sequence: number): Promise<void> {
+    const previous = this.tails.get(runId) ?? Promise.resolve();
+    const current = previous.catch(() => undefined).then(async () => {
+      await this.processPending(runId, true);
+      const pending = this.pending.get(runId);
+      if (pending !== undefined && pending.size > 0) return;
+      const checkpoint = await this.checkpoints.load(this.projector.name, runId);
+      if (checkpoint < sequence) await this.checkpoints.save(this.projector.name, runId, checkpoint, sequence);
+    });
+    this.tails.set(runId, current);
+    try { await current; }
+    finally {
+      if (this.tails.get(runId) === current) this.tails.delete(runId);
+    }
+  }
+
+  private async processPending(runId: string, allowSequenceGaps: boolean): Promise<void> {
     const events = this.pending.get(runId);
     if (!events) return;
 
     while (events.size > 0) {
       const checkpoint = await this.checkpoints.load(this.projector.name, runId);
-      const event = events.get(checkpoint + 1);
+      const event = events.get(checkpoint + 1) ?? (allowSequenceGaps ? [...events.entries()]
+        .filter(([sequence]) => sequence > checkpoint)
+        .sort(([left], [right]) => left - right)[0]?.[1] : undefined);
       if (!event) {
         for (const sequence of events.keys()) {
           if (sequence <= checkpoint) events.delete(sequence);

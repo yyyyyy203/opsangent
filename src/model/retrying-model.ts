@@ -10,7 +10,7 @@ export interface RetryingChatModelOptions {
   fallback?: ChatModel;
   fallbackProvider?: string;
   fallbackModel?: string;
-  onFallback?: (info: { runId: string; stepId: string; reason: ModelFailure; fromAttempt: number }) => void | Promise<void>;
+  onFallback?: (info: { runId: string; stepId: string; sessionId?: string; replyId?: string; streamId?: string; reason: ModelFailure; fromAttempt: number }) => void | Promise<void>;
 }
 
 /** Retries only failures that happen before any stream item is exposed to the caller. */
@@ -36,15 +36,15 @@ export class RetryingChatModel implements ChatModel {
         if (error instanceof ExposedStreamFailure) throw error.originalError;
         const failure = asModelFailure(error);
         lastError = failure;
-        await this.options.observer!.record({ type: 'failed', runId: callOptions.runId, stepId: callOptions.stepId, attempt, category: categoryOf(failure), retryable: failure.retryable });
+        await this.options.observer!.record({ type: 'failed', runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), attempt, category: categoryOf(failure), retryable: failure.retryable });
         if (!failure.retryable || attempt >= this.options.maxAttempts) break;
         const delayMs = this.delay(attempt, failure);
-        await this.options.observer!.record({ type: 'retry_scheduled', runId: callOptions.runId, stepId: callOptions.stepId, attempt, category: categoryOf(failure), delayMs });
+        await this.options.observer!.record({ type: 'retry_scheduled', runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), attempt, category: categoryOf(failure), delayMs });
         await this.options.sleep!(delayMs, callOptions.signal);
       }
     }
     if (this.options.fallback !== undefined) {
-      if (lastError !== undefined) await this.options.onFallback?.({ runId: callOptions.runId, stepId: callOptions.stepId, reason: lastError, fromAttempt: this.options.maxAttempts });
+      if (lastError !== undefined) await this.options.onFallback?.({ runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), reason: lastError, fromAttempt: this.options.maxAttempts });
       return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1);
     }
     throw lastError ?? new ModelFailure('protocol', 'Model call failed without an error.', false);
@@ -53,14 +53,14 @@ export class RetryingChatModel implements ChatModel {
   private async *runAttempt(
     model: ChatModel, messages: AgentMessage[], tools: Tool[], options: ModelCallOptions, attempt: number,
   ): AsyncGenerator<ModelStreamEvent, ModelResponse> {
-    await this.options.observer!.record({ type: 'started', runId: options.runId, stepId: options.stepId, attempt });
+    await this.options.observer!.record({ type: 'started', runId: options.runId, stepId: options.stepId, ...identityFields(options), attempt });
     const upstream = model.stream(messages, tools, options);
     let exposed = false;
     try {
       while (true) {
         const item = await upstream.next();
         if (item.done) {
-          await this.options.observer!.record({ type: 'succeeded', runId: options.runId, stepId: options.stepId, attempt, usage: item.value.usage });
+          await this.options.observer!.record({ type: 'succeeded', runId: options.runId, stepId: options.stepId, ...identityFields(options), attempt, ...(item.value.usage === undefined ? {} : { usage: item.value.usage }) });
           return item.value;
         }
         exposed = true;
@@ -77,6 +77,14 @@ export class RetryingChatModel implements ChatModel {
     if (!Number.isFinite(value) || value < 0) throw new RangeError('retry delay must be finite and non-negative');
     return Math.floor(value);
   }
+}
+
+function identityFields(options: Pick<ModelCallOptions, 'sessionId' | 'replyId' | 'streamId'>): { sessionId?: string; replyId?: string; streamId?: string } {
+  return {
+    ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+    ...(options.replyId === undefined ? {} : { replyId: options.replyId }),
+    ...(options.streamId === undefined ? {} : { streamId: options.streamId }),
+  };
 }
 
 class ExposedStreamFailure extends Error {

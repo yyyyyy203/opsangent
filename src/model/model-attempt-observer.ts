@@ -2,11 +2,14 @@ import type { ModelResponse } from '../contracts/model.js';
 import type { ModelFailureCategory } from './model-failure.js';
 
 export type ModelAttemptEvent =
-  | { type: 'started'; runId: string; stepId: string; attempt: number }
+  | { type: 'started'; runId: string; stepId: string; sessionId?: string; replyId?: string; streamId?: string; attempt: number }
   | {
     type: 'retry_scheduled';
     runId: string;
     stepId: string;
+    sessionId?: string;
+    replyId?: string;
+    streamId?: string;
     attempt: number;
     category: ModelFailureCategory;
     delayMs: number;
@@ -15,6 +18,9 @@ export type ModelAttemptEvent =
     type: 'succeeded';
     runId: string;
     stepId: string;
+    sessionId?: string;
+    replyId?: string;
+    streamId?: string;
     attempt: number;
     usage?: ModelResponse['usage'];
   }
@@ -22,6 +28,9 @@ export type ModelAttemptEvent =
     type: 'failed';
     runId: string;
     stepId: string;
+    sessionId?: string;
+    replyId?: string;
+    streamId?: string;
     attempt: number;
     category: ModelFailureCategory;
     retryable: boolean;

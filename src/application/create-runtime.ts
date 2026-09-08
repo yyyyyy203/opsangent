@@ -25,6 +25,7 @@ import { EventPublisherV2, InMemoryProjectionFailureSink } from '../event/v2/eve
 import { InMemoryEventMessageStore } from '../event/v2/in-memory-event-store.js';
 import { ReplayBufferV2 } from '../event/v2/replay-buffer.js';
 import { PublicEventProjectorV2 } from '../event/projectors/public-projector.js';
+import { V1CompatibilityProjector } from '../event/projectors/v1-projector.js';
 import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
 import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
 import { EventStreamService } from '../api/event-stream-service.js';
@@ -77,6 +78,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const projectionFailuresV2 = sqliteDatabase === undefined ? new InMemoryProjectionFailureSink() : new SqliteProjectionFailureSink(sqliteDatabase);
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
   const eventFactoryV2 = new EventFactoryV2(clock, ids);
+  const v1ProjectorV2 = new V1CompatibilityProjector();
+  eventPublisherV2.subscribe({
+    name: 'v1-event-bus',
+    project: (event) => Promise.all(v1ProjectorV2.project(event).map((legacy) => events.publish(legacy))).then(() => undefined),
+  });
   const projectionCheckpointsV2 = sqliteDatabase === undefined ? new InMemoryProjectionCheckpointStore() : new SqliteProjectionCheckpointStore(sqliteDatabase);
   const auditProjectorV2 = new AuditProjectorV2();
   const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
@@ -87,6 +93,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   eventPublisherV2.subscribe(langSmithProjectionRunnerV2);
   eventPublisherV2.subscribe({ name: 'message-assembler', project: (event) => messageAssemblerV2.apply(event).then(() => undefined) });
   const publicProjectorV2 = new PublicEventProjectorV2();
+  // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
+  const ready = eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler', 'v1-event-bus'] });
   const model = options.modelRetry === undefined
     ? options.model
     : new RetryingChatModel(options.model, {
@@ -189,6 +197,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     projectionCheckpointsV2,
     auditProjectionRunnerV2,
     langSmithProjectionRunnerV2,
+    ready,
     messageAssemblerV2,
     replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),

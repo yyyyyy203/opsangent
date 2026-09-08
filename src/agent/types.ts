@@ -4,6 +4,8 @@ export interface ReplyOptions {
   message: string;
   profileId: string;
   runId?: string;
+  sessionId?: string;
+  replyId?: string;
   signal?: AbortSignal;
   maxIterations?: number;
   maxToolCalls?: number;
@@ -12,6 +14,9 @@ export interface ReplyOptions {
 
 export interface DiagnosisRunResult {
   runId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   status: AgentContext['status'];
   finalText: string;
   contextVersion: number;

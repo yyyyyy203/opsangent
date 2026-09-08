@@ -7,6 +7,9 @@ export interface PublicAgentEventV2 {
   sequence: number;
   type: string;
   runId: string;
+  sessionId?: string;
+  replyId?: string;
+  streamId?: string;
   stepId?: string;
   correlationId: string;
   timestamp: string;
@@ -36,6 +39,9 @@ export class PublicEventProjectorV2 {
       sequence: event.sequence,
       type: event.type,
       runId: event.runId,
+      ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+      ...(event.replyId === undefined ? {} : { replyId: event.replyId }),
+      ...(event.streamId === undefined ? {} : { streamId: event.streamId }),
       correlationId: event.correlationId,
       timestamp: event.timestamp,
       durability: event.durability,
@@ -48,8 +54,35 @@ export class PublicEventProjectorV2 {
     switch (event.type) {
       case 'RUN_STARTED':
         return sanitizeRecord({ profile: event.payload.profile, trigger: event.payload.trigger, deadline: event.payload.deadline, versionSnapshot: {} });
+      case 'RUN_RESUMED':
+        return sanitizeRecord({ checkpointVersion: event.payload.checkpointVersion, resumeReason: safeText(event.payload.resumeReason), newStreamId: event.payload.newStreamId });
+      case 'RUN_PAUSED':
+        return sanitizeRecord({ interruptId: event.payload.interruptId, reason: safeText(event.payload.reason), expiresAt: event.payload.expiresAt, checkpointVersion: event.payload.checkpointVersion });
+      case 'RUN_FINISHED':
+        return sanitizeRecord({
+          outcome: event.payload.outcome,
+          ...(event.payload.reportId === undefined ? {} : { reportId: event.payload.reportId }),
+          ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage as unknown as JsonObject }),
+          durationMs: event.payload.durationMs,
+        });
+      case 'RUN_FAILED':
+        return sanitizeRecord({
+          error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
+          stage: event.payload.stage,
+          recoverable: event.payload.recoverable,
+        });
       case 'STEP_STARTED':
         return sanitizeRecord({ iteration: event.payload.iteration, stage: event.payload.stage, budgetSnapshot: pickNumbers(event.payload.budgetSnapshot) });
+      case 'STEP_COMPLETED':
+        return sanitizeRecord({ iteration: event.payload.iteration, exitDecision: safeText(event.payload.exitDecision), durationMs: event.payload.durationMs });
+      case 'STEP_FAILED':
+        return sanitizeRecord({
+          iteration: event.payload.iteration,
+          error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
+          retryable: event.payload.retryable,
+        });
+      case 'STAGE_CHANGED':
+        return sanitizeRecord({ from: event.payload.from, to: event.payload.to, reason: safeText(event.payload.reason) });
       case 'REASONING_STARTED':
         return sanitizeRecord({ stage: event.payload.stage, objective: safeText(event.payload.objective) });
       case 'MESSAGE_STARTED':
@@ -86,8 +119,24 @@ export class PublicEventProjectorV2 {
           },
         });
       }
+      case 'TOOL_CALL_ADMISSION_UPDATED':
+        return sanitizeRecord({ gate: event.payload.gate, outcome: event.payload.outcome, attempt: event.payload.attempt });
+      case 'TOOL_CALL_REJECTED':
+        return sanitizeRecord({
+          toolName: event.payload.toolName,
+          gate: event.payload.gate,
+          error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
+        });
       case 'EXTERNAL_EXECUTION_REQUESTED':
-        return sanitizeRecord({ ...event.payload, interactionPayload: {} });
+        return sanitizeRecord({ requestId: event.payload.requestId, toolCallId: event.payload.toolCallId, expiresAt: event.payload.expiresAt, interactionPayload: {} });
+      case 'EXTERNAL_EXECUTION_RESOLVED':
+        return sanitizeRecord({ requestId: event.payload.requestId, externalExecutionType: event.payload.externalExecutionType });
+      case 'CONFIRMATION_REQUESTED':
+        return sanitizeRecord({ confirmationId: event.payload.confirmationId, toolCallIds: event.payload.toolCallIds, riskSummary: safeText(event.payload.riskSummary), expiresAt: event.payload.expiresAt });
+      case 'CONFIRMATION_RESOLVED':
+        return sanitizeRecord({ decision: event.payload.decision, toolCallIds: event.payload.toolCallIds, decidedAt: event.payload.decidedAt });
+      case 'CONFIRMATION_EXPIRED':
+        return sanitizeRecord({ confirmationId: event.payload.confirmationId, toolCallIds: event.payload.toolCallIds, expiredAt: event.payload.expiredAt });
       case 'ACTION_EXECUTED':
         return sanitizeRecord({
           actionId: event.payload.actionId,
@@ -109,10 +158,34 @@ export class PublicEventProjectorV2 {
         return sanitizeRecord({ evidenceIds: event.payload.evidenceIds, coverage: event.payload.coverage, source: event.payload.source, summary: safeText(event.payload.summary) });
       case 'EVIDENCE_COLLECTION_STARTED':
         return sanitizeRecord({ source: event.payload.source, queryWindow: safeText(event.payload.queryWindow), planItemId: event.payload.planItemId });
+      case 'EVIDENCE_COLLECTION_FAILED':
+        return sanitizeRecord({
+          source: event.payload.source,
+          error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
+          missingEvidence: event.payload.missingEvidence.map(safeText),
+        });
+      case 'HYPOTHESIS_UPDATED':
+        return sanitizeRecord({
+          candidates: event.payload.candidates.map((candidate) => ({ summary: safeText(candidate.summary), confidence: candidate.confidence })),
+          evidenceIds: event.payload.evidenceIds,
+          missingEvidence: event.payload.missingEvidence.map(safeText),
+        });
       case 'DIAGNOSIS_COMPLETED':
         return sanitizeRecord({ outcome: event.payload.outcome, reportId: event.payload.reportId, evidenceIds: event.payload.evidenceIds, limitations: event.payload.limitations.map(safeText) });
+      case 'ACTION_PROPOSED':
+        return sanitizeRecord({ actionId: event.payload.actionId, toolCallId: event.payload.toolCallId, risk: event.payload.risk, expectedEffect: safeText(event.payload.expectedEffect) });
+      case 'ACTION_VERIFICATION_STARTED':
+        return sanitizeRecord({ actionId: event.payload.actionId, verificationPlan: safeText(event.payload.verificationPlan) });
+      case 'ACTION_VERIFICATION_COMPLETED':
+        return sanitizeRecord({ actionId: event.payload.actionId, observedEffect: safeText(event.payload.observedEffect), evidenceIds: event.payload.evidenceIds });
+      case 'ACTION_VERIFICATION_FAILED':
+        return sanitizeRecord({
+          actionId: event.payload.actionId,
+          error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
+          requiredFollowup: safeText(event.payload.requiredFollowup),
+        });
       default:
-        return {};
+        return null;
     }
   }
 }

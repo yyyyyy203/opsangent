@@ -99,6 +99,13 @@ export class SqliteEventMessageStore implements EventStore, MessageStore {
     return Promise.resolve().then(() => this.readSequence(runId));
   }
 
+  public listRunIds(): Promise<string[]> {
+    return Promise.resolve().then(() => {
+      const rows = this.database.raw.prepare('SELECT run_id FROM agent_run_sequences ORDER BY run_id').all() as Array<{ run_id: string }>;
+      return rows.map((row) => row.run_id);
+    });
+  }
+
   public saveMessage(message: AgentMessageV2, expectedVersion: number | null): Promise<StoredAgentMessageV2> {
     return Promise.resolve().then(() => {
       const parsed = parseAgentMessageV2(structuredClone(message));

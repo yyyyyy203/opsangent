@@ -12,12 +12,12 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     const event = parseAgentEventV2(input);
     try {
       switch (event.type) {
-        case 'RUN_STARTED': this.start({ name: 'agent.run', kind: 'chain', runId: event.runId, spanKey: runKey(event.runId), input: event.payload, event }); break;
+        case 'RUN_STARTED': this.start({ name: 'agent.run', kind: 'chain', runId: event.runId, ...identityFields(event), spanKey: runKey(event.runId), input: event.payload, event }); break;
         case 'RUN_FINISHED': this.end(runKey(event.runId), event.payload); break;
         case 'RUN_FAILED': this.fail(runKey(event.runId), event.payload.error); break;
         case 'MODEL_CALL_STARTED': {
           const attempt = event.attemptId ?? String(event.payload.attempt);
-          this.start({ name: `model.${event.payload.model}`, kind: 'llm', runId: event.runId, spanKey: modelKey(event.runId, attempt), parentSpanKey: runKey(event.runId), input: { purpose: event.payload.purpose }, event, attributes: { provider: event.payload.provider, model: event.payload.model, attempt: event.payload.attempt } });
+          this.start({ name: `model.${event.payload.model}`, kind: 'llm', runId: event.runId, ...identityFields(event), spanKey: modelKey(event.runId, attempt), parentSpanKey: runKey(event.runId), input: { purpose: event.payload.purpose }, event, attributes: { provider: event.payload.provider, model: event.payload.model, attempt: event.payload.attempt } });
           break;
         }
         case 'MODEL_CALL_COMPLETED': this.end(modelKey(event.runId, event.attemptId ?? String(event.payload.attempt)), modelOutput(event.payload)); break;
@@ -26,12 +26,12 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
           const id = event.toolCallId ?? event.payload.toolName;
           const key = toolKey(event.runId, id, event.attemptId ?? String(event.payload.attempt));
           this.toolKeys.set(`${event.runId}:${id}`, key);
-          this.start({ name: `tool.${event.payload.toolName}`, kind: 'tool', runId: event.runId, spanKey: key, parentSpanKey: runKey(event.runId), event, attributes: { source: event.payload.source, attempt: event.payload.attempt } });
+          this.start({ name: `tool.${event.payload.toolName}`, kind: 'tool', runId: event.runId, ...identityFields(event), spanKey: key, parentSpanKey: runKey(event.runId), event, attributes: { source: event.payload.source, attempt: event.payload.attempt } });
           break;
         }
         case 'TOOL_RESULT': this.end(this.toolKeys.get(`${event.runId}:${event.toolCallId ?? event.payload.result.toolCallId}`) ?? '', event.payload); break;
         case 'TOOL_FAILED': this.fail(event.toolCallId === undefined ? '' : this.toolKeys.get(`${event.runId}:${event.toolCallId}`) ?? '', event.payload.error); break;
-        case 'SUBAGENT_STARTED': this.start({ name: `subagent.${event.payload.subagentType}`, kind: 'chain', runId: event.payload.childRunId, spanKey: runKey(event.payload.childRunId), parentSpanKey: runKey(event.payload.parentRunId), event, attributes: { budget: event.payload.budget, toolCallId: event.toolCallId } }); break;
+        case 'SUBAGENT_STARTED': this.start({ name: `subagent.${event.payload.subagentType}`, kind: 'chain', runId: event.payload.childRunId, ...identityFields(event), spanKey: runKey(event.payload.childRunId), parentSpanKey: runKey(event.payload.parentRunId), event, attributes: { budget: event.payload.budget, toolCallId: event.toolCallId } }); break;
         case 'SUBAGENT_COMPLETED': this.end(runKey(event.payload.childRunId), event.payload); break;
         case 'SUBAGENT_FAILED': this.fail(runKey(event.payload.childRunId), event.payload.error); break;
         default: break;
@@ -47,6 +47,9 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     try {
       const handle = this.observability.startSpan({
         name: input.name, kind: input.kind, runId: input.runId, spanKey: input.spanKey,
+        ...(input.sessionId === undefined ? {} : { sessionId: input.sessionId }),
+        ...(input.replyId === undefined ? {} : { replyId: input.replyId }),
+        ...(input.streamId === undefined ? {} : { streamId: input.streamId }),
         ...(input.parentSpanKey === undefined ? {} : { parentSpanKey: input.parentSpanKey }),
         ...(input.input === undefined ? {} : { input: input.input }),
         correlationId: input.event.correlationId,
@@ -61,6 +64,14 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
   }
   private end(key: string, output: unknown): void { const span = this.spans.get(key); if (span === undefined) return; try { span.end(output); } catch { /* best effort */ } this.spans.delete(key); }
   private fail(key: string, error: unknown): void { const span = this.spans.get(key); if (span === undefined) return; try { span.fail(error); } catch { /* best effort */ } this.spans.delete(key); }
+}
+
+function identityFields(event: AgentEventEnvelopeV2): { sessionId?: string; replyId?: string; streamId?: string } {
+  return {
+    ...(event.sessionId === undefined ? {} : { sessionId: event.sessionId }),
+    ...(event.replyId === undefined ? {} : { replyId: event.replyId }),
+    ...(event.streamId === undefined ? {} : { streamId: event.streamId }),
+  };
 }
 
 function runKey(runId: string): string { return `run:${runId}`; }

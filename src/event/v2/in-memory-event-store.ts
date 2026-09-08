@@ -94,6 +94,10 @@ export class InMemoryEventMessageStore implements EventStore, MessageStore {
     return Promise.resolve().then(() => this.sequences.get(runId) ?? 0);
   }
 
+  public listRunIds(): Promise<string[]> {
+    return Promise.resolve().then(() => [...this.sequences.keys()].sort());
+  }
+
   public saveMessage(message: AgentMessageV2, expectedVersion: number | null): Promise<StoredAgentMessageV2> {
     return Promise.resolve().then(() => {
       const parsed = parseAgentMessageV2(structuredClone(message));

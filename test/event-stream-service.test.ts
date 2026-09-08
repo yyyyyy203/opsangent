@@ -128,4 +128,57 @@ describe('EventStreamService', () => {
     expect(frames[0]).toEqual({ event: 'message_snapshot', data: { schemaVersion: 2, runId: 'run-1', messages: [message] } });
     expect((frames[1] as { id: string }).id).toBe(latestDelta.eventId);
   });
+
+  it('removes internal and block metadata from public message snapshots', async () => {
+    const replay = new ReplayBufferV2({ maxEvents: 1, maxBytes: 100_000 });
+    const { store, publisher, service, factory } = runtime(replay);
+    const first = await publisher.publish(factory.create('RUN_STARTED', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'durable',
+    }, { profile: 'group-buy-market', trigger: 'manual', deadline: clock.now().toISOString(), versionSnapshot: {} }));
+    await publisher.publish(factory.create('CONTENT_BLOCK_DELTA', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'transient',
+    }, { messageId: 'message-1', blockId: 'block-1', delta: 'first', index: 0 }));
+    await publisher.publish(factory.create('CONTENT_BLOCK_DELTA', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'transient',
+    }, { messageId: 'message-1', blockId: 'block-1', delta: 'second', index: 1 }));
+    await store.saveMessage({
+      schemaVersion: 2,
+      id: 'message-1',
+      runId: 'run-1',
+      role: 'assistant',
+      status: 'streaming',
+      visibility: 'user',
+      blocks: [{
+        type: 'text', blockId: 'block-1', text: 'firstsecond',
+        metadata: { display: 'safe', apiToken: 'do-not-send' },
+      }],
+      createdAt: clock.now().toISOString(),
+      metadata: {
+        __newton_message_assembly_v1: { version: 1, lastSequence: 3, blocks: [] },
+        apiToken: 'do-not-send',
+      },
+    }, null);
+
+    const stream = service.open({ runId: 'run-1', lastEventId: first.eventId });
+    const frames = await readFrames(stream, 1);
+    await stream.return(undefined);
+
+    expect(frames[0]).toEqual({
+      event: 'message_snapshot',
+      data: {
+        schemaVersion: 2,
+        runId: 'run-1',
+        messages: [{
+          schemaVersion: 2,
+          id: 'message-1',
+          runId: 'run-1',
+          role: 'assistant',
+          status: 'streaming',
+          visibility: 'user',
+          blocks: [{ type: 'text', blockId: 'block-1', text: 'firstsecond' }],
+          createdAt: clock.now().toISOString(),
+        }],
+      },
+    });
+  });
 });

@@ -28,10 +28,10 @@ export class HitlService {
       context.status = 'running';
       context.contextVersion += 1;
       await this.checkpoints.save(context);
-      await this.publishV2('CONFIRMATION_EXPIRED', context.runId, {
+      await this.publishV2('CONFIRMATION_EXPIRED', context, {
         confirmationId: confirmationId(context.runId, decision.toolCallId), toolCallIds: [decision.toolCallId], expiredAt,
       });
-      await this.publishV2('TOOL_RESULT', context.runId, { result: replacement, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
+      await this.publishV2('TOOL_RESULT', context, { result: replacement, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
       return;
     }
 
@@ -61,13 +61,13 @@ export class HitlService {
     context.status = 'running';
     context.contextVersion += 1;
     await this.checkpoints.save(context);
-    await this.publishV2('CONFIRMATION_RESOLVED', context.runId, {
+    await this.publishV2('CONFIRMATION_RESOLVED', context, {
       decision: decision.confirmed ? 'approved' : 'rejected', actor: decision.actor, toolCallIds: [decision.toolCallId], decidedAt: decision.decidedAt,
     });
     if (!decision.confirmed) {
       const result = context.messages.flatMap((message) => message.blocks)
         .find((block) => block.type === 'tool_result' && block.result.toolCallId === decision.toolCallId);
-      if (result?.type === 'tool_result') await this.publishV2('TOOL_RESULT', context.runId, { result: result.result, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
+      if (result?.type === 'tool_result') await this.publishV2('TOOL_RESULT', context, { result: result.result, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
     }
   }
 
@@ -88,9 +88,18 @@ export class HitlService {
     return { toolCallId, toolName: context.pendingToolCalls[0]?.name ?? 'unknown', status: 'aborted', error: { code: 'CONFIRMATION_EXPIRED', message, retryable: false }, startedAt: now, finishedAt: now };
   }
 
-  private publishV2<T extends keyof AgentEventPayloadMap>(type: T, runId: string, payload: AgentEventPayloadMap[T], toolCallId?: string): Promise<void> {
+  private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], toolCallId?: string): Promise<void> {
     if (this.v2Events === undefined) return Promise.resolve();
-    const pending = this.v2Events.factory.create(type, { runId, correlationId: this.v2Events.correlationId(runId), visibility: 'audit', durability: 'durable', ...(toolCallId === undefined ? {} : { toolCallId }) }, payload);
+    const pending = this.v2Events.factory.create(type, {
+      runId: context.runId,
+      ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
+      ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
+      ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+      correlationId: this.v2Events.correlationId(context.runId),
+      visibility: 'audit',
+      durability: 'durable',
+      ...(toolCallId === undefined ? {} : { toolCallId }),
+    }, payload);
     return this.v2Events.publisher.publish(pending).then(() => undefined);
   }
 }

@@ -50,6 +50,8 @@ export interface EventStore {
   readRun(runId: string, afterSequence: number, limit: number): Promise<AgentEventEnvelopeV2[]>;
   findById(eventId: string): Promise<AgentEventEnvelopeV2 | null>;
   currentSequence(runId: string): Promise<number>;
+  /** Optional discovery hook used by bootstrap recovery; scoped stores may omit it. */
+  listRunIds?(): Promise<string[]>;
 }
 
 export interface StoredAgentMessageV2 {

@@ -83,4 +83,23 @@ describe('MessageAssemblerV2', () => {
     invalidAfterTerminal.timestamp = '2026-09-07T10:00:03.000Z';
     await expect(restarted.apply(invalidAfterTerminal)).rejects.toThrow('already terminal');
   });
+
+  it('continues an unfinished text block after assembler restart', async () => {
+    sequence = 0;
+    const store = new InMemoryEventMessageStore();
+    const first = new MessageAssemblerV2(store);
+    await first.apply(event('MESSAGE_STARTED', { messageId: 'message-stream-restart', role: 'assistant', status: 'streaming' }));
+    await first.apply(event('CONTENT_BLOCK_STARTED', { messageId: 'message-stream-restart', blockId: 'block-1', blockType: 'text', index: 0 }));
+    await first.apply(event('CONTENT_BLOCK_DELTA', { messageId: 'message-stream-restart', blockId: 'block-1', delta: '部分', index: 0 }));
+
+    const restarted = new MessageAssemblerV2(store);
+    await restarted.apply(event('CONTENT_BLOCK_DELTA', { messageId: 'message-stream-restart', blockId: 'block-1', delta: '恢复', index: 0 }));
+    await restarted.apply(event('CONTENT_BLOCK_COMPLETED', { messageId: 'message-stream-restart', blockId: 'block-1', blockSummary: '恢复后的文本', index: 0 }));
+    const completed = await restarted.apply(event('MESSAGE_COMPLETED', {
+      messageId: 'message-stream-restart', completedAt: '2026-09-07T10:00:03.000Z',
+    }));
+
+    expect(completed).toMatchObject({ status: 'completed' });
+    expect(completed?.blocks).toEqual([{ blockId: 'block-1', type: 'text', text: '部分恢复' }]);
+  });
 });
