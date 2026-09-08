@@ -46,6 +46,7 @@ export interface ProjectionRunnerOptionsV2 {
 export class ProjectionRunnerV2 implements EventProjectorV2 {
   public readonly name: string;
   private readonly tails = new Map<string, Promise<void>>();
+  private readonly pending = new Map<string, Map<number, AgentEventEnvelopeV2>>();
 
   public constructor(
     private readonly projector: EventProjectorV2,
@@ -60,8 +61,11 @@ export class ProjectionRunnerV2 implements EventProjectorV2 {
   }
 
   public async project(event: AgentEventEnvelopeV2): Promise<void> {
+    const events = this.pending.get(event.runId) ?? new Map<number, AgentEventEnvelopeV2>();
+    events.set(event.sequence, structuredClone(event));
+    this.pending.set(event.runId, events);
     const previous = this.tails.get(event.runId) ?? Promise.resolve();
-    const current = previous.catch(() => undefined).then(async () => this.process(event));
+    const current = previous.catch(() => undefined).then(async () => this.processPending(event.runId));
     this.tails.set(event.runId, current);
     try {
       await current;
@@ -70,19 +74,40 @@ export class ProjectionRunnerV2 implements EventProjectorV2 {
     }
   }
 
-  private async process(event: AgentEventEnvelopeV2): Promise<void> {
+  private async processPending(runId: string): Promise<void> {
+    const events = this.pending.get(runId);
+    if (!events) return;
+
+    while (events.size > 0) {
+      const checkpoint = await this.checkpoints.load(this.projector.name, runId);
+      const event = events.get(checkpoint + 1);
+      if (!event) {
+        for (const sequence of events.keys()) {
+          if (sequence <= checkpoint) events.delete(sequence);
+        }
+        return;
+      }
+      const projected = await this.process(event);
+      if (!projected) return;
+      events.delete(event.sequence);
+    }
+    this.pending.delete(runId);
+  }
+
+  private async process(event: AgentEventEnvelopeV2): Promise<boolean> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= this.options.maxAttempts; attempt += 1) {
       try {
         const checkpoint = await this.checkpoints.load(this.projector.name, event.runId);
-        if (checkpoint >= event.sequence) return;
+        if (checkpoint >= event.sequence) return true;
         await this.projector.project(structuredClone(event));
         await this.checkpoints.save(this.projector.name, event.runId, checkpoint, event.sequence);
-        return;
+        return true;
       } catch (error) {
         lastError = error;
       }
     }
     await this.failures.record(toFailure(event, this.projector.name, lastError, this.options.maxAttempts));
+    return false;
   }
 }

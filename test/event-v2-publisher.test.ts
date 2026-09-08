@@ -96,6 +96,36 @@ describe('EventPublisherV2', () => {
 });
 
 describe('ProjectionRunnerV2', () => {
+  it('does not let a later event cross a failed or missing sequence', async () => {
+    const checkpoints = new InMemoryProjectionCheckpointStore();
+    const failures = new InMemoryProjectionFailureSink();
+    const projected: number[] = [];
+    let shouldFail = true;
+    const runner = new ProjectionRunnerV2({
+      name: 'ordered',
+      project: (event) => {
+        projected.push(event.sequence);
+        if (shouldFail) throw new Error('temporary');
+      },
+    }, checkpoints, failures, { maxAttempts: 1 });
+    const base = {
+      schemaVersion: 2 as const, eventId: 'event-', type: 'RUN_CANCELLED' as const,
+      runId: 'run-ordered', correlationId: 'corr-1', timestamp: clock.now().toISOString(),
+      visibility: 'audit' as const, durability: 'durable' as const,
+      payload: { actor: 'a', reason: 'stop', stage: 'triage' as const },
+    };
+    const one = { ...base, eventId: 'event-1', sequence: 1 };
+    const two = { ...base, eventId: 'event-2', sequence: 2 };
+    await runner.project(two);
+    expect(projected).toEqual([]);
+    await runner.project(one);
+    expect(projected).toEqual([1]);
+    shouldFail = false;
+    await runner.project(one);
+    expect(projected).toEqual([1, 1, 2]);
+    expect(await checkpoints.load('ordered', 'run-ordered')).toBe(2);
+  });
+
   it('retries, checkpoints success, and dead-letters exhaustion without republishing', async () => {
     const checkpoints = new InMemoryProjectionCheckpointStore();
     const failures = new InMemoryProjectionFailureSink();
