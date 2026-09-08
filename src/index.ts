@@ -30,6 +30,7 @@ export * from './memory/in-memory-memory.js';
 export * from './model/scripted-model.js';
 export * from './observability/noop-observability.js';
 export * from './observability/langsmith-observability.js';
+export * from './model/evented-model.js';
 export * from './storage/in-memory-checkpoint-store.js';
 export * from './storage/in-memory-evidence-store.js';
 export * from './tool/batch-executor.js';
