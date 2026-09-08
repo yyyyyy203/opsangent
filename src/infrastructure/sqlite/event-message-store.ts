@@ -24,9 +24,10 @@ interface MessageRow { message_id: string; version: number; message_json: string
 export class SqliteEventMessageStore implements EventStore, MessageStore {
   public constructor(private readonly database: SqliteDatabase) {}
 
-  public async append(runId: string, expectedSequence: number, events: readonly PendingAgentEventV2[]): Promise<AgentEventEnvelopeV2[]> {
-    this.assertSequence(expectedSequence);
-    return this.database.raw.transaction(() => {
+  public append(runId: string, expectedSequence: number, events: readonly PendingAgentEventV2[]): Promise<AgentEventEnvelopeV2[]> {
+    return Promise.resolve().then(() => {
+      this.assertSequence(expectedSequence);
+      return this.database.raw.transaction(() => {
       if (events.length === 0) {
         this.assertExpected(runId, expectedSequence);
         return [];
@@ -40,8 +41,8 @@ export class SqliteEventMessageStore implements EventStore, MessageStore {
       }
 
       const existing = events.map((event) => this.findEventRow(event.eventId));
-      if (existing.every((row) => row !== undefined)) {
-        const parsed = existing.map((row) => this.parseEventRow(row!));
+      if (existing.every(isEventRow)) {
+        const parsed = existing.map((row) => this.parseEventRow(row));
         if (parsed.every((saved, index) => this.matchesPending(saved, events[index]!))) return parsed;
       }
       this.assertExpected(runId, expectedSequence);
@@ -60,66 +61,79 @@ export class SqliteEventMessageStore implements EventStore, MessageStore {
       }
       this.writeSequence(runId, expectedSequence + saved.length);
       return structuredClone(saved);
-    })();
+      }).immediate();
+    });
   }
 
-  public async reserveSequence(runId: string, expectedSequence: number, count: number): Promise<number[]> {
-    this.assertSequence(expectedSequence);
-    if (!Number.isSafeInteger(count) || count <= 0) throw new RangeError('sequence reservation count must be a positive safe integer');
-    return this.database.raw.transaction(() => {
-      this.assertExpected(runId, expectedSequence);
-      this.writeSequence(runId, expectedSequence + count);
-      return Array.from({ length: count }, (_, index) => expectedSequence + index + 1);
-    })();
+  public reserveSequence(runId: string, expectedSequence: number, count: number): Promise<number[]> {
+    return Promise.resolve().then(() => {
+      this.assertSequence(expectedSequence);
+      if (!Number.isSafeInteger(count) || count <= 0) throw new RangeError('sequence reservation count must be a positive safe integer');
+      return this.database.raw.transaction(() => {
+        this.assertExpected(runId, expectedSequence);
+        this.writeSequence(runId, expectedSequence + count);
+        return Array.from({ length: count }, (_, index) => expectedSequence + index + 1);
+      }).immediate();
+    });
   }
 
-  public async readRun(runId: string, afterSequence: number, limit: number): Promise<AgentEventEnvelopeV2[]> {
-    this.assertSequence(afterSequence);
-    if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('event read limit must be a positive safe integer');
-    const rows = this.database.raw.prepare(`
-      SELECT event_id, event_json FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
-    `).all(runId, afterSequence, limit) as EventRow[];
-    return rows.map((row) => this.parseEventRow(row));
+  public readRun(runId: string, afterSequence: number, limit: number): Promise<AgentEventEnvelopeV2[]> {
+    return Promise.resolve().then(() => {
+      this.assertSequence(afterSequence);
+      if (!Number.isSafeInteger(limit) || limit <= 0) throw new RangeError('event read limit must be a positive safe integer');
+      const rows = this.database.raw.prepare(`
+        SELECT event_id, event_json FROM agent_events WHERE run_id = ? AND sequence > ? ORDER BY sequence LIMIT ?
+      `).all(runId, afterSequence, limit) as EventRow[];
+      return rows.map((row) => this.parseEventRow(row));
+    });
   }
 
-  public async findById(eventId: string): Promise<AgentEventEnvelopeV2 | null> {
-    const row = this.findEventRow(eventId);
-    return row === undefined ? null : this.parseEventRow(row);
+  public findById(eventId: string): Promise<AgentEventEnvelopeV2 | null> {
+    return Promise.resolve().then(() => {
+      const row = this.findEventRow(eventId);
+      return row === undefined ? null : this.parseEventRow(row);
+    });
   }
 
-  public async currentSequence(runId: string): Promise<number> {
-    return this.readSequence(runId);
+  public currentSequence(runId: string): Promise<number> {
+    return Promise.resolve().then(() => this.readSequence(runId));
   }
 
-  public async saveMessage(message: AgentMessageV2, expectedVersion: number | null): Promise<StoredAgentMessageV2> {
-    const parsed = parseAgentMessageV2(structuredClone(message));
-    return this.database.raw.transaction(() => {
+  public saveMessage(message: AgentMessageV2, expectedVersion: number | null): Promise<StoredAgentMessageV2> {
+    return Promise.resolve().then(() => {
+      const parsed = parseAgentMessageV2(structuredClone(message));
+      return this.database.raw.transaction(() => {
+        const row = this.database.raw.prepare('SELECT message_id, version, message_json FROM agent_messages WHERE message_id = ?')
+          .get(parsed.id) as MessageRow | undefined;
+        const actual = row?.version ?? null;
+        if ((row === undefined && expectedVersion !== null) || (row !== undefined && expectedVersion !== row.version)) {
+          throw new MessageVersionConflictError(parsed.id, expectedVersion, actual);
+        }
+        const version = (row?.version ?? 0) + 1;
+        this.database.raw.prepare(`
+          INSERT INTO agent_messages(message_id, run_id, version, message_json) VALUES (?, ?, ?, ?)
+          ON CONFLICT(message_id) DO UPDATE SET run_id=excluded.run_id, version=excluded.version, message_json=excluded.message_json
+        `).run(parsed.id, parsed.runId, version, JSON.stringify(parsed));
+        return { message: structuredClone(parsed), version };
+      }).immediate();
+    });
+  }
+
+  public getMessage(id: string): Promise<StoredAgentMessageV2 | null> {
+    return Promise.resolve().then(() => {
       const row = this.database.raw.prepare('SELECT message_id, version, message_json FROM agent_messages WHERE message_id = ?')
-        .get(parsed.id) as MessageRow | undefined;
-      const actual = row?.version ?? null;
-      if ((row === undefined && expectedVersion !== null) || (row !== undefined && expectedVersion !== row.version)) {
-        throw new MessageVersionConflictError(parsed.id, expectedVersion, actual);
-      }
-      const version = (row?.version ?? 0) + 1;
-      this.database.raw.prepare(`
-        INSERT INTO agent_messages(message_id, run_id, version, message_json) VALUES (?, ?, ?, ?)
-        ON CONFLICT(message_id) DO UPDATE SET run_id=excluded.run_id, version=excluded.version, message_json=excluded.message_json
-      `).run(parsed.id, parsed.runId, version, JSON.stringify(parsed));
-      return { message: structuredClone(parsed), version };
-    })();
+        .get(id) as MessageRow | undefined;
+      return row === undefined ? null : this.parseMessageRow(row);
+    });
   }
 
-  public async getMessage(id: string): Promise<StoredAgentMessageV2 | null> {
-    const row = this.database.raw.prepare('SELECT message_id, version, message_json FROM agent_messages WHERE message_id = ?')
-      .get(id) as MessageRow | undefined;
-    return row === undefined ? null : this.parseMessageRow(row);
-  }
-
-  public async listMessagesByRun(runId: string): Promise<StoredAgentMessageV2[]> {
-    const rows = this.database.raw.prepare(`
-      SELECT message_id, version, message_json FROM agent_messages WHERE run_id = ? ORDER BY message_id
-    `).all(runId) as MessageRow[];
-    return rows.map((row) => this.parseMessageRow(row));
+  public listMessagesByRun(runId: string): Promise<StoredAgentMessageV2[]> {
+    return Promise.resolve().then(() => {
+      const rows = this.database.raw.prepare(`
+        SELECT message_id, version, message_json FROM agent_messages WHERE run_id = ? ORDER BY message_id
+      `).all(runId) as MessageRow[];
+      return rows.map((row) => this.parseMessageRow(row));
+    });
   }
 
   private readSequence(runId: string): number {
@@ -156,11 +170,16 @@ export class SqliteEventMessageStore implements EventStore, MessageStore {
   }
 
   private matchesPending(saved: AgentEventEnvelopeV2, pending: PendingAgentEventV2): boolean {
-    const { sequence: _sequence, ...unsequenced } = saved;
+    const { sequence, ...unsequenced } = saved;
+    void sequence;
     return isDeepStrictEqual(unsequenced, pending);
   }
 
   private assertSequence(sequence: number): void {
     if (!Number.isSafeInteger(sequence) || sequence < 0) throw new RangeError('sequence must be a non-negative safe integer');
   }
+}
+
+function isEventRow(row: EventRow | undefined): row is EventRow {
+  return row !== undefined;
 }

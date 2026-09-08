@@ -19,6 +19,40 @@ function ids(): IdGenerator {
 }
 
 describe('EventPublisherV2', () => {
+  it('rejects invalid transient payloads before allocating sequence', async () => {
+    const store = new InMemoryEventMessageStore();
+    const publisher = new EventPublisherV2(store, new ReplayBufferV2({ maxEvents: 10, maxBytes: 100_000 }), new InMemoryProjectionFailureSink());
+    const pending = new EventFactoryV2(clock, ids()).create('CONTENT_BLOCK_DELTA', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'transient',
+    }, { messageId: 'message-1', blockId: 'block-1', delta: 'text', index: 0 });
+    pending.payload.index = -1;
+    await expect(publisher.publish(pending)).rejects.toThrow();
+    expect(await store.currentSequence('run-1')).toBe(0);
+  });
+  it('publishes a concurrent burst in strict subscriber order', async () => {
+    const store = new InMemoryEventMessageStore();
+    const publisher = new EventPublisherV2(store, new ReplayBufferV2({ maxEvents: 20, maxBytes: 100_000 }), new InMemoryProjectionFailureSink());
+    const factory = new EventFactoryV2(clock, ids());
+    const received: number[] = [];
+    publisher.subscribe({ name: 'ordered', project: (event) => { received.push(event.sequence); } });
+    await Promise.all(Array.from({ length: 10 }, () => publisher.publish(factory.create('RUN_CANCELLED', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'audit', durability: 'durable',
+    }, { actor: 'user', reason: 'stop', stage: 'triage' }))));
+    expect(received).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  });
+
+  it('isolates a synchronously throwing failure sink after persistence', async () => {
+    const store = new InMemoryEventMessageStore();
+    const publisher = new EventPublisherV2(store, new ReplayBufferV2({ maxEvents: 20, maxBytes: 100_000 }), {
+      record: () => { throw new Error('disk unavailable'); },
+    });
+    publisher.subscribe({ name: 'broken', project: () => { throw new Error('offline'); } });
+    const pending = new EventFactoryV2(clock, ids()).create('RUN_CANCELLED', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'audit', durability: 'durable',
+    }, { actor: 'user', reason: 'stop', stage: 'triage' });
+    await expect(publisher.publish(pending)).resolves.toMatchObject({ sequence: 1 });
+    expect(await store.findById(pending.eventId)).not.toBeNull();
+  });
   it('persists durable facts, buffers transient deltas, and isolates subscribers', async () => {
     const store = new InMemoryEventMessageStore();
     const replay = new ReplayBufferV2({ maxEvents: 10, maxBytes: 100_000 });

@@ -36,6 +36,7 @@ export class InMemoryProjectionFailureSink implements ProjectionFailureSinkV2 {
 
 export class EventPublisherV2 {
   private readonly projectors = new Set<EventProjectorV2>();
+  private readonly tails = new Map<string, Promise<AgentEventEnvelopeV2>>();
 
   public constructor(
     private readonly store: EventStore,
@@ -49,6 +50,21 @@ export class EventPublisherV2 {
   }
 
   public async publish(pending: PendingAgentEventV2): Promise<AgentEventEnvelopeV2> {
+    // Validate and snapshot before allocating a sequence or yielding to another caller.
+    parseAgentEventV2({ ...pending, sequence: 1 });
+    const snapshot = structuredClone(pending);
+    const previous = this.tails.get(snapshot.runId);
+    const current = (previous ?? Promise.resolve()).catch(() => undefined)
+      .then(() => this.publishOrdered(snapshot));
+    this.tails.set(snapshot.runId, current);
+    try {
+      return await current;
+    } finally {
+      if (this.tails.get(snapshot.runId) === current) this.tails.delete(snapshot.runId);
+    }
+  }
+
+  private async publishOrdered(pending: PendingAgentEventV2): Promise<AgentEventEnvelopeV2> {
     let expected = await this.store.currentSequence(pending.runId);
     let event: AgentEventEnvelopeV2;
     try {
@@ -83,7 +99,7 @@ export class EventPublisherV2 {
       if (outcome.status === 'fulfilled') return;
       const projector = projectors[index];
       if (projector === undefined) return;
-      records.push(Promise.resolve(this.failures.record(toFailure(event, projector.name, outcome.reason, 1))));
+      records.push(Promise.resolve().then(() => this.failures.record(toFailure(event, projector.name, outcome.reason, 1))));
     });
     await Promise.allSettled(records);
   }

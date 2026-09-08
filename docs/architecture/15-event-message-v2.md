@@ -424,6 +424,6 @@ TOOL_CALL_CREATED(metrics_subagent)
 
 ## 13. 当前实现状态
 
-截至 2026-09-07，代码仍是 Event/Message V1：事件 payload 为宽联合，缺少完整调用度量、内容块流、精细 HITL、Subagent/MCP/记忆生命周期、事件持久化回放和三类投影；Message 缺少运行关联、状态、可见性和多数结构化块。
+截至 2026-09-08，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、V1/Public 初版投影和框架无关 SSE 回放服务已经开始落地。SSE 当前以 `SseFrame` 形式输出，由 HTTP 层负责写入具体响应；`Last-Event-ID` 通过 eventId 解析，transient Delta 超出窗口时用用户可见 Message 快照恢复。
 
-本文是已确认的一期目标设计，不表示上述 V2 能力已经实现。后续必须先形成实施计划，再按契约、存储/投影、运行时接入和迁移测试分批实现。
+一期仍未完成：Audit/LangSmith 投影、模型调用事件、工具四闸门/重试/熔断事件、HITL 暂停恢复事件、Subagent/MCP/上下文压缩/记忆生命周期、bootstrap 组装、V1 fixture 和端到端验收仍需继续实现。本文是目标设计与当前状态说明；具体完成度以 `docs/event-message-v2-acceptance-status.md` 的验证记录为准。

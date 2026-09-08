@@ -20,16 +20,18 @@ export class ProjectionCheckpointConflictError extends Error {
 export class InMemoryProjectionCheckpointStore implements ProjectionCheckpointStoreV2 {
   private readonly checkpoints = new Map<string, number>();
 
-  public async load(projector: string, runId: string): Promise<number> {
-    return this.checkpoints.get(this.key(projector, runId)) ?? 0;
+  public load(projector: string, runId: string): Promise<number> {
+    return Promise.resolve().then(() => this.checkpoints.get(this.key(projector, runId)) ?? 0);
   }
 
-  public async save(projector: string, runId: string, expectedSequence: number, sequence: number): Promise<void> {
-    const key = this.key(projector, runId);
-    const actual = this.checkpoints.get(key) ?? 0;
-    if (actual !== expectedSequence) throw new ProjectionCheckpointConflictError(projector, runId, expectedSequence, actual);
-    if (!Number.isSafeInteger(sequence) || sequence <= actual) throw new RangeError('projection sequence must advance');
-    this.checkpoints.set(key, sequence);
+  public save(projector: string, runId: string, expectedSequence: number, sequence: number): Promise<void> {
+    return Promise.resolve().then(() => {
+      const key = this.key(projector, runId);
+      const actual = this.checkpoints.get(key) ?? 0;
+      if (actual !== expectedSequence) throw new ProjectionCheckpointConflictError(projector, runId, expectedSequence, actual);
+      if (!Number.isSafeInteger(sequence) || sequence <= actual) throw new RangeError('projection sequence must advance');
+      this.checkpoints.set(key, sequence);
+    });
   }
 
   private key(projector: string, runId: string): string {

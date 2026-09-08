@@ -23,8 +23,8 @@ export const jsonValueV2Schema = z.custom<JsonValue>((value) => {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
   if (Array.isArray(value)) return value.every((item) => jsonValueV2Schema.safeParse(item).success);
-  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype
-    && Object.values(value).every((item) => jsonValueV2Schema.safeParse(item).success);
+  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  return Object.values(value as Record<string, unknown>).every((item) => jsonValueV2Schema.safeParse(item).success);
 }, 'Expected a JSON value');
 export const jsonRecordV2Schema = z.record(jsonValueV2Schema);
 export interface EventErrorPayloadV2 {

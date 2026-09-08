@@ -50,13 +50,13 @@ export class MessageAssemblerV2 {
     const next = structuredClone(current);
     switch (event.type) {
       case 'CONTENT_BLOCK_STARTED':
-        this.startBlock(next, event.payload as ContentBlockStartedPayloadV2);
+        this.startBlock(next, event.payload);
         break;
       case 'CONTENT_BLOCK_DELTA':
-        this.appendDelta(next, event.payload as ContentBlockDeltaPayloadV2);
+        this.appendDelta(next, event.payload);
         break;
       case 'CONTENT_BLOCK_COMPLETED':
-        this.completeBlock(next, event.payload as ContentBlockCompletedPayloadV2);
+        this.completeBlock(next, event.payload);
         break;
       case 'MESSAGE_COMPLETED':
         if ([...next.blocks.values()].some((block) => !block.completed)) {

@@ -1,4 +1,6 @@
 export * from './agent/agent-harness.js';
+export * from './api/event-stream-service.js';
+export * from './api/sse-encoder.js';
 export * from './agent/types.js';
 export * from './application/hitl-service.js';
 export * from './application/external-tool-result-service.js';

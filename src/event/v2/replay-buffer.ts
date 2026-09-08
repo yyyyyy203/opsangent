@@ -48,6 +48,11 @@ export class ReplayBufferV2 {
       .sort((left, right) => left.sequence - right.sequence));
   }
 
+  public findById(eventId: string): AgentEventEnvelopeV2 | null {
+    const event = this.byId.get(eventId);
+    return event === undefined ? null : structuredClone(event);
+  }
+
   private evictToLimits(): void {
     while (this.entries.length > this.options.maxEvents || this.totalBytes > this.options.maxBytes) {
       const evicted = this.entries.shift();

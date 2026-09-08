@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { JsonValue } from '../common.js';
 import { budgetTypeSchema, eventErrorPayloadV2Schema, eventStageSchema, identifierV2Schema, jsonRecordV2Schema, timestampV2Schema, type BudgetTypeV2, type EventErrorPayloadV2, type EventStageV2 } from './common.js';
 import { messageRoleV2Schema, messageStatusV2Schema, type MessageRoleV2, type MessageStatusV2 } from '../message-v2/common.js';
 import { messageBlockV2Schema } from '../message-v2/schema.js';
@@ -11,7 +12,7 @@ const contentBlockTypeV2Schema = z.enum([
 ]);
 const usageSchema = strict({ inputTokens: nonnegative.int().optional(), outputTokens: nonnegative.int().optional() });
 export interface UsagePayloadV2 { inputTokens?: number; outputTokens?: number }
-export interface RunStartedPayloadV2 { profile: string; trigger: string; deadline: string; versionSnapshot: Record<string, import('../common.js').JsonValue> }
+export interface RunStartedPayloadV2 { profile: string; trigger: string; deadline: string; versionSnapshot: Record<string, JsonValue> }
 export interface RunResumedPayloadV2 { checkpointVersion: string; resumeReason: string; newStreamId: string }
 export interface RunPausedPayloadV2 { interruptId: string; reason: string; expiresAt: string; checkpointVersion: string }
 export interface RunFinishedPayloadV2 { outcome: 'complete' | 'partial' | 'inconclusive'; reportId?: string; usage?: UsagePayloadV2; durationMs: number }
@@ -20,7 +21,7 @@ export interface RunCancelledPayloadV2 { actor: string; reason: string; stage: E
 export interface RunTimedOutPayloadV2 { deadline: string; stage: EventStageV2; partialResultId?: string }
 export interface RunBudgetWarningPayloadV2 { budgetType: BudgetTypeV2; used: number; limit: number; remaining: number }
 export interface RunBudgetExhaustedPayloadV2 { budgetType: BudgetTypeV2; used: number; limit: number; exitPolicy: string }
-export interface StepStartedPayloadV2 { iteration: number; stage: EventStageV2; budgetSnapshot: Record<string, import('../common.js').JsonValue> }
+export interface StepStartedPayloadV2 { iteration: number; stage: EventStageV2; budgetSnapshot: Record<string, JsonValue> }
 export interface StepCompletedPayloadV2 { iteration: number; exitDecision: string; durationMs: number }
 export interface StepFailedPayloadV2 { iteration: number; error: EventErrorPayloadV2; retryable: boolean }
 export interface StageChangedPayloadV2 { from: EventStageV2; to: EventStageV2; reason: string }

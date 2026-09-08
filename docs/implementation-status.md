@@ -1,10 +1,18 @@
 # 实现进度与验证记录
 
-## 最新设计决策：Event / Message V2 作为一期协议地基
+## 最新增量：Event / Message V2 协议、存储与 SSE 回放基础
+
+2026-09-08：继续实施 [Event and Message V2 Implementation Plan](./superpowers/plans/2026-09-07-event-message-v2.md)。当前已落地 V2 MessageBlock 契约、V2 Event PayloadMap/Schema、EventStore/MessageStore 抽象、内存与 SQLite 实现、ReplayBuffer、MessageAssembler、EventPublisher、V1/Public 初版投影，以及框架无关的 SSE 编码和 `EventStreamService.open`。
+
+本轮新增 `EventStreamService`：支持初始回放、`Last-Event-ID` cursor、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 淘汰后返回 `message_snapshot`。同时补齐 `ReplayBufferV2.findById`，并清理 V2 基础 lint 债务，保证内存/SQLite 存储的 Promise API 仍以 rejected Promise 暴露同步错误。
+
+已验证：`pnpm lint` 通过，`pnpm typecheck` 通过，`pnpm test` 为 31 个文件 182 项通过、1 项真实 Prometheus 默认跳过，`pnpm build` 通过。尚未把本增量解释为一期完成；Audit/LangSmith 投影、模型/工具/HITL/runtime 真实事件生产点和 bootstrap 组装仍需继续。
+
+## 设计决策：Event / Message V2 作为一期协议地基
 
 2026-09-07：确认一期完整实现 Event/Message V2，而非只补少量事件名。范围包括强类型 PayloadMap、完整 MessageBlock、ID 与暂停恢复语义、模型/工具/四闸门/HITL/Subagent/MCP/熔断/压缩/记忆事件、EventStore 与重放、Public SSE/Audit/LangSmith 三类投影及 V1 兼容投影。完整设计见 [Event 与 Message V2 协议](./architecture/15-event-message-v2.md)。
 
-当前源码仍是 V1 契约，本条是已确认目标而非完成声明。尚未实现 V2 Schema、事件持久化、投影、运行时发射和迁移测试；后续必须先形成实施计划，再开始修改公共契约。
+本条为 2026-09-07 的目标确认记录。当前源码已经有 V2 契约、基础存储、发布与回放实现，但运行时生产点和三类投影尚未全部完成，仍以最新增量和验收状态文档为准。
 
 ## 最新增量：可运行 Metrics Lab 组装
 
