@@ -5,6 +5,8 @@ import type {
   ResolvedRisk,
   ToolExecutionResult,
   ToolResponse,
+  EventFactoryV2Like,
+  EventPublisherV2Like,
 } from '../contracts/index.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
@@ -26,6 +28,7 @@ export class ExternalToolResultService {
     private readonly hooks: HookExecutor,
     private readonly events: EventSink,
     private readonly eventFactory: EventFactory,
+    private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
   ) {}
 
   public async submit(submission: ExternalToolResultSubmission): Promise<void> {
@@ -93,6 +96,20 @@ export class ExternalToolResultService {
       replacement,
       `external-${pending.id}`,
     ));
+    if (this.v2Events !== undefined) {
+      const pendingEvent = this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
+        runId: context.runId,
+        correlationId: this.v2Events.correlationId(context.runId),
+        visibility: 'audit',
+        durability: 'durable',
+        toolCallId: pending.id,
+      }, {
+        requestId: `external:${context.runId}:${pending.id}`,
+        resultBlock: submission.response.blocks[0] ?? { type: 'text', text: '' },
+        externalExecutionType: 'host_submission',
+      });
+      await this.v2Events.publisher.publish(pendingEvent);
+    }
   }
 }
 

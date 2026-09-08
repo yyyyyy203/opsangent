@@ -118,7 +118,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     toolkit,
     events,
     checkpoints,
-    hitl: new HitlService(checkpoints, clock),
+    hitl: new HitlService(checkpoints, clock, { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` }),
     externalTools: new ExternalToolResultService(
       checkpoints,
       clock,
@@ -127,6 +127,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       hooks,
       events,
       eventFactory,
+      { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
     ),
     eventStoreV2,
     replayV2,

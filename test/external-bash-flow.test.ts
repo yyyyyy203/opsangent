@@ -18,6 +18,7 @@ describe('external Bash HITL flow', () => {
 
     const first = await runtime.agent.reply({ message: '检查项目', profileId: 'group-buy-market' });
     expect(first.status).toBe('awaiting_confirmation');
+    expect((await runtime.eventStoreV2.readRun(first.runId, 0, 100)).map((item) => item.type)).toContain('CONFIRMATION_REQUESTED');
     await runtime.hitl.decide({
       runId: first.runId,
       toolCallId: 'bash-1',
@@ -25,6 +26,7 @@ describe('external Bash HITL flow', () => {
       actor: 'tester',
       decidedAt: systemClock.now().toISOString(),
     });
+    expect((await runtime.eventStoreV2.readRun(first.runId, 0, 200)).map((item) => item.type)).toContain('CONFIRMATION_RESOLVED');
 
     const second = await drain(runtime.agent.resumeStream(first.runId));
     expect(second.status).toBe('paused');

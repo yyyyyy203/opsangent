@@ -19,6 +19,7 @@ import type {
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
+  RiskSeverity,
 } from '../contracts/index.js';
 import { toAgentError } from '../contracts/index.js';
 import type { ContextCompressor } from '../context-compressor/types.js';
@@ -65,17 +66,18 @@ export class AgentHarness implements DiagnosisAgent {
   public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const context = await this.dependencies.checkpoints.load(runId);
     if (context === null) throw new Error(`Checkpoint not found: ${runId}`);
-    return yield* this.streamContext(context, signal);
+    await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId: this.dependencies.ids.next('stream') });
+    return yield* this.streamContext(context, signal, true);
   }
 
-  private async *streamContext(context: AgentContext, signal: AbortSignal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+  private async *streamContext(context: AgentContext, signal: AbortSignal, resumed = false): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const queue = new AsyncEventQueue();
     const unsubscribe = this.dependencies.events.subscribe((event) => {
       if (event.runId === context.runId) queue.push(event);
     });
     let finalResult: DiagnosisRunResult | undefined;
     let failure: unknown;
-    const producer = this.run(context, signal)
+    const producer = this.run(context, signal, resumed)
       .then((result) => { finalResult = result; })
       .catch((error: unknown) => { failure = error; })
       .finally(() => queue.close());
@@ -95,18 +97,20 @@ export class AgentHarness implements DiagnosisAgent {
     }
   }
 
-  private async run(context: AgentContext, signal: AbortSignal): Promise<DiagnosisRunResult> {
+  private async run(context: AgentContext, signal: AbortSignal, resumed = false): Promise<DiagnosisRunResult> {
     const rootSpan = this.dependencies.observability.startSpan({
       name: 'inspection.run', kind: 'chain', runId: context.runId,
       attributes: { profileId: context.profileId },
     });
-    await this.publish('RUN_STARTED', context, { profileId: context.profileId });
-    await this.publishV2('RUN_STARTED', context, {
-      profile: context.profileId,
-      trigger: 'manual',
-      deadline: new Date(Date.parse(context.budget.startedAt) + context.budget.maxDurationMs).toISOString(),
-      versionSnapshot: {},
-    });
+    if (!resumed) {
+      await this.publish('RUN_STARTED', context, { profileId: context.profileId });
+      await this.publishV2('RUN_STARTED', context, {
+        profile: context.profileId,
+        trigger: 'manual',
+        deadline: new Date(Date.parse(context.budget.startedAt) + context.budget.maxDurationMs).toISOString(),
+        versionSnapshot: {},
+      });
+    }
     let finalText = '';
 
     try {
@@ -210,6 +214,20 @@ export class AgentHarness implements DiagnosisAgent {
           await this.dependencies.checkpoints.save(context);
           if (context.status === 'awaiting_confirmation') {
             await this.publish('REQUIRE_CONFIRM', context, batch.interrupt, stepId);
+            const risk = interruptRisk(batch.interrupt);
+            await this.publishV2('RISK_EVALUATED', context, { findings: [], mergedRisk: risk, policyVersion: 'risk-v1' }, stepId, batch.interrupt.toolCallId);
+            await this.publishV2('CONFIRMATION_REQUESTED', context, {
+              confirmationId: `confirmation:${context.runId}:${batch.interrupt.toolCallId}`,
+              toolCallIds: [batch.interrupt.toolCallId], riskSummary: `风险等级：${risk}`,
+              expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
+            }, stepId, batch.interrupt.toolCallId);
+          } else {
+            await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', context, {
+              requestId: `external:${context.runId}:${batch.interrupt.toolCallId}`,
+              toolCallId: batch.interrupt.toolCallId,
+              interactionPayload: { type: 'external_tool_execution', toolCallId: batch.interrupt.toolCallId },
+              expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
+            }, stepId, batch.interrupt.toolCallId);
           }
           await this.publish('RUN_PAUSED', context, { reason: batch.interrupt.interruptType }, stepId);
           await this.publishV2('RUN_PAUSED', context, {
@@ -443,4 +461,9 @@ function toolResultPayload(result: ToolExecutionResult): AgentEventPayloadMap['T
   const started = Date.parse(result.startedAt);
   const finished = result.finishedAt === undefined ? started : Date.parse(result.finishedAt);
   return { result, durationMs: Math.max(0, finished - started), evidenceIds: result.response?.evidenceIds ?? [] };
+}
+
+function interruptRisk(interrupt: { payload: Record<string, unknown> }): RiskSeverity {
+  const value = interrupt.payload.severity;
+  return value === 'LOW' || value === 'MEDIUM' || value === 'HIGH' || value === 'CRITICAL' ? value : 'SAFE';
 }
