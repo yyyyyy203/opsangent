@@ -12,6 +12,7 @@ export class SourceFailure extends Error {
 }
 
 type Permit = { epoch: number; probe: boolean };
+export interface CircuitStateEvent { type: 'opened' | 'half_opened' | 'closed'; openUntil?: number }
 export class SourceCircuitBreaker {
   private failures = 0;
   private openedAt = 0;
@@ -21,12 +22,14 @@ export class SourceCircuitBreaker {
   private readonly cooldownMs: number;
   private readonly now: () => number;
 
-  public constructor(options: { threshold?: number; cooldownMs?: number; now?: () => number } = {}) {
+  public constructor(options: { threshold?: number; cooldownMs?: number; now?: () => number; onEvent?: (event: CircuitStateEvent) => void } = {}) {
     this.threshold = options.threshold ?? 3;
     this.cooldownMs = options.cooldownMs ?? 30_000;
     this.now = options.now ?? Date.now;
+    this.onEvent = options.onEvent;
     if (!Number.isInteger(this.threshold) || this.threshold < 1 || !Number.isFinite(this.cooldownMs) || this.cooldownMs < 0) throw new Error('Invalid circuit configuration.');
   }
+  private readonly onEvent: ((event: CircuitStateEvent) => void) | undefined;
   public get state() { return this.status; }
 
   public acquire(): Permit {
@@ -34,6 +37,7 @@ export class SourceCircuitBreaker {
     if (this.status === 'open') {
       if (this.now() - this.openedAt < this.cooldownMs) throw new SourceFailure('CIRCUIT_OPEN');
       this.status = 'half_open';
+      this.onEvent?.({ type: 'half_opened' });
     }
     return { epoch: this.epoch, probe: this.status === 'half_open' };
   }
@@ -43,10 +47,10 @@ export class SourceCircuitBreaker {
     if (permit.epoch !== this.epoch) return;
     if (outcome === 'success') {
       this.failures = 0;
-      if (permit.probe) { this.status = 'closed'; this.epoch += 1; }
+      if (permit.probe) { this.status = 'closed'; this.epoch += 1; this.onEvent?.({ type: 'closed' }); }
     } else if (outcome === 'failure' || permit.probe) {
       if (permit.probe || ++this.failures >= this.threshold) {
-        this.status = 'open'; this.openedAt = this.now(); this.epoch += 1;
+        this.status = 'open'; this.openedAt = this.now(); this.epoch += 1; this.onEvent?.({ type: 'opened', openUntil: this.openedAt + this.cooldownMs });
       }
     }
   }

@@ -25,7 +25,7 @@ function canonical(value: unknown): string {
 
 export async function bindReadonlyMcpTools(
   connection: McpConnection, manifests: readonly ReadonlyMcpManifest[],
-  options: { signal: AbortSignal; executor: ResilientExecutor; now?: () => number },
+  options: { signal: AbortSignal; executor: ResilientExecutor; now?: () => number; onEvent?: (sourceId: string, event: RetryEvent) => void },
 ): Promise<Tool[]> {
   const now = options.now ?? Date.now;
   const descriptors = await options.executor.execute((signal) => connection.listTools(signal), { signal: options.signal, deadline: now() + 30_000 });
@@ -41,15 +41,15 @@ export async function bindReadonlyMcpTools(
     const tool: Tool = {
       name: manifest.localName, description: manifest.description, kind: 'evidence', inputSchema: manifest.inputSchema,
       isConcurrencySafe: () => manifest.concurrencySafe,
-      call: (input, callOptions) => invoke(connection, manifest.remoteName, tool, input, callOptions, options.executor, now),
+      call: (input, callOptions) => invoke(connection, manifest.localName, manifest.remoteName, tool, input, callOptions, options.executor, now, options.onEvent),
     };
     return Object.freeze(tool);
   });
 }
 
 async function* invoke(
-  connection: McpConnection, remoteName: string, tool: Tool, input: Record<string, unknown>,
-  options: ToolCallOptions, executor: ResilientExecutor, now: () => number,
+  connection: McpConnection, sourceId: string, remoteName: string, tool: Tool, input: Record<string, unknown>,
+  options: ToolCallOptions, executor: ResilientExecutor, now: () => number, onEvent?: (sourceId: string, event: RetryEvent) => void,
 ): AsyncGenerator<ToolResponseChunk, ToolResponse> {
   const validation = validateToolInput(tool, input);
   if (!validation.valid || !validation.value) throw new SourceFailure('TOOL_ARGUMENTS_SCHEMA_INVALID');
@@ -63,7 +63,7 @@ async function* invoke(
   const pending = executor.execute((attemptSignal) => connection.call(remoteName, validation.value ?? input, attemptSignal), {
     signal, deadline: Math.min(options.deadline ?? Infinity, now() + 30_000),
     ...(options.networkAttemptBudget ? { attemptBudget: options.networkAttemptBudget } : {}),
-    onEvent: (event) => { queue.push(event); wake(); },
+    onEvent: (event) => { onEvent?.(sourceId, event); queue.push(event); wake(); },
   }).then((value) => { response = value; }).catch((error: unknown) => { failure = error; }).finally(() => { complete = true; wake(); });
   try {
     while (!complete || queue.length > 0) {
