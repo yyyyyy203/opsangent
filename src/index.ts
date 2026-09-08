@@ -1,5 +1,6 @@
 export * from './agent/agent-harness.js';
 export * from './api/event-stream-service.js';
+export * from './api/http-server.js';
 export * from './api/sse-encoder.js';
 export * from './agent/types.js';
 export * from './application/hitl-service.js';
@@ -32,6 +33,8 @@ export * from './observability/noop-observability.js';
 export * from './observability/langsmith-observability.js';
 export * from './model/evented-model.js';
 export * from './model/retrying-model.js';
+export * from './model/model-attempt-observer.js';
+export * from './model/v2-attempt-observer.js';
 export * from './storage/in-memory-checkpoint-store.js';
 export * from './storage/in-memory-evidence-store.js';
 export * from './tool/batch-executor.js';

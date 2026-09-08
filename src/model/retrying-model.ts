@@ -8,6 +8,9 @@ export interface RetryingChatModelOptions {
   sleep?: (delayMs: number, signal: AbortSignal) => Promise<void>;
   observer?: ModelAttemptObserver;
   fallback?: ChatModel;
+  fallbackProvider?: string;
+  fallbackModel?: string;
+  onFallback?: (info: { runId: string; stepId: string; reason: ModelFailure; fromAttempt: number }) => void | Promise<void>;
 }
 
 /** Retries only failures that happen before any stream item is exposed to the caller. */
@@ -40,7 +43,10 @@ export class RetryingChatModel implements ChatModel {
         await this.options.sleep!(delayMs, callOptions.signal);
       }
     }
-    if (this.options.fallback !== undefined) return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1);
+    if (this.options.fallback !== undefined) {
+      if (lastError !== undefined) await this.options.onFallback?.({ runId: callOptions.runId, stepId: callOptions.stepId, reason: lastError, fromAttempt: this.options.maxAttempts });
+      return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1);
+    }
     throw lastError ?? new ModelFailure('protocol', 'Model call failed without an error.', false);
   }
 

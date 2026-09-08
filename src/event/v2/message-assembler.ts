@@ -45,7 +45,12 @@ export class MessageAssemblerV2 {
     const current = await this.getOrRestore(messageId);
     if (current === undefined) throw new MessageAssemblyError(`message ${messageId} has not started`);
     if (current.seenEventIds.has(event.eventId)) return structuredClone(current.message);
-    if (current.message.status !== 'streaming') throw new MessageAssemblyError(`message ${messageId} is already terminal`);
+    if (current.message.status !== 'streaming') {
+      // A persisted terminal snapshot may be rebuilt by replaying its historical events.
+      // Only events newer than the terminal timestamp are considered an invalid mutation.
+      if (current.message.completedAt !== undefined && event.timestamp <= current.message.completedAt) return structuredClone(current.message);
+      throw new MessageAssemblyError(`message ${messageId} is already terminal`);
+    }
 
     const next = structuredClone(current);
     switch (event.type) {

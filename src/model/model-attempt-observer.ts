@@ -34,3 +34,11 @@ export interface ModelAttemptObserver {
 export const NOOP_MODEL_ATTEMPT_OBSERVER: ModelAttemptObserver = {
   record: () => undefined,
 };
+
+export class CompositeModelAttemptObserver implements ModelAttemptObserver {
+  public constructor(private readonly observers: readonly ModelAttemptObserver[]) {}
+
+  public async record(event: ModelAttemptEvent): Promise<void> {
+    await Promise.allSettled(this.observers.map((observer) => Promise.resolve(observer.record(event))));
+  }
+}

@@ -79,6 +79,8 @@ describe('MessageAssemblerV2', () => {
     const restarted = new MessageAssemblerV2(store);
     const restored = await restarted.apply(event('MESSAGE_STARTED', { messageId: 'message-restart', role: 'assistant', status: 'streaming' }));
     expect(restored).toEqual(completed);
-    await expect(restarted.apply(event('CONTENT_BLOCK_DELTA', { messageId: 'message-restart', blockId: 'block-1', delta: '禁止追加', index: 0 }))).rejects.toThrow('already terminal');
+    const invalidAfterTerminal = event('CONTENT_BLOCK_DELTA', { messageId: 'message-restart', blockId: 'block-1', delta: '禁止追加', index: 0 });
+    invalidAfterTerminal.timestamp = '2026-09-07T10:00:03.000Z';
+    await expect(restarted.apply(invalidAfterTerminal)).rejects.toThrow('already terminal');
   });
 });

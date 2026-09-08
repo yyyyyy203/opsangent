@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import type { ModelResponse } from '../src/contracts/index.js';
+import type { ChatModel, ModelStreamEvent } from '../src/contracts/index.js';
+import { ModelFailure } from '../src/model/model-failure.js';
 import { z } from 'zod';
 
 describe('runtime V2 event wiring', () => {
@@ -29,5 +31,32 @@ describe('runtime V2 event wiring', () => {
     const events = await runtime.eventStoreV2.readRun(result.runId, 0, 200);
     expect(events.filter((item) => item.type === 'TOOL_RESULT')).toHaveLength(1);
     expect(events.map((item) => item.type)).toContain('RISK_EVALUATED');
+  });
+
+  it('emits model attempt failure and fallback activation through the runtime', async () => {
+    const primary: ChatModel = {
+      async *stream() {
+        await Promise.resolve();
+        for (const item of [] as ModelStreamEvent[]) yield item;
+        throw new ModelFailure('server', 'primary unavailable', true);
+      },
+    };
+    const fallback: ChatModel = {
+      async *stream() {
+        await Promise.resolve();
+        yield { type: 'text_delta', delta: 'fallback result' };
+        return { text: 'fallback result', toolCalls: [] };
+      },
+    };
+    const runtime = createAgentRuntime({
+      model: primary, workspaceRoots: [], modelRetry: {
+        maxAttempts: 1, fallback, fallbackProvider: 'backup', fallbackModel: 'backup-model', sleep: () => Promise.resolve(),
+      },
+    });
+    const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
+    const events = await runtime.eventStoreV2.readRun(result.runId, 0, 100);
+    expect(events.map((item) => item.type)).toContain('MODEL_CALL_FAILED');
+    expect(events.map((item) => item.type)).toContain('MODEL_FALLBACK_ACTIVATED');
+    expect(events.at(-1)?.type).toBe('RUN_FINISHED');
   });
 });

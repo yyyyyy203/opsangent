@@ -31,6 +31,8 @@ import { EventStreamService } from '../api/event-stream-service.js';
 import { EventedChatModel } from '../model/evented-model.js';
 import { RetryingChatModel, type RetryingChatModelOptions } from '../model/retrying-model.js';
 import { ObservabilityModelAttemptObserver } from '../observability/model-attempt-observer.js';
+import { CompositeModelAttemptObserver } from '../model/model-attempt-observer.js';
+import { V2ModelAttemptObserver } from '../model/v2-attempt-observer.js';
 import { MessageAssemblerV2 } from '../event/v2/message-assembler.js';
 import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/v2/projection-runner.js';
 import { SqliteProjectionCheckpointStore, SqliteProjectionFailureSink } from '../infrastructure/sqlite/index.js';
@@ -80,14 +82,37 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
   const langSmithProjectionRunnerV2 = new ProjectionRunnerV2(langSmithProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
+  const messageAssemblerV2 = new MessageAssemblerV2(eventStoreV2);
   eventPublisherV2.subscribe(auditProjectionRunnerV2);
   eventPublisherV2.subscribe(langSmithProjectionRunnerV2);
+  eventPublisherV2.subscribe({ name: 'message-assembler', project: (event) => messageAssemblerV2.apply(event).then(() => undefined) });
   const publicProjectorV2 = new PublicEventProjectorV2();
   const model = options.modelRetry === undefined
     ? options.model
     : new RetryingChatModel(options.model, {
       ...options.modelRetry,
-      observer: options.modelRetry.observer ?? new ObservabilityModelAttemptObserver(observability),
+      onFallback: async (info) => {
+        await options.modelRetry?.onFallback?.(info);
+        if (options.modelRetry?.fallback !== undefined) {
+          await eventPublisherV2.publish(eventFactoryV2.create('MODEL_FALLBACK_ACTIVATED', {
+            runId: info.runId,
+            correlationId: `run:${info.runId}`,
+            visibility: 'audit',
+            durability: 'durable',
+            stepId: info.stepId,
+          }, {
+            fromProvider: options.modelProvider ?? 'configured',
+            fromModel: options.modelName ?? 'configured',
+            toProvider: options.modelRetry.fallbackProvider ?? 'fallback',
+            toModel: options.modelRetry.fallbackModel ?? 'fallback',
+            reasonCode: info.reason.details.category as string,
+          })).then(() => undefined);
+        }
+      },
+      observer: options.modelRetry.observer ?? new CompositeModelAttemptObserver([
+        new ObservabilityModelAttemptObserver(observability),
+        new V2ModelAttemptObserver({ factory: eventFactoryV2, publisher: eventPublisherV2, provider: options.modelProvider ?? 'configured', model: options.modelName ?? 'configured', correlationId: (runId) => `run:${runId}`, ids, now: () => clock.now().getTime() }),
+      ]),
     });
   const toolkit = new Toolkit();
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
@@ -164,7 +189,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     projectionCheckpointsV2,
     auditProjectionRunnerV2,
     langSmithProjectionRunnerV2,
-    messageAssemblerV2: new MessageAssemblerV2(eventStoreV2),
+    messageAssemblerV2,
     replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
     close: () => sqliteDatabase?.close(),
