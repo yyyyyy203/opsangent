@@ -4,6 +4,12 @@ export interface SpanStart {
   name: string;
   kind: SpanKind;
   runId: string;
+  spanKey?: string;
+  parentSpanKey?: string;
+  correlationId?: string;
+  causationId?: string;
+  attemptId?: string;
+  toolCallId?: string;
   stepId?: string;
   input?: unknown;
   attributes?: Record<string, unknown>;

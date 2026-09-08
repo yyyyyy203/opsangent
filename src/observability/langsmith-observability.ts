@@ -12,6 +12,7 @@ export interface LangSmithObservabilityOptions {
 export class LangSmithObservability implements Observability {
   private readonly client: Client;
   private readonly roots = new Map<string, RunTree>();
+  private readonly spans = new Map<string, RunTree>();
   private readonly pending = new Set<Promise<unknown>>();
 
   public constructor(private readonly options: LangSmithObservabilityOptions) {
@@ -19,10 +20,18 @@ export class LangSmithObservability implements Observability {
   }
 
   public startSpan(input: SpanStart): SpanHandle {
-    const parent = input.kind === 'chain' ? undefined : this.roots.get(input.runId);
+    const parent = input.parentSpanKey === undefined
+      ? (input.kind === 'chain' ? undefined : this.roots.get(input.runId))
+      : this.spans.get(input.parentSpanKey);
     const metadata = {
       ...input.attributes,
       agentRunId: input.runId,
+      ...(input.spanKey === undefined ? {} : { spanKey: input.spanKey }),
+      ...(input.parentSpanKey === undefined ? {} : { parentSpanKey: input.parentSpanKey }),
+      ...(input.correlationId === undefined ? {} : { correlationId: input.correlationId }),
+      ...(input.causationId === undefined ? {} : { causationId: input.causationId }),
+      ...(input.attemptId === undefined ? {} : { attemptId: input.attemptId }),
+      ...(input.toolCallId === undefined ? {} : { toolCallId: input.toolCallId }),
       ...(input.stepId === undefined ? {} : { stepId: input.stepId }),
     };
     const common = {
@@ -39,9 +48,11 @@ export class LangSmithObservability implements Observability {
       tracingEnabled: this.options.enabled ?? true,
     });
     if (input.kind === 'chain') this.roots.set(input.runId, run);
+    if (input.spanKey !== undefined) this.spans.set(input.spanKey, run);
     this.track(run.postRun(true));
     return new LangSmithSpanHandle(run, (promise) => this.track(promise), () => {
       if (input.kind === 'chain') this.roots.delete(input.runId);
+      if (input.spanKey !== undefined) this.spans.delete(input.spanKey);
     });
   }
 

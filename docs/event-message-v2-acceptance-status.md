@@ -11,6 +11,7 @@
 - 已补 `ReplayBufferV2.findById`，cursor 先按 eventId 解析，不把客户端 cursor 退化成猜测 sequence。
 - 已修复 V2 基础 lint 债务：内存/SQLite 存储保持 Promise API 且不再使用无 await 的 async 方法；SQLite 写入继续使用 `BEGIN IMMEDIATE`；V2 common/lifecycle/message assembler 的类型问题已清理。
 - 最新验证：`pnpm lint` 通过；`pnpm typecheck` 通过；`pnpm build` 通过；`pnpm test` 为 31 files / 182 tests passed，1 个真实 Prometheus 测试按默认配置 skipped。
+- 已补 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`：审计记录只保留脱敏结构化摘要；模型、工具、Subagent 使用显式 `spanKey/parentSpanKey` 建立父子关系；模型完成事件记录 usage、cacheHit、TTFT 和耗时；远端观测 start/end/flush 失败不会影响 Agent 主流程。新增投影测试 3 项通过。
 
 ## 接线前必须解决的缺口
 
@@ -21,6 +22,7 @@
 - 已补内存/SQLite 共用测试：同批重复 ID 拒绝且不占序号，无效预留数量不修改状态；SQLite 事件、序号预留与消息写入均使用 BEGIN IMMEDIATE。仍需扩大跨连接并发及损坏记录测试。
 - 当前已知质量门槛：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均已通过。不能把四项命令通过解释为一期完成，因为运行时生产点和 Audit/LangSmith 等范围尚未实现完。
 - EventStreamService 仍是框架无关 SSE frame 生成器，尚未接入实际 HTTP Controller、前端消费端或 runtime bootstrap 默认组装。
+- LangSmith 投影目前已具备事件到 span 的核心映射，但仍需接入真实 runtime 生产点，并补齐重试/降级事件、幂等消费和有界 flush 的集成验收。
 
 ## 剩余实施范围
 

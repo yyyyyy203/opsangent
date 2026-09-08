@@ -4,9 +4,9 @@
 
 2026-09-08：继续实施 [Event and Message V2 Implementation Plan](./superpowers/plans/2026-09-07-event-message-v2.md)。当前已落地 V2 MessageBlock 契约、V2 Event PayloadMap/Schema、EventStore/MessageStore 抽象、内存与 SQLite 实现、ReplayBuffer、MessageAssembler、EventPublisher、V1/Public 初版投影，以及框架无关的 SSE 编码和 `EventStreamService.open`。
 
-本轮新增 `EventStreamService`：支持初始回放、`Last-Event-ID` cursor、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 淘汰后返回 `message_snapshot`。同时补齐 `ReplayBufferV2.findById`，并清理 V2 基础 lint 债务，保证内存/SQLite 存储的 Promise API 仍以 rejected Promise 暴露同步错误。
+本轮新增 `EventStreamService`：支持初始回放、`Last-Event-ID` cursor、先订阅后 catch-up、live handoff 去重、Abort 清理、未知 cursor 拒绝，以及 transient Delta 淘汰后返回 `message_snapshot`。同时补齐 `ReplayBufferV2.findById`，并清理 V2 基础 lint 债务，保证内存/SQLite 存储的 Promise API 仍以 rejected Promise 暴露同步错误。新增 `AuditProjectorV2` 与 `LangSmithEventProjectorV2`，支持脱敏审计、显式父子 span、模型用量/缓存/TTFT 记录和观测失败隔离。
 
-已验证：`pnpm lint` 通过，`pnpm typecheck` 通过，`pnpm test` 为 31 个文件 182 项通过、1 项真实 Prometheus 默认跳过，`pnpm build` 通过。尚未把本增量解释为一期完成；Audit/LangSmith 投影、模型/工具/HITL/runtime 真实事件生产点和 bootstrap 组装仍需继续。
+已验证：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均通过；全量测试为 32 个文件 185 项通过、1 项真实 Prometheus 默认跳过。尚未把本增量解释为一期完成；模型/工具/HITL/runtime 真实事件生产点和 bootstrap 组装仍需继续。
 
 ## 设计决策：Event / Message V2 作为一期协议地基
 
