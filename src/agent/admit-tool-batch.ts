@@ -1,12 +1,20 @@
 import type { AgentContext, AgentError, Clock, RawToolCall, ToolCall, ToolExecutionResult } from '../contracts/index.js';
-import type { ToolAdmission } from '../tool/admission.js';
+import type { AdmissionGateRecord, ToolAdmission } from '../tool/admission.js';
+
+export interface AdmittedToolBatch {
+  calls: ToolCall[];
+  rejected: ToolExecutionResult[];
+  repairs: Array<{ toolCallId: string; stage: string; repairs: string[] }>;
+  gates: Array<{ toolCallId: string; records: AdmissionGateRecord[] }>;
+}
 
 export function admitToolBatch(
   candidates: Array<ToolCall | RawToolCall>, context: AgentContext, admission: ToolAdmission, clock: Clock, signal: AbortSignal,
-): { calls: ToolCall[]; rejected: ToolExecutionResult[]; repairs: Array<{ toolCallId: string; stage: string; repairs: string[] }> } {
+): AdmittedToolBatch {
   const calls: ToolCall[] = [];
   const rejected: ToolExecutionResult[] = [];
   const repairs: Array<{ toolCallId: string; stage: string; repairs: string[] }> = [];
+  const gates: AdmittedToolBatch['gates'] = [];
   const corrections = context.toolCorrections ??= {};
   const admitted = context.admittedToolCallIds ??= [];
   for (const candidate of candidates) {
@@ -22,6 +30,7 @@ export function admitToolBatch(
       else {
         try {
           const outcome = admission.validate(candidate);
+          gates.push({ toolCallId: candidate.id, records: outcome.gates });
           if (outcome.accepted) {
             calls.push(outcome.call);
             admitted.push(candidate.id);
@@ -46,5 +55,5 @@ export function admitToolBatch(
     const now = clock.now().toISOString();
     rejected.push({ toolCallId: candidate.id, toolName: candidate.name, status: signal.aborted ? 'aborted' : 'failed', error, startedAt: now, finishedAt: now });
   }
-  return { calls, rejected, repairs };
+  return { calls, rejected, repairs, gates };
 }
