@@ -86,4 +86,47 @@ describe('RetryingChatModel', () => {
     while (true) { const result = await stream.next(); if (result.done) break; }
     expect(fallbacks).toEqual(['run-fallback:server']);
   });
+
+  it('does not retry or fall back for terminal billing failures', async () => {
+    let primaryCalls = 0;
+    let fallbackCalls = 0;
+    const primary: ChatModel = { async *stream() {
+      await Promise.resolve();
+      for (const item of [] as ModelStreamEvent[]) yield item;
+      primaryCalls += 1;
+      throw new ModelFailure('auth', 'billing failure', false, { status: 402 }, { disposition: 'terminal' });
+    } };
+    const fallback: ChatModel = { async *stream() {
+      await Promise.resolve();
+      for (const item of [] as ModelStreamEvent[]) yield item;
+      fallbackCalls += 1;
+      return { text: 'fallback', toolCalls: [] };
+    } };
+    const model = new RetryingChatModel(primary, { maxAttempts: 3, fallback, sleep: () => Promise.resolve() });
+    const stream = model.stream([], [], { runId: 'run-terminal', stepId: 'step-1', signal: new AbortController().signal });
+
+    await expect(stream.next()).rejects.toMatchObject({ disposition: 'terminal' });
+    expect(primaryCalls).toBe(1);
+    expect(fallbackCalls).toBe(0);
+  });
+
+  it('does not schedule a retry when Retry-After exceeds the bounded wait', async () => {
+    let calls = 0;
+    const delays: number[] = [];
+    const primary: ChatModel = { async *stream() {
+      await Promise.resolve();
+      for (const item of [] as ModelStreamEvent[]) yield item;
+      calls += 1;
+      throw new ModelFailure('rate_limit', 'try later', true, { retryAfterMs: 2_001 });
+    } };
+    const model = new RetryingChatModel(primary, {
+      maxAttempts: 2,
+      sleep: (delay) => { delays.push(delay); return Promise.resolve(); },
+    });
+    const stream = model.stream([], [], { runId: 'run-retry-after', stepId: 'step-1', signal: new AbortController().signal });
+
+    await expect(stream.next()).rejects.toMatchObject({ details: { category: 'rate_limit' } });
+    expect(calls).toBe(1);
+    expect(delays).toEqual([]);
+  });
 });

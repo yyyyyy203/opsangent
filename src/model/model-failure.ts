@@ -13,6 +13,12 @@ export type ModelFailureCategory =
 
 type ModelFailurePhase = 'connect' | 'first_byte' | 'idle' | 'overall' | 'run_deadline';
 
+export type ModelFailureDisposition = 'retryable' | 'fallback_only' | 'terminal' | 'aborted';
+
+export interface ModelFailureOptions {
+  disposition?: ModelFailureDisposition;
+}
+
 const MODEL_FAILURE_PHASES: ReadonlySet<string> = new Set<ModelFailurePhase>([
   'connect',
   'first_byte',
@@ -24,24 +30,30 @@ const MODEL_FAILURE_PHASES: ReadonlySet<string> = new Set<ModelFailurePhase>([
 export class ModelFailure extends Error implements AgentError {
   public readonly code = 'MODEL_ERROR' as const;
   public readonly details: Record<string, unknown>;
+  public readonly disposition: ModelFailureDisposition;
+  public readonly fallbackAllowed: boolean;
 
   public constructor(
     category: ModelFailureCategory,
     message: string,
     public readonly retryable: boolean,
     details: Record<string, unknown> = {},
+    options: ModelFailureOptions = {},
   ) {
     super(message);
     this.name = 'ModelFailure';
-    this.details = sanitizeDetails(category, details);
+    this.disposition = options.disposition ?? defaultDisposition(category, retryable);
+    this.fallbackAllowed = this.disposition === 'retryable' || this.disposition === 'fallback_only';
+    this.details = sanitizeDetails(category, details, this.disposition);
   }
 }
 
 function sanitizeDetails(
   category: ModelFailureCategory,
   details: Record<string, unknown>,
+  disposition: ModelFailureDisposition,
 ): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = { category };
+  const sanitized: Record<string, unknown> = { category, disposition };
 
   if (typeof details.status === 'number'
     && Number.isInteger(details.status)
@@ -64,4 +76,9 @@ function sanitizeDetails(
   }
 
   return sanitized;
+}
+
+function defaultDisposition(category: ModelFailureCategory, retryable: boolean): ModelFailureDisposition {
+  if (category === 'aborted') return 'aborted';
+  return retryable ? 'retryable' : 'fallback_only';
 }

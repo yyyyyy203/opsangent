@@ -37,13 +37,14 @@ export class RetryingChatModel implements ChatModel {
         const failure = asModelFailure(error);
         lastError = failure;
         await this.options.observer!.record({ type: 'failed', runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), attempt, category: categoryOf(failure), retryable: failure.retryable });
-        if (!failure.retryable || attempt >= this.options.maxAttempts) break;
+        if (failure.disposition !== 'retryable' || !failure.retryable || attempt >= this.options.maxAttempts) break;
         const delayMs = this.delay(attempt, failure);
+        if (delayMs === undefined) break;
         await this.options.observer!.record({ type: 'retry_scheduled', runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), attempt, category: categoryOf(failure), delayMs });
         await this.options.sleep!(delayMs, callOptions.signal);
       }
     }
-    if (this.options.fallback !== undefined) {
+    if (this.options.fallback !== undefined && (lastError === undefined || lastError.fallbackAllowed)) {
       if (lastError !== undefined) await this.options.onFallback?.({ runId: callOptions.runId, stepId: callOptions.stepId, ...identityFields(callOptions), reason: lastError, fromAttempt: this.options.maxAttempts });
       return yield* this.runAttempt(this.options.fallback, messages, tools, callOptions, 1);
     }
@@ -72,10 +73,13 @@ export class RetryingChatModel implements ChatModel {
     }
   }
 
-  private delay(attempt: number, error: ModelFailure): number {
+  private delay(attempt: number, error: ModelFailure): number | undefined {
     const value = typeof this.options.retryDelayMs === 'function' ? this.options.retryDelayMs(attempt, error) : this.options.retryDelayMs ?? 0;
     if (!Number.isFinite(value) || value < 0) throw new RangeError('retry delay must be finite and non-negative');
-    return Math.floor(value);
+    const retryAfterMs = error.details.retryAfterMs;
+    if (typeof retryAfterMs === 'number' && retryAfterMs > 2_000) return undefined;
+    const requestedDelay = typeof retryAfterMs === 'number' ? Math.max(value, retryAfterMs) : value;
+    return Math.min(2_000, Math.floor(requestedDelay));
   }
 }
 
