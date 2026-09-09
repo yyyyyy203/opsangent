@@ -63,7 +63,7 @@ Modify:
 - Produces legacyTextDeltaPayload(input: { toolCallId: string; delta: string }): Record<string, unknown>.
 - Produces legacyRunFinishedPayload(input: { outcome: 'complete' | 'partial' | 'inconclusive'; finalText?: string; reportId?: string; usage?: Record<string, unknown>; durationMs: number }): Record<string, unknown>.
 
-- [ ] Step 1: Write failing contract tests
+- [x] Step 1: Write failing contract tests
 
 Add these assertions before changing production code:
 
@@ -85,23 +85,23 @@ it('projects a tool-created event to the safe direct-generator payload', () => {
 });
 ~~~
 
-- [ ] Step 2: Run the focused tests and verify the expected red failure
+- [x] Step 2: Run the focused tests and verify the expected red failure
 
 Run: pnpm test -- test/event-v2-lifecycle.test.ts test/event-v2-projections.test.ts
 
 Expected: the new finalText case is rejected or the tool-created projection still contains the input, proving the tests exercise the missing contract change.
 
-- [ ] Step 3: Implement the smallest compatible mapping
+- [x] Step 3: Implement the smallest compatible mapping
 
 Add finalText?: string to RunFinishedPayloadV2 and its strict schema. Make V1CompatibilityProjector return { id, name } for TOOL_CALL_CREATED, and use the pure builders for tool-start/progress/text and finish payloads. Do not change V2 event names, required fields, or V2 stored tool-call payloads.
 
-- [ ] Step 4: Run the focused tests and verify green
+- [x] Step 4: Run the focused tests and verify green
 
 Run: pnpm test -- test/event-v2-lifecycle.test.ts test/event-v2-projections.test.ts
 
 Expected: PASS with zero failures.
 
-- [ ] Step 5: Commit the contract boundary
+- [x] Step 5: Commit the contract boundary
 
 ~~~text
 git add src/contracts/event-v2/lifecycle.ts src/event/v1-payloads.ts src/event/projectors/v1-projector.ts test/event-v2-lifecycle.test.ts test/event-v2-projections.test.ts
@@ -120,7 +120,7 @@ git commit -m "refactor: define shared V1 event payload mapping"
 - ToolRunner.stream(tool, input, options): AsyncGenerator<ToolResponseChunk, ToolResponse>.
 - ToolRunner.execute(tool, input, options, callbacks): Promise<ToolResponse> remains available and drains stream() so existing callers and callback tests continue to work.
 
-- [ ] Step 1: Write the failing stream test
+- [x] Step 1: Write the failing stream test
 
 ~~~typescript
 it('exposes each ToolResponseChunk through stream and returns the final response', async () => {
@@ -148,23 +148,23 @@ it('exposes each ToolResponseChunk through stream and returns the final response
 });
 ~~~
 
-- [ ] Step 2: Run the focused test and verify red
+- [x] Step 2: Run the focused test and verify red
 
 Run: pnpm test -- test/tool-runner.test.ts
 
 Expected: TypeScript/test failure because ToolRunner.stream() is not yet implemented.
 
-- [ ] Step 3: Implement stream() and keep the old wrapper
+- [x] Step 3: Implement stream() and keep the old wrapper
 
 Implement DefaultToolRunner.stream() by yielding items from an async-generator tool return and returning the final ToolResponse; for non-generator returns, await and return without chunks. Implement execute() by repeatedly calling stream.next() and invoking callbacks.onChunk for each yielded chunk.
 
-- [ ] Step 4: Run the focused tests and verify green
+- [x] Step 4: Run the focused tests and verify green
 
 Run: pnpm test -- test/tool-runner.test.ts
 
 Expected: PASS for both the new stream test and the existing callback compatibility test.
 
-- [ ] Step 5: Commit the runner change
+- [x] Step 5: Commit the runner change
 
 ~~~text
 git add src/tool/tool-runner.ts test/tool-runner.test.ts
@@ -183,7 +183,7 @@ git commit -m "feat: expose streaming tool runner"
 - ToolExecutionPipeline.executeStream(call, context, stepId, signal): AsyncGenerator<AgentEvent, ExecutionOutcome>.
 - ToolExecutionPipeline.execute(call, context, stepId, signal): Promise<ExecutionOutcome> remains available and drains executeStream() while discarding V1 events.
 
-- [ ] Step 1: Write the failing pipeline stream test
+- [x] Step 1: Write the failing pipeline stream test
 
 Build the pipeline with Toolkit, GuardEngine([]), HookExecutor([]), DefaultToolRunner, InMemoryCheckpointStore, EventBus, a fixed EventFactory, NoopObservability, and actionMode: 'dry_run'. Register a safe evidence tool whose async-generator return yields one progress chunk and one text delta. Assert:
 
@@ -205,25 +205,25 @@ expect(outcome?.type).toBe('completed');
 expect(outcome?.result.status).toBe('success');
 ~~~
 
-- [ ] Step 2: Run the focused test and verify red
+- [x] Step 2: Run the focused test and verify red
 
 Run: pnpm test -- test/tool-execution-stream.test.ts
 
 Expected: failure because executeStream() does not exist and the pipeline currently only publishes through EventSink.
 
-- [ ] Step 3: Implement executeStream() without bypassing guards or hooks
+- [x] Step 3: Implement executeStream() without bypassing guards or hooks
 
 Refactor the validated execution path into an async generator. Await V2 TOOL_STARTED, then yield its canonical V1 event. Consume runner.stream() manually so every progress/text chunk is converted to V2 plus the matching canonical V1 TOOL_PROGRESS event. After producing the result, await V2 TOOL_RESULT and yield the V1 result event. Keep external execution, guard rejection, pre-hook interruption, post-hook abort, idempotency, evidence collection, and error conversion in the same pipeline. Implement execute() as a drain wrapper.
 
 For V2 mode, do not publish a second V1 EventBus copy. For no-V2 mode, executeStream() must publish the same V1 event to the injected EventSink before yielding it. Preserve the existing no-V2 external execution notification behavior and do not expose raw input in the direct event payload.
 
-- [ ] Step 4: Run focused and existing tool tests
+- [x] Step 4: Run focused and existing tool tests
 
 Run: pnpm test -- test/tool-execution-stream.test.ts test/tool-runner.test.ts test/tool-boundaries.test.ts
 
 Expected: PASS with the existing guard, hook, result, and streaming behavior intact.
 
-- [ ] Step 5: Commit the pipeline change
+- [x] Step 5: Commit the pipeline change
 
 ~~~text
 git add src/tool/execution-pipeline.ts test/tool-execution-stream.test.ts
@@ -244,31 +244,31 @@ git commit -m "feat: stream tool execution events"
 - ToolBatchExecutor.executeStream(calls, context, stepId, signal): AsyncGenerator<AgentEvent, BatchExecutionResult>.
 - ToolBatchExecutor.execute() remains a drain wrapper returning Promise<BatchExecutionResult>.
 
-- [ ] Step 1: Write the failing multiplexer and batch tests
+- [x] Step 1: Write the failing multiplexer and batch tests
 
 Use two small async generators that yield distinct markers after different resolved Promises and return 1 and 2. Assert the merged stream contains both markers and returns [1, 2]. Then execute two isConcurrencySafe() === true tools through ToolBatchExecutor.executeStream() and assert both tool lifecycle streams are visible while BatchExecutionResult.results is ordered by calls.
 
 Also assert an unsafe second tool starts only after the first unsafe tool returns, and that an interrupted unsafe tool marks later calls as skipped as the existing Promise API does.
 
-- [ ] Step 2: Run the focused tests and verify red
+- [x] Step 2: Run the focused tests and verify red
 
 Run: pnpm test -- test/tool-batch-stream.test.ts
 
 Expected: failure because neither the multiplexer nor executeStream() exists.
 
-- [ ] Step 3: Implement the minimal race-based merge
+- [x] Step 3: Implement the minimal race-based merge
 
 Start one .next() promise per active child. Race active promises, yield non-done values, schedule the next .next() for that child, and collect done values by original index. On a child rejection, close all remaining generators and rethrow so ToolBatchExecutor can convert that call to its existing failure result. In finally, call .return() on unfinished children and await all cleanup promises.
 
 Use the multiplexer for the safe bucket, then drain unsafe pipeline streams one by one. Keep mixed evidence/action deferral, interrupt detection, skipped-result creation, and input-order result sorting unchanged.
 
-- [ ] Step 4: Run focused and existing batch/boundary tests
+- [x] Step 4: Run focused and existing batch/boundary tests
 
 Run: pnpm test -- test/tool-batch-stream.test.ts test/event-message-v2-acceptance.test.ts test/tool-boundaries.test.ts
 
 Expected: PASS, including safe-tool parallelism and deterministic result order.
 
-- [ ] Step 5: Commit the batch stream change
+- [x] Step 5: Commit the batch stream change
 
 ~~~text
 git add src/tool/async-generator-multiplexer.ts src/tool/batch-executor.ts test/tool-batch-stream.test.ts
@@ -291,19 +291,19 @@ git commit -m "feat: merge concurrent tool event streams"
 - AgentHarness.reason(context, stepId, signal): AsyncGenerator<AgentEvent, ModelResponse>.
 - AgentHarness.resumePendingToolCall(frame, signal): AsyncGenerator<AgentEvent, boolean>.
 
-- [ ] Step 1: Add failing direct-stream and drain regression tests
+- [x] Step 1: Add failing direct-stream and drain regression tests
 
 Add a test that calls replyStream() directly with a one-shot model and asserts the yielded sequence contains RUN_STARTED, STEP_STARTED, REASONING_STARTED, TEXT_DELTA, and RUN_FINISHED, while the final done.value is a completed DiagnosisRunResult. Keep the existing reply() assertions to prove draining returns the same result.
 
 Add a streaming-tool case that asserts TOOL_STARTED, both TOOL_PROGRESS events, and TOOL_RESULT are present in the direct Generator output.
 
-- [ ] Step 2: Run the focused tests and verify red
+- [x] Step 2: Run the focused tests and verify red
 
 Run: pnpm test -- test/model-harness-contract.test.ts test/runtime-events-v2.test.ts
 
 Expected: the new direct stream assertions fail because the current implementation still depends on streamContext() and the batch Promise does not return tool events to the Generator.
 
-- [ ] Step 3: Implement direct run()/mainLoop() delegation
+- [x] Step 3: Implement direct run()/mainLoop() delegation
 
 Remove streamContext() and the Harness import/use of AsyncEventQueue. Construct a RunExecutionFrame in replyStream() and resumeStream(). Make run() create the root span, publish V2 lifecycle facts in order, delegate to mainLoop(), and save/flush in one finally.
 
@@ -311,19 +311,19 @@ Convert every V1 publication to yield* this.publish(...); publish() creates one 
 
 Use V2 payloads as the source for parity-sensitive V1 payloads. Emit direct TOOL_CALL_CREATED only for admitted calls in V2 mode and expose only { id, name }. Emit direct REQUIRE_CONFIRM and EXTERNAL_TOOL_REQUESTED after their V2 requested event using the same safe payload. Include finalText in V2 RUN_FINISHED and use that payload for V1 RUN_FINISHED.
 
-- [ ] Step 4: Apply the checkpoint policy and terminal state handling
+- [x] Step 4: Apply the checkpoint policy and terminal state handling
 
 Keep the explicit save immediately after a pause state and at the end of a non-terminal iteration; keep the resumed pending-action save after replacement or re-pause. Remove the explicit normal-completion and catch-block saves. run() finally saves frame.context for all outcomes.
 
 Set frame.naturalExit = true only after the final event of a normal completion, failure, or pause has been yielded and the method is about to return. If Generator return()/throw() closes the stream before that marker and the run is still active, set context.status = 'cancelled', set context.failure to { code: 'ABORTED', message: 'Agent stream consumer closed.', retryable: false }, fail the root span, and await V2 RUN_CANCELLED with actor: 'stream_consumer', reason: 'stream_consumer_closed', and the current stage. Do not yield after close. Always save and flush in finally; do not overwrite an already committed terminal failure/completion.
 
-- [ ] Step 5: Run focused harness tests and verify green
+- [x] Step 5: Run focused harness tests and verify green
 
 Run: pnpm test -- test/model-harness-contract.test.ts test/runtime-events-v2.test.ts test/external-bash-flow.test.ts
 
 Expected: PASS, including model deadline propagation, raw tool-call persistence, error recovery, V2 event order, and external Bash HITL resume.
 
-- [ ] Step 6: Commit the Harness refactor
+- [x] Step 6: Commit the Harness refactor
 
 ~~~text
 git add src/agent/agent-harness.ts test/model-harness-contract.test.ts test/runtime-events-v2.test.ts
@@ -343,7 +343,7 @@ git commit -m "refactor: drive agent runs with direct async generators"
 - Test helper drainWithEvents(stream): Promise<{ events: AgentEvent[]; result: DiagnosisRunResult }>.
 - Test helper comparable(event): { type: AgentEvent['type']; runId: string; stepId?: string; payload: AgentEvent['payload'] }.
 
-- [ ] Step 1: Write the failing parity test
+- [x] Step 1: Write the failing parity test
 
 Run a V2-enabled runtime with a model that requests one streaming evidence tool and then returns final text. Collect direct Generator events and runtime.events events. Compare the complete comparable arrays, not just counts:
 
@@ -355,29 +355,29 @@ expect(direct.find((event) => event.type === 'RUN_FINISHED')?.payload).toMatchOb
 
 Do not compare independently allocated timestamps; separately assert every event timestamp is a valid ISO timestamp and all events have the same runId.
 
-- [ ] Step 2: Run the parity test and verify red
+- [x] Step 2: Run the parity test and verify red
 
 Run: pnpm test -- test/agent-harness-async-generator.test.ts
 
 Expected: failure showing the current queue/projector paths do not provide the same direct complete tool event sequence.
 
-- [ ] Step 3: Add early-close and save-count tests
+- [x] Step 3: Add early-close and save-count tests
 
 Use a checkpoint spy that records save() calls and an observability spy that records flush(). After consuming the first direct event, call await stream.return(undefined as never) and assert the saved context is cancelled, has failure.code === 'ABORTED', the save count is one final cleanup save, and flush() was called. Assert the V2 store contains RUN_CANCELLED.
 
 For normal completion and model failure, assert finally saves the final context; for a non-terminal tool iteration, assert the explicit iteration save plus final cleanup save; for a pause, assert the pause checkpoint is written before returning and the final cleanup save also occurs.
 
-- [ ] Step 4: Implement only parity/test fixes required by the approved design
+- [x] Step 4: Implement only parity/test fixes required by the approved design
 
 If parity fails, fix the shared payload builder or the order of await publishV2() and yield* publish(); do not weaken the comparison by dropping payload fields. If close handling fails, fix frame terminal markers and Generator delegation cleanup; do not reintroduce an EventBus queue.
 
-- [ ] Step 5: Run the focused compatibility suite
+- [x] Step 5: Run the focused compatibility suite
 
 Run: pnpm test -- test/agent-harness-async-generator.test.ts test/v1-event-bus-projection.test.ts test/event-message-v2-acceptance.test.ts test/external-bash-flow.test.ts
 
 Expected: PASS with exact comparable V1 event arrays and no duplicate V2 events.
 
-- [ ] Step 6: Commit the parity and recovery tests
+- [x] Step 6: Commit the parity and recovery tests
 
 ~~~text
 git add test/agent-harness-async-generator.test.ts test/v1-event-bus-projection.test.ts test/event-message-v2-acceptance.test.ts
@@ -391,13 +391,13 @@ git commit -m "test: verify async generator event parity and recovery"
 - Modify: docs/superpowers/specs/2026-09-09-agent-harness-async-generator-design.md if implementation details require wording clarification.
 - Modify: docs/superpowers/plans/2026-09-09-agent-harness-async-generator-tool-stream.md to mark completed steps and record implementation rulings.
 
-- [ ] Step 1: Verify no Harness queue bridge remains
+- [x] Step 1: Verify no Harness queue bridge remains
 
 Run: rg -n "AsyncEventQueue|streamContext|events\\.subscribe" src/agent src/tool
 
 Expected: no matches in src/agent/agent-harness.ts; any remaining utility definition must be unused by the Harness and justified in the plan ledger.
 
-- [ ] Step 2: Run the required full checks
+- [x] Step 2: Run the required full checks
 
 Run each command separately and record its exit code:
 
@@ -410,7 +410,7 @@ pnpm build
 
 Expected: all four commands exit with code 0 and the test runner reports zero failures.
 
-- [ ] Step 3: Inspect the final diff and public contracts
+- [x] Step 3: Inspect the final diff and public contracts
 
 Run:
 
@@ -422,12 +422,22 @@ git log --oneline -8
 
 Review that no raw tool input, secret, internal address, or model private reasoning was added to V1 events, no public V2 field was removed/renamed, and http-server.ts/consume() is unchanged.
 
-- [ ] Step 4: Commit documentation updates
+- [x] Step 4: Commit documentation updates
 
 ~~~text
 git add docs/superpowers/specs/2026-09-09-agent-harness-async-generator-design.md docs/superpowers/plans/2026-09-09-agent-harness-async-generator-tool-stream.md
 git commit -m "docs: record async generator implementation status"
 ~~~
+
+## Implementation Ledger
+
+- V2 remains the authoritative durable event source. When V2 is enabled, the Harness yields the safe V1 event directly and does not also publish that V1 event through EventBus; parity is verified against the V2-to-V1 projector by type, runId, stepId, and payload.
+- `publishV2()` is awaited before the corresponding direct V1 yield. `http-server.ts` and its `consume()` behavior remain unchanged: it drains and discards V1 events while SSE reads the V2 store/replay path.
+- `ToolRunner.stream()`, `ToolExecutionPipeline.executeStream()`, and `ToolBatchExecutor.executeStream()` are the streaming primitives. Their `execute()` compatibility wrappers drain the generators, and unfinished child generators are closed on consumer cancellation.
+- Checkpoints are explicit before HITL/external pauses, at the end of a non-terminal iteration, and after resumed pending-tool progress; the run `finally` block provides the single terminal/consumer-close save and observability flush.
+- Consumer closure marks a non-terminal run `cancelled` with stable `ABORTED` failure metadata, emits V2 `RUN_CANCELLED` with `actor: stream_consumer`, and does not overwrite an already terminal outcome.
+- The implementation is split across commits `9bd5e52`, `e288b66`, `1c6c571`, `f2df8be`, `b0934d8`, and `b527e9a`; the documentation status is recorded in the follow-up commit.
+- Final verification passed: `pnpm lint`, `pnpm typecheck`, `pnpm test`, and `pnpm build` all exited 0. The full test run reported 222 passed and 1 environment-gated real-Prometheus test skipped.
 
 ## Self-Review Checklist
 
@@ -436,4 +446,3 @@ git commit -m "docs: record async generator implementation status"
 - Type consistency: ToolRunner.stream() returns AsyncGenerator<ToolResponseChunk, ToolResponse>; ToolExecutionPipeline.executeStream() returns AsyncGenerator<AgentEvent, ExecutionOutcome>; ToolBatchExecutor.executeStream() returns AsyncGenerator<AgentEvent, BatchExecutionResult>; Harness drains each exact return type.
 - Security: V1 direct payloads are built from safe fields and the existing V2 public/audit separation remains intact.
 - Recovery: Generator close, AbortSignal, HITL pause, external execution, normal completion, and model failure each have an explicit state and save/flush assertion.
-
