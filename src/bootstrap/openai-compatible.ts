@@ -10,5 +10,7 @@ export function createOpenAICompatibleModel(options: CreateOpenAICompatibleModel
     model: options.model,
     ...(options.includeUsage === undefined ? {} : { includeUsage: options.includeUsage }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.transientForbiddenCodes === undefined ? {} : { transientForbiddenCodes: options.transientForbiddenCodes }),
+    ...(options.quotaCodes === undefined ? {} : { quotaCodes: options.quotaCodes }),
   });
 }

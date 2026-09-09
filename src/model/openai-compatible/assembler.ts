@@ -21,7 +21,7 @@ export class OpenAIStreamAssembler {
   private usage: ModelUsage | undefined;
 
   public accept(chunk: OpenAICompatibleStreamChunk): ModelStreamEvent[] {
-    if (!Array.isArray(chunk.choices)) throw protocolFailure('Model stream choices must be an array.');
+    if (!isReadonlyArray<OpenAICompatibleStreamChunk['choices'][number]>(chunk.choices)) throw protocolFailure('Model stream choices must be an array.');
     if (chunk.choices.length > 1) throw protocolFailure('Only one model choice is supported.');
 
     const events: ModelStreamEvent[] = [];
@@ -74,7 +74,7 @@ export class OpenAIStreamAssembler {
       }
     }
     if (delta.tool_calls !== undefined) {
-      if (!Array.isArray(delta.tool_calls)) throw protocolFailure('Model tool calls must be an array.');
+      if (!isReadonlyArray<OpenAICompatibleToolCallDelta>(delta.tool_calls)) throw protocolFailure('Model tool calls must be an array.');
       for (const toolCall of delta.tool_calls) this.acceptToolCall(toolCall);
     }
   }
@@ -146,4 +146,8 @@ function tokenCount(value: unknown, label: string): number | undefined {
 
 function protocolFailure(message: string): ModelFailure {
   return new ModelFailure('protocol', message, false);
+}
+
+function isReadonlyArray<T>(value: unknown): value is readonly T[] {
+  return Array.isArray(value);
 }

@@ -2,6 +2,14 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：OpenAI-compatible 模型适配器
+
+2026-09-10：按 [OpenAI-compatible 模型适配设计](./superpowers/specs/2026-09-06-openai-compatible-model-design.md) 完成生产边界的首版实现。适配链路为 `OpenAICompatibleChatModel -> EventedChatModel -> AgentHarness`：官方 `openai@6.49.0` 负责 HTTP/SSE framing，项目内 Formatter 负责稳定消息和工具 Schema，Assembler 负责文本、交错 tool-call、usage、finish reason 和协议完整性，原始 arguments 原样交给四道工具闸门。
+
+本轮同时落地：Node.js 20 兼容依赖；SDK `maxRetries: 0`；绝对 Run deadline 与 `AbortSignal`；消费方提前关闭时的上游 iterator 回收；响应 content-type、`[DONE]`、字节上限和安全 URL/API Key 边界；`terminal / fallback_only / retryable / aborted` 四级错误处置；Retry-After 单次等待上限 2 秒；cached input tokens 与 finish reason 的 V2/LangSmith 投影；bootstrap 工厂和公开入口。
+
+验证使用本地真实 HTTP/SSE 服务，覆盖中文 UTF-8 跨网络分片、多个并行 tool-call 交错分片、两轮 Harness 工具闭环、usage/cached tokens、缺失 `[DONE]`、错误 content-type、响应超限、取消、错误分类和 SDK 零重试。未使用真实 DeepSeek 凭据或在线 API，因此只能表述为“OpenAI-compatible 本地协议已验证”，不能表述为“DeepSeek 在线验收完成”。图像、reasoning content、model discovery、JSON response format 和供应商专属扩展仍不在本轮范围。
+
 ## 最新增量：Event / Message V2 核心验收与 AsyncGenerator 收口
 
 2026-09-09：完成 Event/Message V2 核心验收收口。V2 MessageBlock 契约、Event PayloadMap/Schema、EventStore/MessageStore、内存与 SQLite 持久化、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 运行时事件和 Node HTTP/SSE 入口均已落地。

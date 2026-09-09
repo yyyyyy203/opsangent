@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { Buffer } from 'node:buffer';
 import { describe, expect, it } from 'vitest';
 import type { OpenAICompatibleClient, OpenAICompatibleClientOptions } from '../src/model/openai-compatible/client.js';
 import { createOpenAICompatibleClient } from '../src/model/openai-compatible/client.js';
@@ -96,6 +97,23 @@ describe('OpenAI-compatible SDK client', () => {
       const client = createOpenAICompatibleClient(options(baseUrl));
       await expect(collect(client)).rejects.toBeDefined();
       expect(failedRequests).toBe(1);
+    });
+  });
+
+  it('handles UTF-8 code points split across network chunks', async () => {
+    await withServer((_incoming, response) => {
+      const body = Buffer.from([
+        'data: {"choices":[{"index":0,"delta":{"content":"诊断"},"finish_reason":"stop"}]}\n\n',
+        'data: [DONE]\n\n',
+      ].join(''));
+      const cut = body.indexOf(Buffer.from('诊')) + 1;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.write(body.subarray(0, cut));
+      setTimeout(() => response.end(body.subarray(cut)), 1);
+    }, async (baseUrl) => {
+      const client = createOpenAICompatibleClient(options(baseUrl));
+      const chunks = await collect(client);
+      expect(chunks[0]?.choices[0]?.delta?.content).toBe('诊断');
     });
   });
 

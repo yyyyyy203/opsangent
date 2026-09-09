@@ -53,7 +53,7 @@ export function classifyOpenAICompatibleError(
   if (status === 429 || status === 408) return failure(status === 429 ? 'rate_limit' : 'timeout', 'Model request should be retried.', true, details, 'retryable');
   if (status !== undefined && status >= 500 && status <= 599) return failure('server', 'Model service failed temporarily.', true, details, 'retryable');
 
-  if (isNetworkError(errorName, errorCode, record)) return failure('network', 'Model network request failed.', true, details, 'retryable');
+  if (isNetworkError(errorName, errorCode, record, new Set())) return failure('network', 'Model network request failed.', true, details, 'retryable');
   return failure('protocol', 'Model request failed.', false, details, 'fallback_only');
 }
 
@@ -121,14 +121,13 @@ function isTimeoutName(name: string | undefined, code: string | undefined): bool
   return name === 'timeouterror' || code === 'etimedout';
 }
 
-function isNetworkError(name: string | undefined, code: string | undefined, record: Record<string, unknown>): boolean {
+function isNetworkError(name: string | undefined, code: string | undefined, record: Record<string, unknown>, seen: Set<object>): boolean {
   if (code !== undefined && NETWORK_CODES.has(code)) return true;
   if (name === 'typeerror' || name === 'apiconnectionerror' || name === 'networkerror') return true;
-  return record.cause !== undefined && asRecord(record.cause) !== undefined && isNetworkError(
-    readString(asRecord(record.cause), 'name')?.toLowerCase(),
-    readString(asRecord(record.cause), 'code')?.toLowerCase(),
-    asRecord(record.cause),
-  );
+  if (record.cause === undefined || typeof record.cause !== 'object' || record.cause === null || seen.has(record.cause)) return false;
+  seen.add(record.cause);
+  const cause = asRecord(record.cause);
+  return isNetworkError(readString(cause, 'name')?.toLowerCase(), readString(cause, 'code')?.toLowerCase(), cause, seen);
 }
 
 function containsAny(values: readonly string[], candidates: readonly string[]): boolean {

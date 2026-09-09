@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { createOpenAICompatibleModel } from '../src/bootstrap/openai-compatible.js';
 
@@ -24,7 +25,69 @@ describe('OpenAI-compatible runtime composition', () => {
       runtime.close();
     });
   });
+
+  it('preserves interleaved raw tool calls through the four admission gates and into the next request', async () => {
+    const requestBodies: Record<string, unknown>[] = [];
+    let requestCount = 0;
+    await withServer((incoming, response) => {
+      let body = '';
+      incoming.setEncoding('utf8');
+      incoming.on('data', (chunk: string) => { body += chunk; });
+      incoming.on('end', () => {
+        requestBodies.push(JSON.parse(body) as Record<string, unknown>);
+        requestCount += 1;
+        const events = requestCount === 1
+          ? [
+            'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"tc-0","type":"function","function":{"name":"metrics.settlement","arguments":"{\\"window\\":"}},{"index":1,"id":"tc-1","type":"function","function":{"name":"metrics.settlement","arguments":"{\\"window\\":"}}]},"finish_reason":null}]}\n\n',
+            'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\\"5m\\"}"}},{"index":0,"function":{"arguments":"\\"5m\\"}"}]},"finish_reason":"tool_calls"}]}\n\n',
+          ]
+          : [
+            'data: {"choices":[{"index":0,"delta":{"content":"已完成取证"},"finish_reason":"stop"}]}\n\n',
+          ];
+        response.writeHead(200, { 'content-type': 'text/event-stream' });
+        response.end(requestCount === 1
+          ? `${toolCallEvents().map((event) => `data: ${JSON.stringify(event)}\n\n`).join('')}data: [DONE]\n\n`
+          : `${events.join('')}data: [DONE]\n\n`);
+      });
+    }, async (baseUrl) => {
+      const model = createOpenAICompatibleModel({ baseUrl, apiKey: 'test-api-key', model: 'deepseek-chat' });
+      const runtime = createAgentRuntime({
+        model,
+        workspaceRoots: [],
+        includeExternalBash: false,
+        tools: [{
+          name: 'metrics.settlement',
+          description: 'Read settlement metrics.',
+          kind: 'evidence',
+          inputSchema: z.object({ window: z.string() }),
+          call: () => ({ blocks: [{ type: 'text', text: 'failure_rate=0.15' }] }),
+          isConcurrencySafe: () => true,
+        }],
+      });
+      const result = await runtime.agent.reply({ message: 'inspect', profileId: 'settlement', maxIterations: 3 });
+      const secondMessages = requestBodies[1]?.messages;
+
+      expect(result.finalText).toBe('已完成取证');
+      expect(requestCount).toBe(2);
+      expect(Array.isArray(secondMessages)).toBe(true);
+      expect((secondMessages as Array<Record<string, unknown>>).some((message) => message.role === 'tool')).toBe(true);
+      runtime.close();
+    });
+  });
 });
+
+function toolCallEvents(): Array<Record<string, unknown>> {
+  return [
+    { choices: [{ index: 0, delta: { tool_calls: [
+      { index: 0, id: 'tc-0', type: 'function', function: { name: 'metrics.settlement', arguments: '{"window":' } },
+      { index: 1, id: 'tc-1', type: 'function', function: { name: 'metrics.settlement', arguments: '{"window":' } },
+    ] }, finish_reason: null }] },
+    { choices: [{ index: 0, delta: { tool_calls: [
+      { index: 1, function: { arguments: '"5m"}' } },
+      { index: 0, function: { arguments: '"5m"}' } },
+    ] }, finish_reason: 'tool_calls' }] },
+  ];
+}
 
 async function withServer<T>(handler: Handler, run: (baseUrl: string) => Promise<T>): Promise<T> {
   const server = createServer(handler);

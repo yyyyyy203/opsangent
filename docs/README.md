@@ -29,7 +29,7 @@ V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./document
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地；真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期接入仍按实现进度推进。
+- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、Node.js 20 兼容的 OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地；真实 DeepSeek 在线验收、真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期接入仍按实现进度推进。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
 

@@ -241,7 +241,7 @@ function limitAndTrackBody(
 
 function trackText(tracker: ResponseTracker, text: string): void {
   tracker.tail = `${tracker.tail}${text}`.slice(-64);
-  if (tracker.tail.includes('[DONE]')) tracker.doneMarkerSeen = true;
+  if (/(?:^|\r?\n)data:\s*\[DONE\](?:\r?\n|$)/.test(tracker.tail)) tracker.doneMarkerSeen = true;
 }
 
 async function cancelBody(body: ReadableStream<Uint8Array> | null): Promise<void> {

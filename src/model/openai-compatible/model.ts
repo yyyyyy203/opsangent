@@ -10,6 +10,8 @@ export interface OpenAICompatibleChatModelOptions {
   model: string;
   includeUsage?: boolean;
   clock?: () => number;
+  transientForbiddenCodes?: readonly string[];
+  quotaCodes?: readonly string[];
 }
 
 export class OpenAICompatibleChatModel implements ChatModel {
@@ -50,7 +52,11 @@ export class OpenAICompatibleChatModel implements ChatModel {
       if (combined.deadlineTriggered()) throw deadlineFailure();
       if (callOptions.signal.aborted) throw abortedFailure();
       if (error instanceof ModelFailure) throw error;
-      throw classifyOpenAICompatibleError(error, { signal: combined.signal });
+      throw classifyOpenAICompatibleError(error, {
+        signal: combined.signal,
+        ...(this.config.transientForbiddenCodes === undefined ? {} : { transientForbiddenCodes: this.config.transientForbiddenCodes }),
+        ...(this.config.quotaCodes === undefined ? {} : { quotaCodes: this.config.quotaCodes }),
+      });
     } finally {
       if (!upstreamCompleted) await upstream?.return?.();
       combined.dispose();

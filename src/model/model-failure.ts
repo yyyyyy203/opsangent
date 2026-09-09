@@ -42,9 +42,10 @@ export class ModelFailure extends Error implements AgentError {
   ) {
     super(message);
     this.name = 'ModelFailure';
+    const explicitDisposition = options.disposition !== undefined;
     this.disposition = options.disposition ?? defaultDisposition(category, retryable);
     this.fallbackAllowed = this.disposition === 'retryable' || this.disposition === 'fallback_only';
-    this.details = sanitizeDetails(category, details, this.disposition);
+    this.details = sanitizeDetails(category, details, this.disposition, explicitDisposition);
   }
 }
 
@@ -52,8 +53,9 @@ function sanitizeDetails(
   category: ModelFailureCategory,
   details: Record<string, unknown>,
   disposition: ModelFailureDisposition,
+  includeDisposition: boolean,
 ): Record<string, unknown> {
-  const sanitized: Record<string, unknown> = { category, disposition };
+  const sanitized: Record<string, unknown> = { category, ...(includeDisposition ? { disposition } : {}) };
 
   if (typeof details.status === 'number'
     && Number.isInteger(details.status)
