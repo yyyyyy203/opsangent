@@ -80,6 +80,7 @@ describe('Event V2 lifecycle/model/message-stream payload slice', () => {
     expect(() => parseEventV2Payload('CONTENT_BLOCK_DELTA', {
       messageId: 'message-1', blockId: 'block-1', delta: '完成', index: -1,
     })).toThrow();
+    expect(lifecycleEventPayloadSchemas.RUN_FINISHED.safeParse({ outcome: 'complete', finalText: '完成', durationMs: 1 }).success).toBe(true);
     expect(lifecycleEventPayloadSchemas.RUN_FINISHED.safeParse({ outcome: 'failed', durationMs: 1 }).success).toBe(false);
     expect(messageStreamEventPayloadSchemas.CONTENT_BLOCK_STARTED.safeParse({
       messageId: 'message-1', blockId: 'block-1', blockType: 'raw_chain_of_thought', index: 0,

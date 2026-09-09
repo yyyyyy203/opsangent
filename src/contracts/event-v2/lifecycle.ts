@@ -15,7 +15,7 @@ export interface UsagePayloadV2 { inputTokens?: number; outputTokens?: number }
 export interface RunStartedPayloadV2 { profile: string; trigger: string; deadline: string; versionSnapshot: Record<string, JsonValue> }
 export interface RunResumedPayloadV2 { checkpointVersion: string; resumeReason: string; newStreamId: string }
 export interface RunPausedPayloadV2 { interruptId: string; reason: string; expiresAt: string; checkpointVersion: string }
-export interface RunFinishedPayloadV2 { outcome: 'complete' | 'partial' | 'inconclusive'; reportId?: string; usage?: UsagePayloadV2; durationMs: number }
+export interface RunFinishedPayloadV2 { outcome: 'complete' | 'partial' | 'inconclusive'; finalText?: string; reportId?: string; usage?: UsagePayloadV2; durationMs: number }
 export interface RunFailedPayloadV2 { error: EventErrorPayloadV2; stage: EventStageV2; recoverable: boolean }
 export interface RunCancelledPayloadV2 { actor: string; reason: string; stage: EventStageV2 }
 export interface RunTimedOutPayloadV2 { deadline: string; stage: EventStageV2; partialResultId?: string }
@@ -30,7 +30,7 @@ export const lifecycleEventPayloadSchemas = {
   RUN_STARTED: strict({ profile: identifierV2Schema, trigger: z.string().min(1), deadline: timestampV2Schema, versionSnapshot: jsonRecordV2Schema }),
   RUN_RESUMED: strict({ checkpointVersion: identifierV2Schema, resumeReason: z.string().min(1), newStreamId: identifierV2Schema }),
   RUN_PAUSED: strict({ interruptId: identifierV2Schema, reason: z.string().min(1), expiresAt: timestampV2Schema, checkpointVersion: identifierV2Schema }),
-  RUN_FINISHED: strict({ outcome: z.enum(['complete', 'partial', 'inconclusive']), reportId: identifierV2Schema.optional(), usage: usageSchema.optional(), durationMs: nonnegative }),
+  RUN_FINISHED: strict({ outcome: z.enum(['complete', 'partial', 'inconclusive']), finalText: z.string().optional(), reportId: identifierV2Schema.optional(), usage: usageSchema.optional(), durationMs: nonnegative }),
   RUN_FAILED: strict({ error: eventErrorPayloadV2Schema, stage: eventStageSchema, recoverable: z.boolean() }),
   RUN_CANCELLED: strict({ actor: identifierV2Schema, reason: z.string().min(1), stage: eventStageSchema }),
   RUN_TIMED_OUT: strict({ deadline: timestampV2Schema, stage: eventStageSchema, partialResultId: identifierV2Schema.optional() }),

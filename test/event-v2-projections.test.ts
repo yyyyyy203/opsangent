@@ -41,6 +41,13 @@ describe('V1CompatibilityProjector', () => {
       messageId: 'message-1', blockId: 'thinking-1', delta: 'internal reasoning', index: 0, blockType: 'reasoning_summary',
     }))).toEqual([]);
   });
+
+  it('projects tool-created events without exposing the tool input', () => {
+    const projected = new V1CompatibilityProjector().project(event('TOOL_CALL_CREATED', {
+      call: { id: 'call-1', name: 'bash', input: { command: 'cat secret' } },
+    }));
+    expect(projected[0]?.payload).toEqual({ id: 'call-1', name: 'bash' });
+  });
 });
 
 describe('PublicEventProjectorV2', () => {

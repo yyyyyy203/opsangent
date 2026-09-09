@@ -1,4 +1,11 @@
 import type { AgentEvent, AgentEventEnvelopeV2, AgentEventPayload } from '../../contracts/index.js';
+import {
+  legacyProgressPayload,
+  legacyRunFinishedPayload,
+  legacyTextDeltaPayload,
+  legacyToolCallCreatedPayload,
+  legacyToolStartedPayload,
+} from '../v1-payloads.js';
 
 export class V1CompatibilityProjector {
   public project(event: AgentEventEnvelopeV2): AgentEvent[] {
@@ -22,7 +29,7 @@ export class V1CompatibilityProjector {
       case 'EVIDENCE_COLLECTED': return { type: 'EVIDENCE_COLLECTED', payload: event.payload as unknown as AgentEventPayload };
       case 'CONTEXT_COMPRESSED': return { type: 'CONTEXT_COMPRESSED', payload: event.payload as AgentEventPayload };
       case 'RUN_PAUSED': return { type: 'RUN_PAUSED', payload: { reason: event.payload.reason } };
-      case 'RUN_FINISHED': return { type: 'RUN_FINISHED', payload: { ...event.payload } };
+      case 'RUN_FINISHED': return { type: 'RUN_FINISHED', payload: legacyRunFinishedPayload(event.payload) };
       case 'RUN_FAILED':
         return { type: 'RUN_FAILED', payload: {
           ...event.payload.error,
@@ -32,26 +39,24 @@ export class V1CompatibilityProjector {
         if (event.payload.blockType !== undefined && event.payload.blockType !== 'text') return null;
         return { type: 'TEXT_DELTA', payload: { delta: event.payload.delta } };
       case 'TOOL_PROGRESS':
-        return { type: 'TOOL_PROGRESS', payload: {
-          toolCallId: event.toolCallId ?? '',
-          chunk: { type: 'progress', message: event.payload.displaySummary, percent: event.payload.progress * 100 },
-        } };
+        return { type: 'TOOL_PROGRESS', payload: legacyProgressPayload({
+          toolCallId: event.toolCallId ?? '', progress: event.payload.progress, displaySummary: event.payload.displaySummary,
+        }) };
       case 'TOOL_OUTPUT_DELTA':
-        return event.payload.textDelta === undefined ? null : { type: 'TOOL_PROGRESS', payload: {
-          toolCallId: event.toolCallId ?? '', chunk: { type: 'text_delta', delta: event.payload.textDelta },
-        } };
+        return event.payload.textDelta === undefined ? null : { type: 'TOOL_PROGRESS', payload: legacyTextDeltaPayload({
+          toolCallId: event.toolCallId ?? '', delta: event.payload.textDelta,
+        }) };
       case 'TOOL_CALL_REPAIR_COMPLETED':
         return { type: 'TOOL_PROGRESS', payload: {
           toolCallId: event.toolCallId ?? '', stage: 'admission', repairs: event.payload.changedPaths,
         } };
       case 'TOOL_CALL_CREATED':
-        return { type: 'TOOL_CALL_CREATED', payload: event.payload.call };
+        return { type: 'TOOL_CALL_CREATED', payload: legacyToolCallCreatedPayload(event.payload.call) };
       case 'TOOL_STARTED':
-        return { type: 'TOOL_STARTED', payload: {
+        return { type: 'TOOL_STARTED', payload: legacyToolStartedPayload({
           toolCallId: event.toolCallId ?? '', toolName: event.payload.toolName,
-          source: event.payload.source, attempt: event.payload.attempt,
-          ...(event.payload.deadline === undefined ? {} : { deadline: event.payload.deadline }),
-        } };
+          source: event.payload.source, attempt: event.payload.attempt, deadline: event.payload.deadline,
+        }) };
       case 'TOOL_RESULT':
         return { type: 'TOOL_RESULT', payload: event.payload.result };
       case 'CONFIRMATION_REQUESTED':
