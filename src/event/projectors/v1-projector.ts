@@ -55,7 +55,8 @@ export class V1CompatibilityProjector {
       case 'TOOL_STARTED':
         return { type: 'TOOL_STARTED', payload: legacyToolStartedPayload({
           toolCallId: event.toolCallId ?? '', toolName: event.payload.toolName,
-          source: event.payload.source, attempt: event.payload.attempt, deadline: event.payload.deadline,
+          source: event.payload.source, attempt: event.payload.attempt,
+          ...(event.payload.deadline === undefined ? {} : { deadline: event.payload.deadline }),
         }) };
       case 'TOOL_RESULT':
         return { type: 'TOOL_RESULT', payload: event.payload.result };

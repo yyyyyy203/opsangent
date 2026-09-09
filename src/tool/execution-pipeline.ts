@@ -21,6 +21,10 @@ import type { ExecutionOutcome } from './execution-types.js';
 import type { Toolkit } from './toolkit.js';
 import type { ToolRunner } from './tool-runner.js';
 import { validateToolInput } from './schema.js';
+import {
+  legacyToolProgressFromChunk,
+  legacyToolStartedPayload,
+} from '../event/v1-payloads.js';
 
 export interface ExecutionPipelineOptions {
   actionMode: 'dry_run' | 'execute';
@@ -41,16 +45,16 @@ export class ToolExecutionPipeline {
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
   ) {}
 
-  public async execute(
+  public async *executeStream(
     call: ToolCall,
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
-  ): Promise<ExecutionOutcome> {
+  ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     let outcome: ExecutionOutcome;
     try {
       if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
-      outcome = await this.executeValidated(call, context, stepId, signal);
+      outcome = yield* this.executeValidatedStream(call, context, stepId, signal);
     } catch (error) {
       const agentError = toAgentError(error);
       outcome = {
@@ -59,21 +63,34 @@ export class ToolExecutionPipeline {
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
       };
     }
-    await this.publishLegacy(() => this.eventFactory.create('TOOL_RESULT', context.runId, outcome.result, stepId));
     await this.publishV2('TOOL_RESULT', context, {
       result: outcome.result,
       durationMs: durationOf(outcome.result),
       evidenceIds: outcome.result.response?.evidenceIds ?? [],
     }, stepId, call.id);
+    yield* this.emitLegacy(context, 'TOOL_RESULT', outcome.result, stepId);
     return outcome;
   }
 
-  private async executeValidated(
+  public async execute(
     call: ToolCall,
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
   ): Promise<ExecutionOutcome> {
+    const stream = this.executeStream(call, context, stepId, signal);
+    while (true) {
+      const item = await stream.next();
+      if (item.done) return item.value;
+    }
+  }
+
+  private async *executeValidatedStream(
+    call: ToolCall,
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     const startedAt = this.clock.now().toISOString();
     const tool = this.toolkit.get(call.name);
     if (tool === undefined) {
@@ -145,7 +162,9 @@ export class ToolExecutionPipeline {
         },
       };
       const result = this.result(call, 'awaiting_external', startedAt);
-      await this.publishLegacy(() => this.eventFactory.create('EXTERNAL_TOOL_REQUESTED', context.runId, interrupt, stepId));
+      if (this.v2Events === undefined) {
+        yield* this.emitLegacy(context, 'EXTERNAL_TOOL_REQUESTED', interrupt, stepId);
+      }
       return { type: 'interrupted', result, risk, interrupt };
     }
 
@@ -160,13 +179,19 @@ export class ToolExecutionPipeline {
       deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,
       networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
     };
-    await this.publishLegacy(() => this.eventFactory.create('TOOL_STARTED', context.runId, call, stepId));
     await this.publishV2('TOOL_STARTED', context, {
       toolName: tool.name,
       source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
       attempt: 1,
       deadline: new Date(toolContextDeadline(context)).toISOString(),
     }, stepId, call.id);
+    yield* this.emitLegacy(context, 'TOOL_STARTED', legacyToolStartedPayload({
+      toolCallId: call.id,
+      toolName: tool.name,
+      source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
+      attempt: 1,
+      deadline: new Date(toolContextDeadline(context)).toISOString(),
+    }), stepId);
     const span = this.observability.startSpan({
       name: `tool.${tool.name}`,
       kind: 'tool',
@@ -177,13 +202,34 @@ export class ToolExecutionPipeline {
     });
 
     try {
-      const response = await this.runner.execute(tool, hookContext.input, toolContext, {
-        onChunk: async (chunk) => {
-          await this.publishLegacy(() => this.eventFactory.create('TOOL_PROGRESS', context.runId, { toolCallId: call.id, chunk }, stepId));
-          if (chunk.type === 'text_delta') await this.publishV2('TOOL_OUTPUT_DELTA', context, { blockId: `tool-output:${call.id}`, textDelta: chunk.delta }, stepId, call.id);
-          if (chunk.type === 'progress') await this.publishV2('TOOL_PROGRESS', context, { progress: chunk.percent === undefined ? 0 : Math.max(0, Math.min(1, chunk.percent / 100)), displaySummary: chunk.message }, stepId, call.id);
-        },
-      });
+      const stream = this.runner.stream(tool, hookContext.input, toolContext);
+      let response: ToolResponse;
+      while (true) {
+        const item = await stream.next();
+        if (item.done) {
+          response = item.value;
+          break;
+        }
+        const chunk = item.value;
+        if (chunk.type === 'text_delta') {
+          await this.publishV2('TOOL_OUTPUT_DELTA', context, {
+            blockId: `tool-output:${call.id}`,
+            textDelta: chunk.delta,
+          }, stepId, call.id);
+        }
+        if (chunk.type === 'progress') {
+          await this.publishV2('TOOL_PROGRESS', context, {
+            progress: chunk.percent === undefined ? 0 : Math.max(0, Math.min(1, chunk.percent / 100)),
+            displaySummary: chunk.message,
+          }, stepId, call.id);
+        }
+        const legacyChunk = legacyToolProgressFromChunk(call.id, chunk);
+        if (legacyChunk !== null) {
+          yield* this.emitLegacy(context, 'TOOL_PROGRESS', legacyChunk, stepId);
+        } else if (this.v2Events === undefined) {
+          yield* this.emitLegacy(context, 'TOOL_PROGRESS', { toolCallId: call.id, chunk }, stepId);
+        }
+      }
       const result = this.result(call, response.isError === true ? 'failed' : 'success', startedAt, response);
       hookContext.result = result;
       const post = await this.hooks.runAfter(hookContext);
@@ -245,9 +291,15 @@ export class ToolExecutionPipeline {
     return this.v2Events.publisher.publish(pending).then(() => undefined);
   }
 
-  private publishLegacy(create: () => AgentEvent): Promise<void> {
-    if (this.v2Events !== undefined) return Promise.resolve();
-    return Promise.resolve(this.events.publish(create()));
+  private async *emitLegacy(
+    context: AgentContext,
+    type: AgentEvent['type'],
+    payload: AgentEvent['payload'],
+    stepId?: string,
+  ): AsyncGenerator<AgentEvent, void> {
+    const event = this.eventFactory.create(type, context.runId, payload, stepId);
+    if (this.v2Events === undefined) await this.events.publish(event);
+    yield event;
   }
 }
 
