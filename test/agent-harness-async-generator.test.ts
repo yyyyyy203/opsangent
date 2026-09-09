@@ -123,6 +123,27 @@ describe('Agent Harness direct AsyncGenerator delivery', () => {
     expect((await runtime.eventStoreV2.readRun('closed-run', 0, 100)).map((event) => event.type)).toContain('RUN_CANCELLED');
   });
 
+  it('treats a consumer throw as stream cancellation after cleanup', async () => {
+    const checkpoints = new CountingCheckpointStore();
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'done', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      checkpoints,
+    });
+    const stream = runtime.agent.replyStream({ runId: 'thrown-run', message: 'inspect', profileId: 'group-buy-market' });
+    const first = await stream.next();
+    expect(first.done).toBe(false);
+
+    await expect(stream.throw(new Error('consumer stop'))).rejects.toThrow('consumer stop');
+
+    const saved = await checkpoints.load('thrown-run');
+    expect(saved?.status).toBe('cancelled');
+    expect(saved?.failure).toEqual({ code: 'ABORTED', message: 'Agent stream consumer closed.', retryable: false });
+    expect(checkpoints.saveCount).toBe(1);
+    expect((await runtime.eventStoreV2.readRun('thrown-run', 0, 100)).map((event) => event.type)).toContain('RUN_CANCELLED');
+  });
+
   it('uses one final checkpoint for completion and keeps the iteration checkpoint', async () => {
     const checkpoints = new CountingCheckpointStore();
     const runtime = createAgentRuntime({

@@ -74,7 +74,7 @@ export class AgentHarness implements DiagnosisAgent {
       finalText: '',
       naturalExit: false,
     };
-    return yield* this.run(frame, options.signal ?? new AbortController().signal);
+    return yield* this.forwardRunStream(this.run(frame, options.signal ?? new AbortController().signal));
   }
 
   public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
@@ -86,7 +86,34 @@ export class AgentHarness implements DiagnosisAgent {
     context.streamId = newStreamId;
     await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId });
     const frame: RunExecutionFrame = { context, finalText: '', naturalExit: false };
-    return yield* this.run(frame, signal, true);
+    return yield* this.forwardRunStream(this.run(frame, signal, true));
+  }
+
+  private async *forwardRunStream(
+    inner: AsyncGenerator<AgentEvent, DiagnosisRunResult>,
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    let innerCompleted = false;
+    try {
+      while (true) {
+        const item = await inner.next();
+        if (item.done) {
+          innerCompleted = true;
+          return item.value;
+        }
+        yield item.value;
+      }
+    } catch (error) {
+      if (!innerCompleted) {
+        innerCompleted = true;
+        await inner.return(undefined as never);
+      }
+      throw error;
+    } finally {
+      if (!innerCompleted) {
+        innerCompleted = true;
+        await inner.return(undefined as never);
+      }
+    }
   }
 
   private async *run(
