@@ -131,6 +131,19 @@ V2 factory.create()
 
 它不 yield V2 Envelope，原因是 `DiagnosisAgent` 的公共 Generator 契约仍返回 V1 `AgentEvent`，并且 V2 Publisher 必须按序完成持久化。V2 SSE 继续通过 `EventStreamService` 从 Store/ReplayBuffer 获取事件。
 
+### 4.3 工具事件直通 Generator
+
+删除 Harness 内部 `AsyncEventQueue` 后，工具执行链不能继续只向 EventBus/V2 侧路发布，否则 V2 运行时的 `replyStream()` 会丢失 `TOOL_STARTED`、`TOOL_PROGRESS` 和 `TOOL_RESULT`。本轮同时改造工具执行链：
+
+1. `ToolRunner` 增加 `stream()` AsyncGenerator，逐个产出 `ToolResponseChunk`；原有 `execute()` 保留为 drain `stream()` 的兼容包装。
+2. `ToolExecutionPipeline` 增加 `executeStream()`，执行前后和 chunk 事件都产出 V1 `AgentEvent`；原有 `execute()` 保留为 drain `executeStream()` 的兼容包装。
+3. `ToolBatchExecutor` 增加 `executeStream()`。safe 工具的 Generator 通过一个基于 `Promise.race` 的流合并器并行转发，unsafe 工具仍串行执行；最终结果按输入 ToolCall 顺序返回，事件顺序按实际流到达顺序转发。
+4. `AgentHarness` 手动 drain `ToolBatchExecutor.executeStream()` 并 `yield` 每个事件，保留批次结果和中断结果的确定性处理。
+
+V1 Generator 与 V2→V1 Projector 的公共事件使用同一组安全 payload 规则：工具创建事件只暴露 `id/name`，工具开始事件暴露 `toolCallId/toolName/source/attempt/deadline`，工具进度统一映射为 V1 `TOOL_PROGRESS`，外部执行和确认事件使用 V2 的安全交互 payload。比较事件一致性时忽略独立生成的 V1/V2 时间戳，但 `type/runId/stepId/payload` 必须一致；时间戳仍单独验证为合法且单调。
+
+为保留既有 V1 `RUN_FINISHED.finalText`，V2 `RUN_FINISHED` 增加可选 `finalText` 字段。这是 schema v2 的向后兼容字段扩展，旧事件缺失该字段时按无文本处理。
+
 ## 5. 暂停、恢复与 Checkpoint
 
 ### 5.1 新对话
@@ -170,6 +183,14 @@ V2 factory.create()
 - `finally`：保存 `frame.context`，然后 flush observability。
 
 显式分支中的 Checkpoint 保存只保留必要的中途一致性保存；最终 Generator 结束必须经过外层 finally。Abort、正常结束、暂停、模型失败和消费者关闭都必须有对应测试。
+
+### 5.5 消费者提前关闭
+
+当调用方在 Generator 自然结束前调用 `return()` 或 `throw()`：
+
+1. `run()` 的 `finally` 将仍处于活动生命周期的 Context 标记为 `cancelled`，写入 `ABORTED` 失败信息，并发布 V2 `RUN_CANCELLED(actor: 'stream_consumer', reason: 'stream_consumer_closed')`；不尝试向已关闭的 Generator yield 事件。
+2. `finally` 保存完整 Checkpoint 并 flush observability；如果此前已经自然完成、失败或取消，则不重复改写终态。
+3. `AbortSignal` 取消继续走统一错误路径，保留 `ABORTED` 错误码和已有错误事件行为。
 
 ## 6. 不变的 V2 与安全行为
 
