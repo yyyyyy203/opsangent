@@ -36,6 +36,7 @@ describe('ToolExecutionPipeline streaming', () => {
       name: 'streaming', description: 'streaming evidence', kind: 'evidence',
       inputSchema: z.object({}), isConcurrencySafe: () => true,
       call: async function* () {
+        await Promise.resolve();
         yield { type: 'progress' as const, message: 'half', percent: 50 };
         yield { type: 'text_delta' as const, delta: 'partial' };
         return { blocks: [{ type: 'text' as const, text: 'done' }] };

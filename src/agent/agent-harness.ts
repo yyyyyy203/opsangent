@@ -5,7 +5,6 @@ import type {
   ChatModel,
   CheckpointStore,
   Clock,
-  EventSink,
   IdGenerator,
   MessageBlock,
   ModelResponse,
@@ -23,12 +22,12 @@ import type {
 } from '../contracts/index.js';
 import { toAgentError } from '../contracts/index.js';
 import type { ContextCompressor } from '../context-compressor/types.js';
-import { AsyncEventQueue } from '../event/async-event-queue.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { ToolBatchExecutor } from '../tool/batch-executor.js';
 import type { Toolkit } from '../tool/toolkit.js';
 import type { ToolAdmission } from '../tool/admission.js';
+import { legacyRunFinishedPayload } from '../event/v1-payloads.js';
 import { admitToolBatch } from './admit-tool-batch.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 
@@ -47,6 +46,17 @@ export interface AgentHarnessDependencies {
   v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: string | ((runId: string) => string) };
 }
 
+type RunTerminalOutcome = 'completed' | 'paused' | 'failed' | 'cancelled';
+
+interface RunExecutionFrame {
+  context: AgentContext;
+  finalText: string;
+  activeStepId?: string;
+  activeStepStartedAt?: number;
+  terminalOutcome?: RunTerminalOutcome;
+  naturalExit: boolean;
+}
+
 export class AgentHarness implements DiagnosisAgent {
   public constructor(private readonly dependencies: AgentHarnessDependencies) {}
 
@@ -59,8 +69,12 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   public async *replyStream(options: ReplyOptions): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
-    const context = this.createContext(options);
-    return yield* this.streamContext(context, options.signal ?? new AbortController().signal);
+    const frame: RunExecutionFrame = {
+      context: this.createContext(options),
+      finalText: '',
+      naturalExit: false,
+    };
+    return yield* this.run(frame, options.signal ?? new AbortController().signal);
   }
 
   public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
@@ -71,237 +85,55 @@ export class AgentHarness implements DiagnosisAgent {
     const newStreamId = this.dependencies.ids.next('stream');
     context.streamId = newStreamId;
     await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId });
-    return yield* this.streamContext(context, signal, true);
+    const frame: RunExecutionFrame = { context, finalText: '', naturalExit: false };
+    return yield* this.run(frame, signal, true);
   }
 
-  private async *streamContext(context: AgentContext, signal: AbortSignal, resumed = false): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
-    const queue = new AsyncEventQueue();
-    const unsubscribe = this.dependencies.events.subscribe((event) => {
-      if (event.runId === context.runId) queue.push(event);
-    });
-    let finalResult: DiagnosisRunResult | undefined;
-    let failure: unknown;
-    const producer = this.run(context, signal, resumed)
-      .then((result) => { finalResult = result; })
-      .catch((error: unknown) => { failure = error; })
-      .finally(() => queue.close());
-
-    try {
-      for await (const event of queue) yield event;
-      await producer;
-      if (failure !== undefined) {
-        throw failure instanceof Error
-          ? failure
-          : new Error(typeof failure === 'string' ? failure : 'Agent producer failed with a non-Error value.');
-      }
-      if (finalResult === undefined) throw new Error('Agent run ended without a result.');
-      return finalResult;
-    } finally {
-      unsubscribe();
-    }
-  }
-
-  private async run(context: AgentContext, signal: AbortSignal, resumed = false): Promise<DiagnosisRunResult> {
+  private async *run(
+    frame: RunExecutionFrame,
+    signal: AbortSignal,
+    resumed = false,
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const rootSpan = this.dependencies.observability.startSpan({
-      name: 'inspection.run', kind: 'chain', runId: context.runId,
-      attributes: { profileId: context.profileId },
+      name: 'inspection.run', kind: 'chain', runId: frame.context.runId,
+      attributes: { profileId: frame.context.profileId },
     });
-    if (!resumed) {
-      await this.publish('RUN_STARTED', context, { profileId: context.profileId });
-      await this.publishV2('RUN_STARTED', context, {
-        profile: context.profileId,
-        trigger: 'manual',
-        deadline: new Date(Date.parse(context.budget.startedAt) + context.budget.maxDurationMs).toISOString(),
-        versionSnapshot: {},
-      });
-    }
-    let finalText = '';
-    let activeStepId: string | undefined;
-    let activeStepStartedAt: number | undefined;
-
     try {
-      delete context.failure;
-      const pausedForExternalExecution = await this.resumePendingToolCall(context, signal);
+      if (!resumed) {
+        await this.publishV2('RUN_STARTED', frame.context, {
+          profile: frame.context.profileId,
+          trigger: 'manual',
+          deadline: new Date(Date.parse(frame.context.budget.startedAt) + frame.context.budget.maxDurationMs).toISOString(),
+          versionSnapshot: {},
+        });
+        yield* this.publishStream('RUN_STARTED', frame.context, { profileId: frame.context.profileId });
+      }
+
+      delete frame.context.failure;
+      const pausedForExternalExecution = yield* this.resumePendingToolCallStream(frame, signal);
       if (pausedForExternalExecution) {
-        const result = this.result(context, finalText);
+        const result = this.result(frame.context, frame.finalText);
+        frame.terminalOutcome = 'paused';
         rootSpan.end(result);
+        frame.naturalExit = true;
         return result;
       }
-      while (context.budget.iteration < context.budget.maxIterations) {
-        if (signal.aborted) throw new Error('Agent run aborted.');
-        if (this.dependencies.clock.now().getTime() - Date.parse(context.budget.startedAt) >= context.budget.maxDurationMs) {
-          throw new Error('Agent run duration budget exhausted.');
-        }
-
-        const compressed = await this.dependencies.compressor.compress(context);
-        context = compressed.context;
-        if (compressed.decision.level !== 'none') {
-          await this.publish('CONTEXT_COMPRESSED', context, { ...compressed.decision });
-          const before = JSON.stringify(context.messages).length;
-          await this.publishV2('CONTEXT_COMPRESSED', context, {
-            level: compressed.decision.level,
-            before,
-            after: JSON.stringify(compressed.context.messages).length,
-            offloadedEvidenceIds: [],
-            savedTokens: 0,
-          });
-        }
-
-        context.budget.iteration += 1;
-        const stepId = this.dependencies.ids.next('step');
-        activeStepId = stepId;
-        activeStepStartedAt = this.dependencies.clock.now().getTime();
-        await this.publish('STEP_STARTED', context, { iteration: context.budget.iteration }, stepId);
-        await this.publish('REASONING_STARTED', context, { stage: context.stage }, stepId);
-        await this.publishV2('STEP_STARTED', context, { iteration: context.budget.iteration, stage: context.stage, budgetSnapshot: { toolCallsUsed: context.budget.toolCallsUsed } }, stepId);
-        await this.publishV2('REASONING_STARTED', context, { stage: context.stage, objective: `inspection:${context.profileId}` }, stepId);
-
-        const response = await this.reason(context, stepId, signal);
-        const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
-        const seenIds = new Set(context.messages.flatMap((message) => message.blocks.flatMap((block) =>
-          block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
-        if (candidates.length > 32) throw new Error('Model tool batch exceeds admission limit.');
-        for (const candidate of candidates) {
-          if (!candidate.id || seenIds.has(candidate.id)) throw new Error('Model returned a missing or duplicate tool call ID.');
-          seenIds.add(candidate.id);
-        }
-        if (response.text !== undefined) finalText += response.text;
-        if (candidates.length === 0) {
-          this.appendToolExchange(context, response.text, candidates, []);
-          context.status = 'completed';
-          await this.dependencies.checkpoints.save(context);
-          await this.publishV2('STEP_COMPLETED', context, {
-            iteration: context.budget.iteration,
-            exitDecision: 'complete',
-            durationMs: this.stepDuration(activeStepStartedAt),
-          }, stepId);
-          activeStepId = undefined;
-          activeStepStartedAt = undefined;
-          await this.publish('RUN_FINISHED', context, { finalText });
-          await this.publishV2('RUN_FINISHED', context, { outcome: 'complete', durationMs: this.elapsed(context) });
-          const result = this.result(context, finalText);
-          rootSpan.end(result);
-          return result;
-        }
-
-        for (const call of candidates) {
-          await this.publish('TOOL_CALL_CREATED', context, { id: call.id, name: call.name }, stepId);
-        }
-        const admission = admitToolBatch(candidates, context, this.dependencies.admission, this.dependencies.clock, signal);
-        for (const repair of admission.repairs) {
-          await this.publish('TOOL_PROGRESS', context, repair, stepId);
-          await this.publishV2('TOOL_CALL_REPAIR_COMPLETED', context, {
-            strategy: 'json_syntax_repair', changedPaths: repair.repairs, attempt: 1,
-          }, stepId, repair.toolCallId);
-        }
-        for (const gate of admission.gates) {
-          for (const record of gate.records) {
-            await this.publishV2('TOOL_CALL_ADMISSION_UPDATED', context, {
-              gate: record.gate,
-              outcome: record.outcome,
-              attempt: 1,
-              ...(record.errorCode === undefined ? {} : { errorCode: record.errorCode }),
-            }, stepId, gate.toolCallId);
-          }
-        }
-        for (const call of admission.calls) {
-          await this.publishV2('TOOL_CALL_CREATED', context, { call }, stepId, call.id);
-        }
-        for (const result of admission.rejected) await this.publish('TOOL_RESULT', context, result, stepId);
-        for (const result of admission.rejected) {
-          await this.publishV2('TOOL_CALL_REJECTED', context, {
-            toolName: result.toolName,
-            gate: gateForError(result.error?.code),
-            error: eventError(result.error),
-          }, stepId, result.toolCallId);
-          await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
-        }
-        const batch = await this.dependencies.batchExecutor.execute(admission.calls, context, stepId, signal);
-        const results = [...admission.rejected, ...batch.results];
-        for (const deferred of batch.deferredActions) {
-          results.push(this.deferredResult(deferred));
-        }
-        const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
-        this.appendToolExchange(context, response.text, candidates, orderedResults);
-
-        if (batch.interrupt !== undefined) {
-          context.status = batch.interrupt.interruptType === 'external_tool_execution'
-            ? 'paused'
-            : 'awaiting_confirmation';
-          context.pendingInterrupt = batch.interrupt;
-          context.pendingToolCalls = admission.calls.filter((call) => call.id === batch.interrupt?.toolCallId);
-          await this.dependencies.checkpoints.save(context);
-          if (context.status === 'awaiting_confirmation') {
-            await this.publish('REQUIRE_CONFIRM', context, batch.interrupt, stepId);
-            const risk = interruptRisk(batch.interrupt);
-            await this.publishV2('RISK_EVALUATED', context, { findings: [], mergedRisk: risk, policyVersion: 'risk-v1' }, stepId, batch.interrupt.toolCallId);
-            await this.publishV2('CONFIRMATION_REQUESTED', context, {
-              confirmationId: `confirmation:${context.runId}:${batch.interrupt.toolCallId}`,
-              toolCallIds: [batch.interrupt.toolCallId], riskSummary: `风险等级：${risk}`,
-              expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
-            }, stepId, batch.interrupt.toolCallId);
-          } else {
-            await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', context, {
-              requestId: `external:${context.runId}:${batch.interrupt.toolCallId}`,
-              toolCallId: batch.interrupt.toolCallId,
-              interactionPayload: { type: 'external_tool_execution', toolCallId: batch.interrupt.toolCallId },
-              expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
-            }, stepId, batch.interrupt.toolCallId);
-          }
-          await this.publish('RUN_PAUSED', context, { reason: batch.interrupt.interruptType }, stepId);
-          await this.publishV2('RUN_PAUSED', context, {
-            interruptId: batch.interrupt.hookId,
-            reason: batch.interrupt.interruptType,
-            expiresAt: batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString(),
-            checkpointVersion: String(context.contextVersion),
-          }, stepId);
-          await this.publishV2('STEP_COMPLETED', context, {
-            iteration: context.budget.iteration,
-            exitDecision: context.status === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'external_execution',
-            durationMs: this.stepDuration(activeStepStartedAt),
-          }, stepId);
-          activeStepId = undefined;
-          activeStepStartedAt = undefined;
-          const result = this.result(context, finalText);
-          rootSpan.end(result);
-          return result;
-        }
-
-        context.pendingToolCalls = [];
-        const nextStage = this.nextStage(admission.calls);
-        if (nextStage !== context.stage) {
-          const previousStage = context.stage;
-          context.stage = nextStage;
-          await this.publishV2('STAGE_CHANGED', context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
-        }
-        await this.dependencies.checkpoints.save(context);
-        await this.publishV2('STEP_COMPLETED', context, {
-          iteration: context.budget.iteration,
-          exitDecision: 'continue',
-          durationMs: this.stepDuration(activeStepStartedAt),
-        }, stepId);
-        activeStepId = undefined;
-        activeStepStartedAt = undefined;
-      }
-      throw new Error('Agent iteration budget exhausted.');
+      return yield* this.mainLoop(frame, signal, rootSpan);
     } catch (error) {
+      const context = frame.context;
       context.status = signal.aborted ? 'cancelled' : 'failed';
-      const failure = toAgentError(error);
+      const failure = signal.aborted
+        ? { code: 'ABORTED' as const, message: 'Agent run aborted.', retryable: false }
+        : toAgentError(error);
       context.failure = failure;
-      await this.dependencies.checkpoints.save(context);
-      await this.publish('RUN_FAILED', context, {
-        message: failure.message,
-        code: failure.code,
-        retryable: failure.retryable,
-        category: failure.details?.category,
-      });
+      frame.terminalOutcome = context.status;
       const failureCategory = typeof failure.details?.category === 'string' ? failure.details.category : undefined;
-      if (activeStepId !== undefined && context.budget.iteration > 0) {
+      if (frame.activeStepId !== undefined && context.budget.iteration > 0) {
         await this.publishV2('STEP_FAILED', context, {
           iteration: context.budget.iteration,
           error: eventError(failure),
           retryable: failure.retryable,
-        }, activeStepId);
+        }, frame.activeStepId);
       }
       await this.publishV2('RUN_FAILED', context, {
         error: {
@@ -314,20 +146,234 @@ export class AgentHarness implements DiagnosisAgent {
         recoverable: failure.retryable,
       });
       rootSpan.fail(error);
-      return this.result(context, finalText);
+      yield* this.publishStream('RUN_FAILED', context, {
+        message: failure.message,
+        code: failure.code,
+        retryable: failure.retryable,
+        ...(failureCategory === undefined ? {} : { category: failureCategory }),
+      });
+      frame.naturalExit = true;
+      return this.result(context, frame.finalText);
     } finally {
-      await this.dependencies.observability.flush();
+      if (!frame.naturalExit && frame.terminalOutcome === undefined) {
+        const context = frame.context;
+        const cancellation = { code: 'ABORTED' as const, message: 'Agent stream consumer closed.', retryable: false };
+        context.status = 'cancelled';
+        context.failure = cancellation;
+        frame.terminalOutcome = 'cancelled';
+        rootSpan.fail(cancellation);
+        await this.publishV2('RUN_CANCELLED', context, {
+          actor: 'stream_consumer',
+          reason: 'stream_consumer_closed',
+          stage: context.stage,
+        });
+      }
+      try {
+        await this.dependencies.checkpoints.save(frame.context);
+      } finally {
+        await this.dependencies.observability.flush();
+      }
     }
   }
 
-  private async resumePendingToolCall(context: AgentContext, signal: AbortSignal): Promise<boolean> {
+  private async *mainLoop(
+    frame: RunExecutionFrame,
+    signal: AbortSignal,
+    rootSpan: { end(output?: unknown): void; fail(error: unknown): void },
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+    while (frame.context.budget.iteration < frame.context.budget.maxIterations) {
+      const context = frame.context;
+      if (signal.aborted) throw new Error('Agent run aborted.');
+      if (this.dependencies.clock.now().getTime() - Date.parse(context.budget.startedAt) >= context.budget.maxDurationMs) {
+        throw new Error('Agent run duration budget exhausted.');
+      }
+
+      const before = Buffer.byteLength(JSON.stringify(context.messages), 'utf8');
+      const compressed = await this.dependencies.compressor.compress(context);
+      frame.context = compressed.context;
+      if (compressed.decision.level !== 'none') {
+        const compressionPayload = {
+          level: compressed.decision.level,
+          before,
+          after: Buffer.byteLength(JSON.stringify(frame.context.messages), 'utf8'),
+          offloadedEvidenceIds: [],
+          savedTokens: 0,
+        };
+        await this.publishV2('CONTEXT_COMPRESSED', frame.context, compressionPayload);
+        yield* this.publishStream('CONTEXT_COMPRESSED', frame.context, compressionPayload);
+      }
+
+      frame.context.budget.iteration += 1;
+      const stepId = this.dependencies.ids.next('step');
+      frame.activeStepId = stepId;
+      frame.activeStepStartedAt = this.dependencies.clock.now().getTime();
+      await this.publishV2('STEP_STARTED', frame.context, {
+        iteration: frame.context.budget.iteration,
+        stage: frame.context.stage,
+        budgetSnapshot: { toolCallsUsed: frame.context.budget.toolCallsUsed },
+      }, stepId);
+      yield* this.publishStream('STEP_STARTED', frame.context, { iteration: frame.context.budget.iteration }, stepId);
+      await this.publishV2('REASONING_STARTED', frame.context, {
+        stage: frame.context.stage,
+        objective: `inspection:${frame.context.profileId}`,
+      }, stepId);
+      yield* this.publishStream('REASONING_STARTED', frame.context, { stage: frame.context.stage }, stepId);
+
+      const response = yield* this.reasonStream(frame.context, stepId, signal);
+      const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
+      const seenIds = new Set(frame.context.messages.flatMap((message) => message.blocks.flatMap((block) =>
+        block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
+      if (candidates.length > 32) throw new Error('Model tool batch exceeds admission limit.');
+      for (const candidate of candidates) {
+        if (!candidate.id || seenIds.has(candidate.id)) throw new Error('Model returned a missing or duplicate tool call ID.');
+        seenIds.add(candidate.id);
+      }
+      if (response.text !== undefined) frame.finalText += response.text;
+      if (candidates.length === 0) {
+        this.appendToolExchange(frame.context, response.text, candidates, []);
+        frame.context.status = 'completed';
+        const stepDuration = this.stepDuration(frame.activeStepStartedAt);
+        await this.publishV2('STEP_COMPLETED', frame.context, {
+          iteration: frame.context.budget.iteration,
+          exitDecision: 'complete',
+          durationMs: stepDuration,
+        }, stepId);
+        delete frame.activeStepId;
+        delete frame.activeStepStartedAt;
+        const finishPayload = {
+          outcome: 'complete' as const,
+          finalText: frame.finalText,
+          durationMs: this.elapsed(frame.context),
+        };
+        await this.publishV2('RUN_FINISHED', frame.context, finishPayload);
+        frame.terminalOutcome = 'completed';
+        const result = this.result(frame.context, frame.finalText);
+        rootSpan.end(result);
+        yield* this.publishStream('RUN_FINISHED', frame.context, legacyRunFinishedPayload(finishPayload));
+        frame.naturalExit = true;
+        return result;
+      }
+
+      if (this.dependencies.v2Events === undefined) {
+        for (const call of candidates) {
+          yield* this.publishStream('TOOL_CALL_CREATED', frame.context, { id: call.id, name: call.name }, stepId);
+        }
+      }
+      const admission = admitToolBatch(candidates, frame.context, this.dependencies.admission, this.dependencies.clock, signal);
+      for (const repair of admission.repairs) {
+        const repairPayload = { toolCallId: repair.toolCallId, stage: repair.stage, repairs: repair.repairs };
+        if (this.dependencies.v2Events === undefined) yield* this.publishStream('TOOL_PROGRESS', frame.context, repairPayload, stepId);
+        await this.publishV2('TOOL_CALL_REPAIR_COMPLETED', frame.context, {
+          strategy: 'json_syntax_repair', changedPaths: repair.repairs, attempt: 1,
+        }, stepId, repair.toolCallId);
+        if (this.dependencies.v2Events !== undefined) yield* this.publishStream('TOOL_PROGRESS', frame.context, repairPayload, stepId);
+      }
+      for (const gate of admission.gates) {
+        for (const record of gate.records) {
+          await this.publishV2('TOOL_CALL_ADMISSION_UPDATED', frame.context, {
+            gate: record.gate,
+            outcome: record.outcome,
+            attempt: 1,
+            ...(record.errorCode === undefined ? {} : { errorCode: record.errorCode }),
+          }, stepId, gate.toolCallId);
+        }
+      }
+      for (const call of admission.calls) {
+        await this.publishV2('TOOL_CALL_CREATED', frame.context, { call }, stepId, call.id);
+        if (this.dependencies.v2Events !== undefined) {
+          yield* this.publishStream('TOOL_CALL_CREATED', frame.context, { id: call.id, name: call.name }, stepId);
+        }
+      }
+      for (const result of admission.rejected) {
+        if (this.dependencies.v2Events === undefined) yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
+        await this.publishV2('TOOL_CALL_REJECTED', frame.context, {
+          toolName: result.toolName,
+          gate: gateForError(result.error?.code),
+          error: eventError(result.error),
+        }, stepId, result.toolCallId);
+        await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), stepId, result.toolCallId);
+        if (this.dependencies.v2Events !== undefined) yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
+      }
+      const batch = yield* this.dependencies.batchExecutor.executeStream(admission.calls, frame.context, stepId, signal);
+      const results = [...admission.rejected, ...batch.results];
+      for (const deferred of batch.deferredActions) results.push(this.deferredResult(deferred));
+      const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
+      this.appendToolExchange(frame.context, response.text, candidates, orderedResults);
+
+      if (batch.interrupt !== undefined) {
+        frame.context.status = batch.interrupt.interruptType === 'external_tool_execution' ? 'paused' : 'awaiting_confirmation';
+        frame.context.pendingInterrupt = batch.interrupt;
+        frame.context.pendingToolCalls = admission.calls.filter((call) => call.id === batch.interrupt?.toolCallId);
+        await this.dependencies.checkpoints.save(frame.context);
+        const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
+        if (frame.context.status === 'awaiting_confirmation') {
+          const risk = interruptRisk(batch.interrupt);
+          const confirmation = {
+            confirmationId: `confirmation:${frame.context.runId}:${batch.interrupt.toolCallId}`,
+            toolCallIds: [batch.interrupt.toolCallId], riskSummary: `风险等级：${risk}`, expiresAt,
+          };
+          await this.publishV2('RISK_EVALUATED', frame.context, { findings: [], mergedRisk: risk, policyVersion: 'risk-v1' }, stepId, batch.interrupt.toolCallId);
+          await this.publishV2('CONFIRMATION_REQUESTED', frame.context, confirmation, stepId, batch.interrupt.toolCallId);
+          yield* this.publishStream('REQUIRE_CONFIRM', frame.context, this.dependencies.v2Events === undefined ? batch.interrupt : confirmation, stepId);
+        } else {
+          const external = {
+            requestId: `external:${frame.context.runId}:${batch.interrupt.toolCallId}`,
+            toolCallId: batch.interrupt.toolCallId,
+            interactionPayload: { type: 'external_tool_execution', toolCallId: batch.interrupt.toolCallId },
+            expiresAt,
+          };
+          await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', frame.context, external, stepId, batch.interrupt.toolCallId);
+          if (this.dependencies.v2Events !== undefined) yield* this.publishStream('EXTERNAL_TOOL_REQUESTED', frame.context, external, stepId);
+        }
+        await this.publishV2('RUN_PAUSED', frame.context, {
+          interruptId: batch.interrupt.hookId,
+          reason: batch.interrupt.interruptType,
+          expiresAt,
+          checkpointVersion: String(frame.context.contextVersion),
+        }, stepId);
+        await this.publishV2('STEP_COMPLETED', frame.context, {
+          iteration: frame.context.budget.iteration,
+          exitDecision: frame.context.status === 'awaiting_confirmation' ? 'awaiting_confirmation' : 'external_execution',
+          durationMs: this.stepDuration(frame.activeStepStartedAt),
+        }, stepId);
+        delete frame.activeStepId;
+        delete frame.activeStepStartedAt;
+        frame.terminalOutcome = 'paused';
+        const result = this.result(frame.context, frame.finalText);
+        rootSpan.end(result);
+        yield* this.publishStream('RUN_PAUSED', frame.context, { reason: batch.interrupt.interruptType }, stepId);
+        frame.naturalExit = true;
+        return result;
+      }
+
+      frame.context.pendingToolCalls = [];
+      const nextStage = this.nextStage(admission.calls);
+      if (nextStage !== frame.context.stage) {
+        const previousStage = frame.context.stage;
+        frame.context.stage = nextStage;
+        await this.publishV2('STAGE_CHANGED', frame.context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
+      }
+      await this.dependencies.checkpoints.save(frame.context);
+      await this.publishV2('STEP_COMPLETED', frame.context, {
+        iteration: frame.context.budget.iteration,
+        exitDecision: 'continue',
+        durationMs: this.stepDuration(frame.activeStepStartedAt),
+      }, stepId);
+      delete frame.activeStepId;
+      delete frame.activeStepStartedAt;
+    }
+    throw new Error('Agent iteration budget exhausted.');
+  }
+
+  private async *resumePendingToolCallStream(frame: RunExecutionFrame, signal: AbortSignal): AsyncGenerator<AgentEvent, boolean> {
+    const context = frame.context;
     if (context.pendingToolCalls.length === 0) return false;
     if (context.pendingInterrupt?.interruptType === 'external_tool_execution') return true;
     const pending = context.pendingToolCalls[0];
     if (pending === undefined || !context.confirmedToolCallIds.includes(pending.id)) return false;
 
     const stepId = this.dependencies.ids.next('step');
-    const batch = await this.dependencies.batchExecutor.execute([pending], context, stepId, signal);
+    const batch = yield* this.dependencies.batchExecutor.executeStream([pending], context, stepId, signal);
     if (batch.interrupt !== undefined) {
       if (batch.interrupt.interruptType !== 'external_tool_execution') {
         throw new Error(`Confirmed tool call was interrupted again: ${pending.id}`);
@@ -337,7 +383,22 @@ export class AgentHarness implements DiagnosisAgent {
       context.status = 'paused';
       context.contextVersion += 1;
       await this.dependencies.checkpoints.save(context);
-      await this.publish('RUN_PAUSED', context, { reason: 'external_tool_execution' }, stepId);
+      const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
+      const external = {
+        requestId: `external:${context.runId}:${batch.interrupt.toolCallId}`,
+        toolCallId: batch.interrupt.toolCallId,
+        interactionPayload: { type: 'external_tool_execution', toolCallId: batch.interrupt.toolCallId },
+        expiresAt,
+      };
+      await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', context, external, stepId, batch.interrupt.toolCallId);
+      if (this.dependencies.v2Events !== undefined) yield* this.publishStream('EXTERNAL_TOOL_REQUESTED', context, external, stepId);
+      await this.publishV2('RUN_PAUSED', context, {
+        interruptId: batch.interrupt.hookId,
+        reason: 'external_tool_execution',
+        expiresAt,
+        checkpointVersion: String(context.contextVersion),
+      }, stepId);
+      yield* this.publishStream('RUN_PAUSED', context, { reason: 'external_tool_execution' }, stepId);
       return true;
     }
     const result = batch.results[0];
@@ -362,7 +423,7 @@ export class AgentHarness implements DiagnosisAgent {
     }
   }
 
-  private async reason(context: AgentContext, stepId: string, signal: AbortSignal): Promise<ModelResponse> {
+  private async *reasonStream(context: AgentContext, stepId: string, signal: AbortSignal): AsyncGenerator<AgentEvent, ModelResponse> {
     const span = this.dependencies.observability.startSpan({
       name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
       attributes: { stage: context.stage, iteration: context.budget.iteration },
@@ -377,20 +438,22 @@ export class AgentHarness implements DiagnosisAgent {
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       deadline,
     });
+    let completed = false;
     try {
       while (true) {
         const item = await stream.next();
         if (item.done) {
+          completed = true;
           span.end({ toolCallCount: item.value.toolCalls.length + (item.value.rawToolCalls?.length ?? 0), usage: item.value.usage });
           return item.value;
         }
-        if (item.value.type === 'text_delta') {
-          await this.publish('TEXT_DELTA', context, { delta: item.value.delta }, stepId);
-        }
+        if (item.value.type === 'text_delta') yield* this.publishStream('TEXT_DELTA', context, { delta: item.value.delta }, stepId);
       }
     } catch (error) {
       span.fail(error);
       throw error;
+    } finally {
+      if (!completed) await stream.return(undefined as unknown as ModelResponse).catch(() => undefined);
     }
   }
 
@@ -482,16 +545,15 @@ export class AgentHarness implements DiagnosisAgent {
       : 'hypothesis';
   }
 
-  private publish(
+  private async *publishStream(
     type: AgentEvent['type'],
     context: AgentContext,
     payload: AgentEvent['payload'],
     stepId?: string,
-  ): Promise<void> {
-    if (this.dependencies.v2Events !== undefined) return Promise.resolve();
+  ): AsyncGenerator<AgentEvent, void> {
     const event = this.dependencies.eventFactory.create(type, context.runId, payload, stepId);
-    const sink: EventSink = this.dependencies.events;
-    return Promise.resolve(sink.publish(event));
+    if (this.dependencies.v2Events === undefined) await this.dependencies.events.publish(event);
+    yield event;
   }
 
   private publishV2<T extends AgentEventTypeV2>(

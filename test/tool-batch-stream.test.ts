@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import type { AgentContext, AgentEvent, Clock, Tool, ToolCall } from '../src/contracts/index.js';
+import type { AgentContext, AgentEvent, Clock, Tool } from '../src/contracts/index.js';
 import { EventBus } from '../src/event/event-bus.js';
 import { EventFactory } from '../src/event/event-factory.js';
 import { GuardEngine } from '../src/guard/guard-engine.js';

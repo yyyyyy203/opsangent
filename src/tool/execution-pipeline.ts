@@ -201,12 +201,16 @@ export class ToolExecutionPipeline {
       attributes: { toolKind: tool.kind, riskSeverity: risk.severity },
     });
 
+    let toolStream: ReturnType<ToolRunner['stream']> | undefined;
+    let streamCompleted = false;
     try {
       const stream = this.runner.stream(tool, hookContext.input, toolContext);
+      toolStream = stream;
       let response: ToolResponse;
       while (true) {
         const item = await stream.next();
         if (item.done) {
+          streamCompleted = true;
           response = item.value;
           break;
         }
@@ -254,6 +258,10 @@ export class ToolExecutionPipeline {
       span.fail(agentError);
       await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id);
       return { type: 'completed', result, risk };
+    } finally {
+      if (!streamCompleted && toolStream !== undefined) {
+        await toolStream.return(undefined as unknown as ToolResponse).catch(() => undefined);
+      }
     }
   }
 

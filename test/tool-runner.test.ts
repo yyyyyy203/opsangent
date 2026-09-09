@@ -8,6 +8,7 @@ describe('DefaultToolRunner', () => {
     const tool: Tool = {
       name: 'streaming', description: 'test', kind: 'evidence', inputSchema: z.object({}),
       call: async function* () {
+        await Promise.resolve();
         yield { type: 'progress' as const, message: 'half', percent: 50 };
         yield { type: 'text_delta' as const, delta: 'partial' };
         return { blocks: [{ type: 'text' as const, text: 'done' }] };
@@ -44,5 +45,27 @@ describe('DefaultToolRunner', () => {
     }, { onChunk: (chunk) => { chunks.push(chunk.type); } });
     expect(chunks).toEqual(['progress']);
     expect(response.blocks).toEqual([{ type: 'text', text: 'done' }]);
+  });
+
+  it('closes an underlying tool generator when the stream consumer returns early', async () => {
+    let closed = false;
+    const tool: Tool = {
+      name: 'streaming', description: 'test', kind: 'evidence', inputSchema: z.object({}),
+      call: async function* () {
+        try {
+          await Promise.resolve();
+          yield { type: 'progress' as const, message: 'half', percent: 50 };
+          return { blocks: [] };
+        } finally {
+          closed = true;
+        }
+      },
+    };
+    const stream = new DefaultToolRunner().stream(tool, {}, {
+      runId: 'run-1', stepId: 'step-1', signal: new AbortController().signal, mode: 'execute',
+    });
+    await stream.next();
+    await stream.return(undefined as never);
+    expect(closed).toBe(true);
   });
 });

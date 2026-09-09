@@ -27,10 +27,18 @@ export class DefaultToolRunner implements ToolRunner {
     if (tool.call === undefined) throw new Error(`Tool requires external execution: ${tool.name}`);
     const returned = tool.call(input, options);
     if (isAsyncGenerator(returned)) {
-      while (true) {
-        const item = await returned.next();
-        if (item.done) return item.value;
-        yield item.value;
+      let completed = false;
+      try {
+        while (true) {
+          const item = await returned.next();
+          if (item.done) {
+            completed = true;
+            return item.value;
+          }
+          yield item.value;
+        }
+      } finally {
+        if (!completed) await returned.return(undefined as unknown as ToolResponse).catch(() => undefined);
       }
     }
     return await returned;
