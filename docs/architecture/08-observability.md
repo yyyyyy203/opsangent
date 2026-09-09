@@ -1,3 +1,5 @@
+> **DEPRECATED**：本文保留早期可观测性目标；Event/Message、投影、身份字段和当前实现状态已由 [Event 与 Message V2 协议](./15-event-message-v2.md) 与 [实现进度](../implementation-status.md) 取代。
+
 # 可观测、LangSmith 与审计
 
 ## 两类链路

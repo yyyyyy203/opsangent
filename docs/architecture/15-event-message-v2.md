@@ -98,7 +98,7 @@ interface AgentEventEnvelope<T extends AgentEventTypeV2> {
 | `RUN_STARTED` | public/audit | profile、trigger、deadline、版本快照 |
 | `RUN_RESUMED` | public/audit | checkpointVersion、resumeReason、newStreamId |
 | `RUN_PAUSED` | public/audit | interruptId、reason、expiresAt、checkpointVersion |
-| `RUN_FINISHED` | public/audit | outcome、reportId、usage、durationMs |
+| `RUN_FINISHED` | public/audit | outcome、finalText?、reportId、usage、durationMs |
 | `RUN_FAILED` | public/audit | 结构化错误、阶段、可恢复性 |
 | `RUN_CANCELLED` | public/audit | actor、reason、stage |
 | `RUN_TIMED_OUT` | public/audit | deadline、stage、partialResultId |
@@ -296,17 +296,17 @@ Message 是可持久化的逻辑消息，Event 是消息和运行状态发生变
 ## 7. 权威事件流与三类投影
 
 ```text
-业务模块 / Harness / Pipeline
-          ↓
-   EventPublisher（Schema 校验、ID/时间注入）
-          ↓
-   EventStore 条件追加 / ReplayBuffer（本地事实与短期流缓存）
-          ↓
-   EventDispatcher（订阅者隔离）
-      ├── PublicSseProjector：过滤 internal/audit，生成用户安全事件
-      ├── AuditProjector：保存结构化审计、修复链和决策记录
-      ├── LangSmithProjector：映射 trace/span、usage、延迟、重试
-      └── V1CompatibilityProjector：为旧消费者生成 V1 事件
+   业务模块 / Harness / Pipeline
+             ↓
+      EventPublisherV2（Schema 校验、ID/时间注入、按 Run 串行发布）
+             ↓
+      EventStore 条件追加 / ReplayBuffer（本地事实与短期流缓存）
+             ↓
+      投影订阅者（隔离失败）
+       ├── PublicEventProjectorV2 + EventStreamService：过滤 internal/audit，生成用户安全 SSE 事件
+       ├── AuditProjector：保存结构化审计、修复链和决策记录
+       ├── LangSmithProjector：映射 trace/span、usage、延迟、重试
+       └── V1CompatibilityProjector：为旧消费者生成 V1 事件
 ```
 
 durable 事件进入 EventStore，transient Delta 进入有界 ReplayBuffer 并在 Message 快照中收敛。投影器必须是确定性、可重放、可单测的纯转换或幂等消费者。投影状态带最后消费 `sequence`；启动时 runtime 通过 `ready` 自动补放可发现的 Run。在线投影仍严格保持顺序，显式 replay 才允许跳过未持久化 transient 造成的序列空洞，并在完整回放后推进 checkpoint 水位。未完成 Message assembly 会保存受控的内部状态，终态时移除；LangSmith 不可用时不影响 Run，历史 LangSmith 补报不由默认启动恢复自动触发。
@@ -377,7 +377,7 @@ TOOL_CALL_CREATED(metrics_subagent)
 - 提供 V1/V2 读取联合及明确的 type guard。
 - V1 事件读取后可迁移为 V2 最小事实；无法推导的字段使用迁移生成值并标注 `migrationSource`，不得伪造原始关联。
 - V2 到 V1 投影只覆盖旧消费者理解的语义：例如 text delta、工具开始/结果、确认请求、外部执行、压缩、Run 生命周期。
-- 新代码禁止直接构造 V1 事件；只调用 V2 EventPublisher。
+- 新业务事实禁止直接写入 V1 EventBus；只调用 V2 EventPublisher。为兼容 `replyStream()`，Harness 可以通过与 V2→V1 投影共用的安全 payload 映射直接 yield V1 事件，但这不是第二个 V2 事实源，也不得绕过 V2 持久化。
 - 持久化迁移必须可重复执行，并用旧 fixture 验证无损读取。
 
 ## 10. 不采用的 Newton 行为
@@ -424,8 +424,8 @@ TOOL_CALL_CREATED(metrics_subagent)
 
 ## 13. 当前实现状态
 
-截至 2026-09-09，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 生产点、身份链路、AsyncGenerator 重试适配和 Node HTTP/SSE 回放服务已经落地。SSE 使用 `eventId` 作为 cursor；transient Delta 超出窗口时用已保存的用户可见 Message 快照恢复。默认 runtime 可以在内存或 SQLite 之间组装，SQLite 保存事件、消息中间/终态、投影 checkpoint 和失败记录，并通过 `ready` 完成本地投影启动恢复。
+截至 2026-09-09，Event/Message V2 的协议、Schema、内存/SQLite 存储、ReplayBuffer、MessageAssembler、EventPublisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影、模型/工具/HITL/Subagent 生产点、身份链路、AsyncGenerator 模型重试、直接 V1 Generator 工具流和消费者关闭清理，以及 Node HTTP/SSE 回放服务已经落地。SSE 使用 `eventId` 作为 cursor；transient Delta 超出窗口时用已保存的用户可见 Message 快照恢复。默认 runtime 可以在内存或 SQLite 之间组装，SQLite 保存事件、消息中间/终态、投影 checkpoint 和失败记录，并通过 `ready` 完成本地投影启动恢复。
 
-V2 核心验收已覆盖 V1 fixture 读取、V2→V1 单向投影、并行工具配对、公共事件/消息快照脱敏、模型 fallback 与身份链路、SQLite 重启及 transient 序列空洞恢复和 HTTP/SSE 入口；全量测试为 41 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，211 项通过、1 项跳过，lint/typecheck/build 均通过。
+V2 核心验收已覆盖 V1 fixture 读取、V2→V1 单向投影、直接 Generator 与 V2→V1 payload parity、并行工具配对、工具流式输出、公共事件/消息快照脱敏、模型 fallback 与身份链路、SQLite 重启、transient 序列空洞恢复、HTTP/SSE 入口和消费者 `return()`/`throw()` 清理；全量测试为 44 个测试文件通过、1 个真实 Prometheus 测试文件按默认配置跳过，222 项测试通过、1 项跳过，lint/typecheck/build 均通过。
 
 完整生产一期仍有边界：MCP/压缩/Memory 生命周期事件尚未全部由真实操作触发；跨多页超大 Run 的后台回放调度、前端、真实模型/生产数据源和真实 Prometheus 默认验收仍待后续接入。本文是目标设计与当前状态说明；具体完成度以 [`docs/event-message-v2-acceptance-status.md`](../event-message-v2-acceptance-status.md) 的验证记录为准。

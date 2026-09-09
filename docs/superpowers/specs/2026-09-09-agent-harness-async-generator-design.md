@@ -2,7 +2,7 @@
 
 ## 1. 目标与背景
 
-当前 `AgentHarness` 的公开 `replyStream()` 虽然返回 `AsyncGenerator`，但内部仍是：
+改造前的 `AgentHarness` 公开 `replyStream()` 虽然返回 `AsyncGenerator`，但内部仍是：
 
 ```text
 run() Promise
@@ -27,12 +27,14 @@ replyStream()
 - `finally` 统一保存最新 Checkpoint；
 - 恢复创建新的 Generator，沿用原 `runId` 和 `replyId`，生成新的 `streamId`。
 
+本设计已在 `codex/event-message-v2` 分支落地；具体实现状态、验证命令和剩余缺口以 [实现进度](../../implementation-status.md) 与 [V2 验收状态](../../event-message-v2-acceptance-status.md) 为准。
+
 ## 2. 与项目约束的兼容决策
 
 附件文档是 Newton 行为参考，不覆盖本项目 `AGENTS.md` 的安全和契约约束。以下差异是有意保留的：
 
 1. V2 事件仍是权威事实源。`publishV2()` 继续将事件按序写入 V2 Publisher/Store，并等待发布完成；它不向 V1 Generator 直接 yield V2 Envelope，也不允许无序 fire-and-forget。
-2. `publish()` 产生 V1 `AgentEvent` 并 yield 给 `replyStream()` 消费者。无 V2 注入时，它同时发布到旧 EventBus；有 V2 注入时，EventBus 的兼容事件仍由 V2→V1 Projector 产生，避免同一事实被旧总线写入两次。
+2. `publishStream()` 产生 V1 `AgentEvent` 并 yield 给 `replyStream()` 消费者。无 V2 注入时，它同时发布到旧 EventBus；有 V2 注入时，EventBus 的兼容事件仍由 V2→V1 Projector 产生，避免同一事实被旧总线写入两次。
 3. 不引入 `replyStream({ event })` 作为恢复命令。HITL 和外部执行结果继续由显式应用服务处理，再调用兼容的 `resumeStream(runId)`；这符合项目“事件用于通知、命令使用显式接口”的约束。
 4. 不持久化 `resumeHandler` 闭包，也不把 Checkpoint 缩减为三个字段。完整 `AgentContext`、预算、消息、证据、待执行动作和可序列化中断状态继续持久化，以支持进程重启和幂等恢复。
 
@@ -66,13 +68,13 @@ private async *mainLoop(
   signal: AbortSignal,
 ): AsyncGenerator<AgentEvent, DiagnosisRunResult>
 
-private async *reason(
+private async *reasonStream(
   context: AgentContext,
   stepId: string,
   signal: AbortSignal,
 ): AsyncGenerator<AgentEvent, ModelResponse>
 
-private async *resumePendingToolCall(
+private async *resumePendingToolCallStream(
   frame: RunExecutionFrame,
   signal: AbortSignal,
 ): AsyncGenerator<AgentEvent, boolean>
@@ -93,10 +95,10 @@ interface RunExecutionFrame {
 
 ### 4.1 V1 Generator 主通道
 
-`publish()` 改为 AsyncGenerator：
+`publishStream()` 改为 AsyncGenerator：
 
 ```typescript
-private async *publish(...): AsyncGenerator<AgentEvent, void> {
+private async *publishStream(...): AsyncGenerator<AgentEvent, void> {
   const event = this.dependencies.eventFactory.create(...);
   if (this.dependencies.v2Events === undefined) {
     await this.dependencies.events.publish(event);
@@ -105,7 +107,7 @@ private async *publish(...): AsyncGenerator<AgentEvent, void> {
 }
 ```
 
-所有 V1 事件调用点使用 `yield* this.publish(...)`。调用顺序必须保持现有顺序，包括：
+所有 V1 事件调用点使用 `yield* this.publishStream(...)`。调用顺序必须保持现有顺序，包括：
 
 ```text
 RUN_STARTED
@@ -207,7 +209,7 @@ V1 Generator 与 V2→V1 Projector 的公共事件使用同一组安全 payload 
 
 1. `replyStream()` 直接 yield V1 事件，`reply()` drain 后仍返回相同最终结果。
 2. V2 runtime 中 Generator V1 输出与 V2 EventStore/V1 compatibility EventBus 各自只产生一条逻辑事件，不发生 V2 持久化重复。
-3. 模型 `TEXT_DELTA` 通过 `reason()` Generator 按顺序输出。
+3. 模型 `TEXT_DELTA` 通过 `reasonStream()` Generator 按顺序输出。
 4. 正常完成、模型失败、Abort、预算耗尽和消费者提前关闭均执行最终 Checkpoint 保存。
 5. HITL 确认、拒绝、过期和外部执行暂停/恢复仍保持事件顺序和动作幂等。
 6. 重启后加载 Checkpoint，恢复 Generator，继续 `mainLoop()`，不重复执行已成功动作。

@@ -1,3 +1,5 @@
+> **DEPRECATED**：本文保留早期 Harness 目标与历史边界；其中“当前状态”已被 [实现进度](../implementation-status.md) 和 [AgentHarness AsyncGenerator 改造设计](../superpowers/specs/2026-09-09-agent-harness-async-generator-design.md) 取代。当前事件/流式契约以 [Event 与 Message V2 协议](./15-event-message-v2.md) 和源码为准。
+
 # Agent Harness 与运行状态机
 
 ## 唯一循环实现

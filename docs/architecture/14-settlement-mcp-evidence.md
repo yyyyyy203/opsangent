@@ -4,7 +4,7 @@
 
 SettlementSimulator → 只读 /metrics → 真实 Prometheus → PrometheusSettlementSource → 官方 SDK 本地 MCP 服务 → HttpMcpConnection → Manifest/可靠性执行器 → metrics.settlement Tool → Harness/Pipeline → EvidenceStore。
 
-主 Agent 使用统一 tool_call，无专门的指标执行分支。现阶段模型是 ScriptedModel，存储是 InMemoryEvidenceStore；验证不代表已接入真实模型、SQLite、来源 Subagent 或真实业务系统。
+主 Agent 使用统一 tool_call，无专门的指标执行分支。现阶段诊断模型仍是 ScriptedModel，MCP 证据使用 InMemoryEvidenceStore；Event/Message V2 运行时可选 SQLite，但不等同于证据和 Run Checkpoint 已持久化。验证不代表已接入真实模型、来源 Subagent 或真实业务系统。
 
 ## 模块入口与替换边界
 
@@ -38,6 +38,6 @@ unavailable 返回 insufficient_data 和缺失证据，无虚构引用。保存�
 
 复用 [实验运行命令](./13-metrics-lab-implementation.md)。启用 AGENTOPS_REAL_PROMETHEUS=1 后，真实后端测试已扩展为对三个场景分别执行 MCP HTTP、Harness 工具调用与 evidenceId 回查，不仅直接调用查询适配器。
 
-2026-09-06：lint、typecheck、test、build 均通过；14 个测试文件、84 项测试通过。默认不启用真实后端时为 83 项通过、1 项跳过。本轮新增 7 项 MCP/证据集成测试及 1 项错误序列化回归测试，并扩展既有真实后端验收。
+2026-09-09：默认质量门 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 均通过；全量测试为 44 个测试文件通过、1 个真实 Prometheus 测试文件按默认配置跳过，222 项测试通过、1 项跳过。真实后端测试需显式启用；本页保留的三个场景链路是确定性集成验收，不代表已连接线上业务系统。
 
-后续增量已加入独立实验管理 API 与统一 Metrics Lab 启动入口；Simulator Web 页面尚未实现。下一步为真实模型与 Formatter、指标 Subagent 自治及 SQLite 持久化。无业务写动作、无真实业务仓库修改。
+后续增量已加入独立实验管理 API、统一 Metrics Lab 启动入口和 Event/Message V2 SQLite 事件消息存储；Simulator Web 页面尚未实现。下一步为真实模型与 Formatter、指标 Subagent 自治及持久化 EvidenceStore/Checkpoint。无业务写动作、无真实业务仓库修改。

@@ -1,3 +1,5 @@
+> **DEPRECATED**：本文的“状态与缺口”只记录 2026-09-06 的历史快照，已被 [Event 与 Message V2 协议](./15-event-message-v2.md)、[实现进度](../implementation-status.md) 和 [V2 验收状态](../event-message-v2-acceptance-status.md) 取代；保留其工程约束作为历史参考。
+
 # 公共契约与工程约束
 
 ## 稳定边界

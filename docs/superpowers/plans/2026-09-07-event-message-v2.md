@@ -1,3 +1,5 @@
+> **DEPRECATED**：本文是早期 Event/Message V2 实施计划，已被 [Event 与 Message V2 协议](../../architecture/15-event-message-v2.md)、[AsyncGenerator 改造设计](../specs/2026-09-09-agent-harness-async-generator-design.md) 和 [AsyncGenerator 实施计划](2026-09-09-agent-harness-async-generator-tool-stream.md) 取代；保留为历史任务拆分。
+
 # Event and Message V2 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

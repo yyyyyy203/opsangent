@@ -49,6 +49,6 @@ HTTP 传输不跟随重定向，响应流默认限制为 1 MiB；分页最多 20
 
 本地官方 SDK 服务端经真实 TCP/HTTP 验证 initialize、notifications/initialized、tools/list、tools/call、503 重试、鉴权不重试、业务错误不重试以及 Schema 漂移阻断。模型仍使用 ScriptedModel；服务返回的是 fixture 数据。
 
-当前仅接收文本和 structuredContent；多媒体、远程资源引用、stdio、OAuth 授权交互、会话恢复、自动后台重连、持久化事件和来源健康控制台尚未实现。连接初始化由宿主显式调用；不可将该接入模块误认为已经具备完整的降级启动/重连管理器。
+当前仅接收文本和 structuredContent；多媒体、远程资源引用、stdio、OAuth 授权交互、会话恢复、自动后台重连和来源健康控制台尚未实现。Event/Message V2 已在运行时提供内存/SQLite 事件消息存储与投影回放，但 MCP 证据本身仍由内存 EvidenceStore 保存。连接初始化由宿主显式调用；不可将该接入模块误认为已经具备完整的降级启动/重连管理器。
 
-真实 Prometheus/Elastic/Tempo 后端、领域取证工具、三类 Subagent、SQLite、模拟器和前端仍在后续里程碑。此轮不是完整 V1 验收。
+当前已接通的业务实验链路为本地模拟器 → 可选真实 Prometheus → 结算 MCP → Evidence Tool → Harness；真实 Elastic/Tempo 后端、日志/Trace 领域工具、三类来源 Subagent、生产 Registry、持久化 EvidenceStore/Checkpoint、Web 前端和自动健康控制仍在后续里程碑。此页不是完整 V1 验收。

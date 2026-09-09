@@ -4,19 +4,20 @@
 
 ## 当前证据
 
-- 分支：`codex/event-message-v2`。本轮包含一期验收用例、模型层重复工具事件修复和 AsyncGenerator 恢复收口。
+- 分支：`codex/event-message-v2`。本轮包含一期验收用例、模型层重复工具事件修复、直接 AsyncGenerator 工具流和消费者关闭恢复收口。
 - V2 MessageBlock、Event PayloadMap/Schema、内存/SQLite Store、ReplayBuffer、MessageAssembler、Publisher、ProjectionRunner、Public/V1/Audit/LangSmith 投影均已有实现。
 - 默认 runtime 已组装 V2 存储、投影、消息组装和 HTTP/SSE 入口；Harness、模型装饰器、工具执行管线、HITL、Subagent 和数据源韧性链路会产生实际 V2 生命周期事件。
 - 工具调用已遵循“准入成功后发布 `TOOL_CALL_CREATED`”语义；模型层不会提前重复发布工具调用事件。四闸门记录保留在有序 `AdmissionGateRecord[]` 中。
 - `RetryingChatModel` 使用 AsyncGenerator 适配模型重试：首个流事件前才允许重试，部分输出后失败不重放已输出内容，并支持 Abort、延迟注入和 fallback；fallback 会产生 `MODEL_FALLBACK_ACTIVATED`。
+- `replyStream()` 直接 yield V1 生命周期、推理和工具事件；`ToolRunner.stream()`、`ToolExecutionPipeline.executeStream()` 与 `ToolBatchExecutor.executeStream()` 支持工具结果流式转发，并保留旧 Promise 包装接口。消费者提前 `return()`/`throw()` 时，子生成器会被清理，活动 Run 标记为取消并保存完整 Checkpoint。
 - SQLite 启用 WAL、迁移、条件序列追加、消息版本控制、投影 checkpoint/failure 持久化；`MessageAssemblerV2` 会持久化未完成 assembly 的内部状态，并可在重启后继续 Delta，终态消息不保留该内部元数据。
-- V2 runtime 的 V1 `EventBus` 已收敛为 `EventPublisherV2 → V1CompatibilityProjector → EventBus`；V2 模式下 Harness、Tool Pipeline 和外部结果服务不再独立双写 V1 事实。
+- V2 runtime 的 V1 `EventBus` 已收敛为 `EventPublisherV2 → V1CompatibilityProjector → EventBus`；V2 模式下 Harness、Tool Pipeline 和外部结果服务不再独立双写 V1 事实。Generator 的 V1 事件是兼容输出通道，使用同一套安全 payload 映射，不是第二个 V2 事实源。
 - `sessionId/replyId/streamId` 会从 Run 传递到模型、工具、Subagent、V2 事件和 LangSmith span；暂停恢复沿用 Run/Reply，创建新的 Stream。
 - SQLite runtime 暴露 `ready` 启动恢复 Promise。启动回放默认只补本地 audit、message assembler 和 V1 兼容投影；LangSmith 历史补报必须显式选择，不会因启动恢复自动外发。
 - 投影在线处理仍严格阻止乱序跨越缺失序列；只有显式 replay 才允许跳过非持久化 transient 序列空洞，并在回放完成后推进 checkpoint 水位。
 - `EventStreamService` 和 Node HTTP 适配器支持初始回放、`Last-Event-ID`、live handoff 去重、Abort，以及 transient Delta 淘汰后的完整消息快照恢复。
 - 新增端到端验收覆盖 V1 fixture 读取与 V2→V1 投影、并行工具 ToolCall/ToolResult 配对、公共事件/消息快照脱敏、模型身份链路、SQLite 重启和 transient 序列空洞恢复。
-- 最终质量命令已重新执行并全部通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`；全量测试为 41 个文件通过、1 个真实 Prometheus 文件按默认配置跳过，211 项通过、1 项跳过。跳过项不计为真实后端验收。
+- 最终质量命令已重新执行并全部通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`；全量测试为 44 个测试文件通过、1 个真实 Prometheus 测试文件按默认配置跳过，222 项测试通过、1 项跳过。跳过项不计为真实后端验收。
 
 ## 当前仍需补齐的缺口
 

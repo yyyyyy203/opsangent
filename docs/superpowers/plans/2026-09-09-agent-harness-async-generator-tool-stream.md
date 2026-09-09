@@ -41,7 +41,7 @@ Modify:
 - src/tool/tool-runner.ts — add ToolRunner.stream() and retain execute() as a draining compatibility wrapper.
 - src/tool/execution-pipeline.ts — add executeStream() and convert runner chunks/lifecycle events to Generator events; retain execute() as a draining wrapper.
 - src/tool/batch-executor.ts — add executeStream() with safe-stream multiplexing; retain execute() as a draining wrapper.
-- src/agent/agent-harness.ts — replace streamContext()/queue production with run() and mainLoop() AsyncGenerators; make reason() and pending-tool recovery generators; centralize terminal Checkpoint/observability cleanup.
+- src/agent/agent-harness.ts — replace streamContext()/queue production with run() and mainLoop() AsyncGenerators; make reasonStream() and pending-tool recovery generators; centralize terminal Checkpoint/observability cleanup.
 - test/tool-runner.test.ts, test/event-v2-lifecycle.test.ts, test/event-v2-projections.test.ts, test/event-message-v2-acceptance.test.ts, and relevant harness tests — lock additive contract and compatibility behavior.
 - docs/superpowers/specs/2026-09-09-agent-harness-async-generator-design.md — already records the approved tool-stream and early-close decisions; keep it synchronized with implementation.
 
@@ -288,8 +288,8 @@ git commit -m "feat: merge concurrent tool event streams"
 - Internal RunExecutionFrame stores context, finalText, activeStepId, activeStepStartedAt, terminalOutcome, and naturalExit.
 - AgentHarness.run(frame, signal, resumed): AsyncGenerator<AgentEvent, DiagnosisRunResult>.
 - AgentHarness.mainLoop(frame, signal): AsyncGenerator<AgentEvent, DiagnosisRunResult>.
-- AgentHarness.reason(context, stepId, signal): AsyncGenerator<AgentEvent, ModelResponse>.
-- AgentHarness.resumePendingToolCall(frame, signal): AsyncGenerator<AgentEvent, boolean>.
+- AgentHarness.reasonStream(context, stepId, signal): AsyncGenerator<AgentEvent, ModelResponse>.
+- AgentHarness.resumePendingToolCallStream(frame, signal): AsyncGenerator<AgentEvent, boolean>.
 
 - [x] Step 1: Add failing direct-stream and drain regression tests
 
@@ -307,7 +307,7 @@ Expected: the new direct stream assertions fail because the current implementati
 
 Remove streamContext() and the Harness import/use of AsyncEventQueue. Construct a RunExecutionFrame in replyStream() and resumeStream(). Make run() create the root span, publish V2 lifecycle facts in order, delegate to mainLoop(), and save/flush in one finally.
 
-Convert every V1 publication to yield* this.publish(...); publish() creates one V1 event, publishes to the legacy EventBus only when V2 is absent, then yields that same event. reason() manually drains the model Generator and yield*s TEXT_DELTA. mainLoop() manually drains batchExecutor.executeStream() and yields every tool event before processing its final batch result. resumePendingToolCall() does the same for resumed execution.
+Convert every V1 publication to yield* this.publishStream(...); publishStream() creates one V1 event, publishes to the legacy EventBus only when V2 is absent, then yields that same event. reasonStream() manually drains the model Generator and yield*s TEXT_DELTA. mainLoop() manually drains batchExecutor.executeStream() and yields every tool event before processing its final batch result. resumePendingToolCallStream() does the same for resumed execution.
 
 Use V2 payloads as the source for parity-sensitive V1 payloads. Emit direct TOOL_CALL_CREATED only for admitted calls in V2 mode and expose only { id, name }. Emit direct REQUIRE_CONFIRM and EXTERNAL_TOOL_REQUESTED after their V2 requested event using the same safe payload. Include finalText in V2 RUN_FINISHED and use that payload for V1 RUN_FINISHED.
 
@@ -369,7 +369,7 @@ For normal completion and model failure, assert finally saves the final context;
 
 - [x] Step 4: Implement only parity/test fixes required by the approved design
 
-If parity fails, fix the shared payload builder or the order of await publishV2() and yield* publish(); do not weaken the comparison by dropping payload fields. If close handling fails, fix frame terminal markers and Generator delegation cleanup; do not reintroduce an EventBus queue.
+If parity fails, fix the shared payload builder or the order of await publishV2() and yield* publishStream(); do not weaken the comparison by dropping payload fields. If close handling fails, fix frame terminal markers and Generator delegation cleanup; do not reintroduce an EventBus queue.
 
 - [x] Step 5: Run the focused compatibility suite
 

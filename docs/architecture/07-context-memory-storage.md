@@ -45,4 +45,4 @@ V1 单进程持久化优先，运行恢复用版本校验/租约防重复；不�
 
 ## 当前实现
 
-当前内存 Memory、Checkpoint、EvidenceStore 和规则压缩器仅是骨架。SQLite、证据提交协议、结构化 L2、检索及恢复测试是目标设计。
+当前已实现：结构化 `AgentContext`、规则压缩器、内存 Memory/Checkpoint/EvidenceStore，以及 Event/Message V2 的内存/SQLite EventStore、MessageStore、ReplayBuffer、MessageAssembler 和投影 checkpoint。尚未实现或未完整验收：完整 L0/L1/L2 与可回查原始证据生命周期、持久化 Run Checkpoint/EvidenceStore、可替换 MemoryFacade 生命周期、跨进程租约和关系化 runs/记忆存储。
