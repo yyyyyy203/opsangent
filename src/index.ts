@@ -35,6 +35,7 @@ export * from './model/evented-model.js';
 export * from './model/retrying-model.js';
 export * from './model/model-attempt-observer.js';
 export * from './model/v2-attempt-observer.js';
+export * from './model/openai-compatible/index.js';
 export * from './storage/in-memory-checkpoint-store.js';
 export * from './storage/in-memory-evidence-store.js';
 export * from './tool/batch-executor.js';
