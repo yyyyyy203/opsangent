@@ -63,12 +63,18 @@ describe('Event V2 lifecycle/model/message-stream payload slice', () => {
       provider: 'openai-compatible',
       model: 'test',
       attempt: 1,
-      usage: { inputTokens: 10, outputTokens: 4 },
+      usage: { inputTokens: 10, outputTokens: 4, cachedInputTokens: 6 },
       cacheHit: false,
       ttftMs: 25,
       durationMs: 100,
       finishReason: 'stop',
-    })).toMatchObject({ provider: 'openai-compatible', model: 'test', attempt: 1, durationMs: 100, finishReason: 'stop' });
+    })).toMatchObject({ provider: 'openai-compatible', model: 'test', attempt: 1, durationMs: 100, finishReason: 'stop', usage: { cachedInputTokens: 6 } });
+
+    expect(parseEventV2Payload('MESSAGE_COMPLETED', {
+      messageId: 'message-1',
+      completedAt: timestamp,
+      usage: { cachedInputTokens: 6 },
+    })).toMatchObject({ usage: { cachedInputTokens: 6 } });
 
     expect(parseEventV2Payload('CONTENT_BLOCK_DELTA', {
       messageId: 'message-1', blockId: 'block-1', delta: '完成', index: 0,

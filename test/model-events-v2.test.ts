@@ -22,7 +22,7 @@ describe('EventedChatModel', () => {
       async *stream(): AsyncGenerator<{ type: 'text_delta'; delta: string }, ModelResponse> {
         await Promise.resolve();
         yield { type: 'text_delta', delta: 'hi' };
-        return { text: 'hi', toolCalls: [], usage: { inputTokens: 2, outputTokens: 1 } };
+        return { text: 'hi', toolCalls: [], finishReason: 'stop', usage: { inputTokens: 2, outputTokens: 1, cachedInputTokens: 1 } };
       },
     };
     const model = new EventedChatModel(base, publisher, new EventFactoryV2(clock, ids), {
@@ -33,8 +33,10 @@ describe('EventedChatModel', () => {
       'MODEL_CALL_STARTED', 'MESSAGE_STARTED', 'CONTENT_BLOCK_STARTED', 'CONTENT_BLOCK_DELTA',
       'CONTENT_BLOCK_COMPLETED', 'MESSAGE_COMPLETED', 'MODEL_CALL_COMPLETED',
     ]);
-    const completed = events.at(-1)?.payload as { usage?: { inputTokens?: number; outputTokens?: number }; durationMs?: unknown };
-    expect(completed.usage).toEqual({ inputTokens: 2, outputTokens: 1 });
+    const completed = events.at(-1)?.payload as { usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }; durationMs?: unknown; finishReason?: string; cacheHit?: boolean };
+    expect(completed.usage).toEqual({ inputTokens: 2, outputTokens: 1, cachedInputTokens: 1 });
+    expect(completed.finishReason).toBe('stop');
+    expect(completed.cacheHit).toBe(true);
     expect(typeof completed.durationMs).toBe('number');
   });
 });

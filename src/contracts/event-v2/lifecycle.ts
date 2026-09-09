@@ -10,8 +10,8 @@ const contentBlockTypeV2Schema = z.enum([
   'text', 'reasoning_summary', 'tool_call', 'raw_tool_call', 'tool_result', 'evidence_ref', 'artifact_ref', 'image_ref',
   'context_summary', 'confirmation_request', 'confirmation_result', 'diagnosis', 'action_proposal', 'action_result', 'error',
 ]);
-const usageSchema = strict({ inputTokens: nonnegative.int().optional(), outputTokens: nonnegative.int().optional() });
-export interface UsagePayloadV2 { inputTokens?: number; outputTokens?: number }
+const usageSchema = strict({ inputTokens: nonnegative.int().optional(), outputTokens: nonnegative.int().optional(), cachedInputTokens: nonnegative.int().optional() });
+export interface UsagePayloadV2 { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }
 export interface RunStartedPayloadV2 { profile: string; trigger: string; deadline: string; versionSnapshot: Record<string, JsonValue> }
 export interface RunResumedPayloadV2 { checkpointVersion: string; resumeReason: string; newStreamId: string }
 export interface RunPausedPayloadV2 { interruptId: string; reason: string; expiresAt: string; checkpointVersion: string }

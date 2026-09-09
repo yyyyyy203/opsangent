@@ -56,7 +56,10 @@ export class EventedChatModel implements ChatModel {
           }
           await this.publish('MODEL_CALL_COMPLETED', base, {
             provider: this.config.provider, model: this.config.model, attempt: 1,
-            ...(item.value.usage === undefined ? {} : { usage: item.value.usage }), durationMs: Math.max(0, clock.now().getTime() - startedAt),
+            ...(item.value.usage === undefined ? {} : { usage: item.value.usage }),
+            ...(item.value.usage?.cachedInputTokens === undefined ? {} : { cacheHit: item.value.usage.cachedInputTokens > 0 }),
+            ...(item.value.finishReason === undefined ? {} : { finishReason: item.value.finishReason }),
+            durationMs: Math.max(0, clock.now().getTime() - startedAt),
           });
           return item.value;
         }
