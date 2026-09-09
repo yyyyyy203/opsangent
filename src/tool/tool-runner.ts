@@ -5,6 +5,11 @@ export interface ToolRunnerCallbacks {
 }
 
 export interface ToolRunner {
+  stream(
+    tool: Tool,
+    input: Record<string, unknown>,
+    options: ToolCallOptions,
+  ): AsyncGenerator<ToolResponseChunk, ToolResponse>;
   execute(
     tool: Tool,
     input: Record<string, unknown>,
@@ -14,22 +19,35 @@ export interface ToolRunner {
 }
 
 export class DefaultToolRunner implements ToolRunner {
-  public async execute(
+  public async *stream(
     tool: Tool,
     input: Record<string, unknown>,
     options: ToolCallOptions,
-    callbacks: ToolRunnerCallbacks = {},
-  ): Promise<ToolResponse> {
+  ): AsyncGenerator<ToolResponseChunk, ToolResponse> {
     if (tool.call === undefined) throw new Error(`Tool requires external execution: ${tool.name}`);
     const returned = tool.call(input, options);
     if (isAsyncGenerator(returned)) {
       while (true) {
         const item = await returned.next();
         if (item.done) return item.value;
-        await callbacks.onChunk?.(item.value);
+        yield item.value;
       }
     }
     return await returned;
+  }
+
+  public async execute(
+    tool: Tool,
+    input: Record<string, unknown>,
+    options: ToolCallOptions,
+    callbacks: ToolRunnerCallbacks = {},
+  ): Promise<ToolResponse> {
+    const stream = this.stream(tool, input, options);
+    while (true) {
+      const item = await stream.next();
+      if (item.done) return item.value;
+      await callbacks.onChunk?.(item.value);
+    }
   }
 }
 
