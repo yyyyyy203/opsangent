@@ -1,9 +1,10 @@
-import type { AgentContext, ToolCall, ToolExecutionResult, Clock } from '../contracts/index.js';
+import type { AgentContext, AgentEvent, ToolCall, ToolExecutionResult, Clock } from '../contracts/index.js';
 import { systemClock } from '../contracts/index.js';
 import type { ExecutionOutcome } from './execution-types.js';
 import type { SerializableInterrupt } from '../contracts/hitl.js';
 import type { ToolExecutionPipeline } from './execution-pipeline.js';
 import type { Toolkit } from './toolkit.js';
+import { mergeAsyncGenerators } from './async-generator-multiplexer.js';
 
 export interface BatchExecutionResult {
   results: ToolExecutionResult[];
@@ -18,27 +19,40 @@ export class ToolBatchExecutor {
     private readonly clock: Clock = systemClock,
   ) {}
 
+  public async *executeStream(
+    calls: ToolCall[],
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, BatchExecutionResult> {
+    const evidenceOrUtility = calls.filter((call) => this.toolkit.get(call.name)?.kind !== 'action');
+    const actions = calls.filter((call) => this.toolkit.get(call.name)?.kind === 'action');
+    if (evidenceOrUtility.length > 0 && actions.length > 0) {
+      const batch = yield* this.executeWithoutMixedActionsStream(evidenceOrUtility, context, stepId, signal);
+      return { ...batch, deferredActions: actions };
+    }
+    return yield* this.executeWithoutMixedActionsStream(calls, context, stepId, signal);
+  }
+
   public async execute(
     calls: ToolCall[],
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
   ): Promise<BatchExecutionResult> {
-    const evidenceOrUtility = calls.filter((call) => this.toolkit.get(call.name)?.kind !== 'action');
-    const actions = calls.filter((call) => this.toolkit.get(call.name)?.kind === 'action');
-    if (evidenceOrUtility.length > 0 && actions.length > 0) {
-      const batch = await this.executeWithoutMixedActions(evidenceOrUtility, context, stepId, signal);
-      return { ...batch, deferredActions: actions };
+    const stream = this.executeStream(calls, context, stepId, signal);
+    while (true) {
+      const item = await stream.next();
+      if (item.done) return item.value;
     }
-    return this.executeWithoutMixedActions(calls, context, stepId, signal);
   }
 
-  private async executeWithoutMixedActions(
+  private async *executeWithoutMixedActionsStream(
     calls: ToolCall[],
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
-  ): Promise<BatchExecutionResult> {
+  ): AsyncGenerator<AgentEvent, BatchExecutionResult> {
     const isSafe = (call: ToolCall): boolean => {
       const tool = this.toolkit.get(call.name);
       if (tool?.kind === 'action') return false;
@@ -47,16 +61,11 @@ export class ToolBatchExecutor {
     };
     const safe = calls.filter(isSafe);
     const unsafe = calls.filter((call) => !isSafe(call));
-    const settled = await Promise.allSettled(safe.map(async (call) => this.pipeline.execute(call, context, stepId, signal)));
-    const outcomes: ExecutionOutcome[] = settled.map((item, index) => {
-      if (item.status === 'fulfilled') return item.value;
-      const call = safe[index];
-      if (!call) throw new Error('Missing scheduled call.');
-      return this.failure(call, signal);
-    });
+    const safeStreams = safe.map((call) => this.executeOneStream(call, context, stepId, signal));
+    const outcomes: ExecutionOutcome[] = yield* mergeAsyncGenerators(safeStreams);
 
     for (const call of unsafe) {
-      const outcome = await this.pipeline.execute(call, context, stepId, signal).catch(() => this.failure(call, signal));
+      const outcome = yield* this.executeOneStream(call, context, stepId, signal);
       outcomes.push(outcome);
       if (outcome.type === 'interrupted') {
         const completed = new Set(outcomes.map((item) => item.result.toolCallId));
@@ -74,6 +83,19 @@ export class ToolBatchExecutor {
     return interrupted?.type === 'interrupted'
       ? { results: this.ordered(calls, outcomes), deferredActions: [], interrupt: interrupted.interrupt }
       : { results: this.ordered(calls, outcomes), deferredActions: [] };
+  }
+
+  private async *executeOneStream(
+    call: ToolCall,
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
+    try {
+      return yield* this.pipeline.executeStream(call, context, stepId, signal);
+    } catch {
+      return this.failure(call, signal);
+    }
   }
 
   private ordered(calls: ToolCall[], outcomes: ExecutionOutcome[]): ToolExecutionResult[] {
