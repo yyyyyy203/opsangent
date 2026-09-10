@@ -24,6 +24,8 @@
 
 下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
 
+后续 ELK 日志达到几十 MiB 时的已确认扩展方案见 [ELK 大体量证据流式摄取与 BlobStore 设计](./superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md)。该方案规定 SQLite Manifest、流式分页、BlobStore、预算截断、恢复和 LangSmith 脱敏边界，当前尚未实施。
+
 最新已实现能力与检查结果见 [实现进度](./implementation-status.md)。
 
 V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./documentation-audit-v2.md)。

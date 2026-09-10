@@ -35,9 +35,11 @@ MemoryFacade 是门面，内部拆召回、案例存取、语义检索和候选�
 
 ## 存储与恢复
 
-SQLite WAL 保存 runs、消息、调用尝试、事件、报告、证据元数据、定时任务、记忆与 Checkpoint。采用事务迁移和 schemaVersion；核心依赖 Store 接口。已确认的第一持久化增量允许把不超过 1 MiB 的指标原文保存在 SQLite，EvidenceStore 隔离具体形态；后续日志、Trace 和其他大对象改由 BlobStore/文件适配器保存，不改变 Tool 与 Harness。
+SQLite WAL 保存 runs、消息、调用尝试、事件、报告、证据元数据、定时任务、记忆与 Checkpoint。采用事务迁移和 schemaVersion；核心依赖 Store 接口。已确认的第一持久化增量允许把不超过 1 MiB 的指标原文保存在 SQLite，EvidenceStore 隔离具体形态；后续日志、Trace 和其他大对象采用“SQLite Manifest 控制面 + BlobStore 数据面”，不改变 Tool、Harness 和公共 Event/Message。
 
-第一持久化增量的有界指标证据在同一 SQLite 事务中保存摘要、原文和哈希；事务提交成功后引用才可进入 ToolResult。后续 BlobStore/文件实现采用 pending 元数据 → 临时原文写入并校验哈希 → 原子改名 → 标记 committed 的协议，并在启动时回收或修复 pending 与孤立文件。
+第一持久化增量的有界指标证据在同一 SQLite 事务中保存摘要、原文和哈希；事务提交成功后引用才可进入 ToolResult。后续 BlobStore/文件实现采用 pending Manifest → 流式分页和分块压缩 → 临时 chunk 写入并校验哈希 → 原子发布 → 标记 committed 的协议，并在启动时恢复 pending、识别 partial 或回收孤立文件。ELK 每次 MCP 响应仍保持 1 MiB 上限，通过不超过 512 KiB 的有界页和背压摄取，不能用一次 ToolResult 传输几十 MiB 原文。
+
+大证据立即执行 L0 外置：模型、Message、Event、SSE 和 LangSmith 只看到有界摘要及 evidenceId；二次调查通过 `logs.search_evidence`、`logs.aggregate_evidence` 和 `logs.read_evidence_slice` 等受控 Tool 分页读取。默认建议单次 capture 64 MiB、单 Run 256 MiB，并以 Profile/bootstrap 配置为准；达到预算必须标记 partial/truncated 和 missingEvidence，不得冒充完整调查。完整设计见 [ELK 大体量证据流式摄取与 BlobStore 设计](../superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md)。
 
 Checkpoint 保存父子关系、消息/上下文版本、待调用、授权、中断、执行事实、剩余预算、纠错链、压缩状态、工具快照版本和截止时间。恢复不重置时间和次数。保存完整批次进度，避免仅恢复一个 pending 调用而丢失其他分支。
 

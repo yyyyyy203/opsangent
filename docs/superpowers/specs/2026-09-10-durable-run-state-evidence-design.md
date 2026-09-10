@@ -17,7 +17,7 @@
 - 将 Checkpoint、Evidence、Event/Message SQLite 实现通过 bootstrap 组装。
 - 使用 Metrics Lab 验证 MCP、Evidence、Checkpoint 和进程重启闭环。
 
-本增量不包括：Agent Web、Simulator Web、ELK/Trace 数据源、大型证据 BlobStore、自动清理策略、多 Worker 分布式租约以及真实写动作上线。真实动作仍维持现有 Dry Run 安全边界；本轮只用受控假工具验证动作恢复语义。
+本增量不包括：Agent Web、Simulator Web、ELK/Trace 数据源、大型证据 BlobStore、自动清理策略、多 Worker 分布式租约以及真实写动作上线。真实动作仍维持现有 Dry Run 安全边界；本轮只用受控假工具验证动作恢复语义。ELK 达到几十 MiB 时的后续存储边界已经单独确定，见 [ELK 大体量证据流式摄取与 BlobStore 设计](./2026-09-10-elk-large-evidence-blob-storage-design.md)；该扩展不改变本增量只实现有界指标原文的范围。
 
 ## 2. 当前实现事实
 
@@ -209,7 +209,7 @@ export interface EvidenceQueryStore {
 - 事务提交成功后才能返回 `evidence_ref`。
 - 原始内容不得进入 Agent Message、公共 Event、SSE 或 LangSmith。
 
-Metrics V1 默认单条原始证据上限为 1 MiB，可从 bootstrap 注入更小值。未来日志和 Trace 超过阈值时由 BlobStore 实现接管，本轮不把大对象切片逻辑放进 SQLite Adapter。
+Metrics V1 默认单条原始证据上限为 1 MiB，可从 bootstrap 注入更小值。未来日志和 Trace 超过阈值时由 `StreamingEvidenceRecorder` 与 BlobStore 接管，本轮不把大对象切片逻辑放进 SQLite Adapter，也不通过提高 SQLite 或 MCP 响应上限来容纳日志。分页、Manifest、背压、截断和恢复协议见 [ELK 大体量证据流式摄取与 BlobStore 设计](./2026-09-10-elk-large-evidence-blob-storage-design.md)。
 
 ### 5.6 Evidence 记录服务
 
@@ -395,4 +395,4 @@ pnpm build
 
 ## 13. 后续顺序
 
-本增量验收后，下一顺序为：Metrics Subagent Tool 化并使用真实模型完成模拟诊断闭环；提供 Run/Evidence 只读查询 API；实现 Agent Web；最后接入真实业务 Prometheus。ELK、Trace、大对象 BlobStore、Memory 持久化和真实保护动作分别立项，不能混入本增量。
+本增量验收后，下一顺序为：Metrics Subagent Tool 化并使用真实模型完成模拟诊断闭环；提供 Run/Evidence 只读查询 API；实现 Agent Web；最后接入真实业务 Prometheus。ELK、Trace、大对象 BlobStore、Memory 持久化和真实保护动作分别立项，不能混入本增量；其中 ELK 与大对象的已确认设计基线见 [ELK 大体量证据流式摄取与 BlobStore 设计](./2026-09-10-elk-large-evidence-blob-storage-design.md)。
