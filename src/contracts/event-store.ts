@@ -30,8 +30,10 @@ export class MessageVersionConflictError extends Error {
   }
 }
 
+export type StoredRecordType = 'event' | 'message' | 'checkpoint' | 'evidence' | 'tool_execution' | 'blob_manifest';
+
 export class StoredDataCorruptionError extends Error {
-  public constructor(public readonly recordType: 'event' | 'message', public readonly recordId: string) {
+  public constructor(public readonly recordType: StoredRecordType, public readonly recordId: string) {
     super(`stored ${recordType} is corrupt: ${recordId}`);
     this.name = 'StoredDataCorruptionError';
   }

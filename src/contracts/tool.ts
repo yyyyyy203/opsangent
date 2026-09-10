@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import type { AgentError } from './errors.js';
 
 export type ToolKind = 'evidence' | 'action' | 'utility';
+export type ToolRecoveryPolicy = 'replay_safe' | 'verify_before_retry' | 'never_replay';
 export type ToolExecutionStatus =
   | 'success'
   | 'failed'
@@ -41,6 +42,8 @@ export type SemanticValidation =
   | { valid: false; error: AgentError };
 
 export interface ToolCallOptions {
+  /** Stable identity supplied by the pipeline; optional for existing third-party Tool implementations. */
+  toolCallId?: string;
   runId: string;
   stepId: string;
   sessionId?: string;
@@ -89,6 +92,8 @@ export interface Tool {
   readonly trustedWhenInWorkspace?: boolean;
   readonly userFacingLabel?: (input: Record<string, unknown>) => string;
   readonly isConcurrencySafe?: (input: Record<string, unknown>) => boolean;
+  /** Restart behavior is separate from same-batch concurrency behavior. */
+  readonly recoveryPolicy?: ToolRecoveryPolicy;
   readonly validateSemantics?: (input: Record<string, unknown>) => SemanticValidation;
 }
 

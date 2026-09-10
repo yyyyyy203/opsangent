@@ -15,6 +15,16 @@ export interface BudgetState {
   maxDurationMs: number;
 }
 
+/** Persisted execution plan for a Tool batch that has not reached a durable terminal state. */
+export interface PendingToolBatch {
+  batchId: string;
+  stepId: string;
+  calls: ToolCall[];
+  completedResults: ToolExecutionResult[];
+  state: 'admitted' | 'executing' | 'awaiting_confirmation' | 'awaiting_external';
+  createdAt: string;
+}
+
 export interface AgentContext {
   runId: string;
   sessionId?: string;
@@ -25,6 +35,8 @@ export interface AgentContext {
   profileId: string;
   messages: AgentMessage[];
   pendingToolCalls: ToolCall[];
+  /** Additive durable representation; legacy pendingToolCalls remains during migration. */
+  pendingToolBatch?: PendingToolBatch;
   pendingInterrupt?: SerializableInterrupt;
   confirmedToolCallIds: string[];
   rejectedToolCallIds: string[];
