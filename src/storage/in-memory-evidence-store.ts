@@ -1,15 +1,19 @@
-import type { EvidenceRecord, EvidenceStore } from '../contracts/index.js';
+import type { EvidencePage, EvidenceQueryStore, EvidenceRecord, EvidenceStore } from '../contracts/index.js';
+import { InMemoryEvidenceRepository } from './in-memory-durable-state.js';
 
-export class InMemoryEvidenceStore implements EvidenceStore {
-  private readonly records = new Map<string, EvidenceRecord>();
+/** Legacy EvidenceStore name backed by the durable repository contract. */
+export class InMemoryEvidenceStore implements EvidenceStore, EvidenceQueryStore {
+  public constructor(private readonly repository: InMemoryEvidenceRepository = new InMemoryEvidenceRepository()) {}
 
   public save(record: EvidenceRecord): Promise<void> {
-    this.records.set(record.evidenceId, structuredClone(record));
-    return Promise.resolve();
+    return this.repository.save(record);
   }
 
   public get(evidenceId: string): Promise<EvidenceRecord | null> {
-    const value = this.records.get(evidenceId);
-    return Promise.resolve(value === undefined ? null : structuredClone(value));
+    return this.repository.get(evidenceId);
+  }
+
+  public listByRun(runId: string, options?: { cursor?: string; limit?: number }): Promise<EvidencePage> {
+    return this.repository.listByRun(runId, options);
   }
 }

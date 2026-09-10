@@ -1,17 +1,22 @@
 import type { AgentContext, CheckpointStore, ToolCall, ToolExecutionResult } from '../contracts/index.js';
+import { InMemoryDurableState } from './in-memory-durable-state.js';
 
+/** Legacy adapter retained for existing Harness callers during durable-store migration. */
 export class InMemoryCheckpointStore implements CheckpointStore {
-  private readonly contexts = new Map<string, AgentContext>();
+  public readonly durable: InMemoryDurableState;
   private readonly executions = new Map<string, ToolExecutionResult>();
 
-  public load(runId: string): Promise<AgentContext | null> {
-    const value = this.contexts.get(runId);
-    return Promise.resolve(value === undefined ? null : structuredClone(value));
+  public constructor(durable: InMemoryDurableState = new InMemoryDurableState()) {
+    this.durable = durable;
   }
 
-  public save(context: AgentContext): Promise<void> {
-    this.contexts.set(context.runId, structuredClone(context));
-    return Promise.resolve();
+  public async load(runId: string): Promise<AgentContext | null> {
+    return (await this.durable.load(runId))?.context ?? null;
+  }
+
+  public async save(context: AgentContext): Promise<void> {
+    const current = await this.durable.load(context.runId);
+    await this.durable.save(context, current?.revision ?? null);
   }
 
   public hasExecuted(call: ToolCall): Promise<boolean> {
@@ -22,4 +27,8 @@ export class InMemoryCheckpointStore implements CheckpointStore {
     this.executions.set(call.id, structuredClone(result));
     return Promise.resolve();
   }
+}
+
+export function asLegacyCheckpointStore(durable: InMemoryDurableState): CheckpointStore {
+  return new InMemoryCheckpointStore(durable);
 }
