@@ -1,9 +1,11 @@
+import { APIConnectionTimeoutError, APIUserAbortError } from 'openai';
 import { ModelFailure, type ModelFailureCategory } from '../model-failure.js';
 
 export interface OpenAICompatibleErrorClassifierOptions {
   transientForbiddenCodes?: readonly string[];
   quotaCodes?: readonly string[];
   signal?: AbortSignal;
+  now?: () => number;
 }
 
 const DEFAULT_QUOTA_CODES = new Set([
@@ -13,6 +15,12 @@ const DEFAULT_QUOTA_CODES = new Set([
   'billing_limit_reached',
   'insufficient_balance',
   'payment_required',
+]);
+
+const DEFAULT_CONTEXT_LENGTH_CODES = new Set([
+  'context_length_exceeded',
+  'context_window_exceeded',
+  'max_context_length_exceeded',
 ]);
 
 const NETWORK_CODES = new Set(['econnreset', 'econnrefused', 'enotfound', 'eai_again', 'enetunreach', 'ehostunreach']);
@@ -29,20 +37,26 @@ export function classifyOpenAICompatibleError(
   const errorCode = readString(record, 'code')?.toLowerCase();
   const providerCodes = providerErrorCodes(record);
   const status = readStatus(record);
-  const retryAfterMs = readRetryAfterMs(record);
+  const retryAfterMs = readRetryAfterMs(record, options.now ?? Date.now);
   const details = {
     ...(status === undefined ? {} : { status }),
     ...(retryAfterMs === undefined ? {} : { retryAfterMs }),
   };
 
-  if (signalAborted || isAbortName(errorName, errorCode) || isTimeoutName(errorName, errorCode)) {
+  if (signalAborted || error instanceof APIUserAbortError || isAbortName(errorName, errorCode)) {
     return failure('aborted', 'Model call was aborted.', false, details, 'aborted');
+  }
+  if (error instanceof APIConnectionTimeoutError || isTimeoutName(errorName, errorCode)) {
+    return failure('timeout', 'Model request timed out.', true, details, 'retryable');
   }
   if (status === 402) return failure('auth', 'Model billing limit was reached.', false, details, 'terminal');
   if (status === 429 && containsAny(providerCodes, options.quotaCodes ?? [...DEFAULT_QUOTA_CODES])) {
     return failure('rate_limit', 'Model quota was exhausted.', false, details, 'terminal');
   }
   if (status === 401) return failure('auth', 'Model authentication failed.', false, details, 'fallback_only');
+  if (status === 400 && containsAny(providerCodes, [...DEFAULT_CONTEXT_LENGTH_CODES])) {
+    return failure('context_length', 'Model context window was exceeded.', false, details, 'fallback_only');
+  }
   if (status === 400) return failure('protocol', 'Model request was rejected.', false, details, 'fallback_only');
   if (status === 403) {
     const transientCodes = options.transientForbiddenCodes ?? [];
@@ -84,7 +98,7 @@ function readStatus(record: Record<string, unknown>): number | undefined {
   return status;
 }
 
-function readRetryAfterMs(record: Record<string, unknown>): number | undefined {
+function readRetryAfterMs(record: Record<string, unknown>, now: () => number): number | undefined {
   const response = asRecord(record.response);
   const candidates = [readHeader(record.headers), readHeader(response.headers), readHeader(asRecord(record.error).headers)];
   for (const value of candidates) {
@@ -92,7 +106,7 @@ function readRetryAfterMs(record: Record<string, unknown>): number | undefined {
     const seconds = Number(value);
     if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
     const date = Date.parse(value);
-    if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
+    if (!Number.isNaN(date)) return Math.max(0, date - now());
   }
   return undefined;
 }

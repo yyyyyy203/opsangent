@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import OpenAI from 'openai';
 import { classifyOpenAICompatibleError } from '../src/model/openai-compatible/error-classifier.js';
 
 function providerError(status: number, fields: Record<string, unknown> = {}): unknown {
@@ -22,6 +23,19 @@ describe('OpenAI-compatible error classifier', () => {
     expect(unauthorized).toMatchObject({ retryable: false, disposition: 'fallback_only', fallbackAllowed: true, details: { category: 'auth' } });
     expect(badRequest).toMatchObject({ retryable: false, disposition: 'fallback_only', fallbackAllowed: true, details: { category: 'protocol' } });
     expect(forbidden).toMatchObject({ retryable: false, disposition: 'fallback_only', fallbackAllowed: true, details: { category: 'auth' } });
+  });
+
+  it('classifies provider context-length errors distinctly before generic bad requests', () => {
+    const contextLength = classifyOpenAICompatibleError(providerError(400, {
+      error: { code: 'context_length_exceeded', type: 'invalid_request_error' },
+    }));
+
+    expect(contextLength).toMatchObject({
+      retryable: false,
+      disposition: 'fallback_only',
+      fallbackAllowed: true,
+      details: { category: 'context_length', status: 400 },
+    });
   });
 
   it('classifies transient statuses and configured transient forbidden errors as retryable', () => {
@@ -51,8 +65,31 @@ describe('OpenAI-compatible error classifier', () => {
     expect(network.details).not.toHaveProperty('message');
   });
 
+  it('classifies transport timeouts as retryable without confusing them with cancellation', () => {
+    const namedTimeout = Object.assign(new Error('transport timed out'), { name: 'TimeoutError' });
+    const codeTimeout = Object.assign(new Error('transport timed out'), { code: 'ETIMEDOUT' });
+    const sdkTimeout = new OpenAI.APIConnectionTimeoutError();
+
+    for (const timeout of [namedTimeout, codeTimeout, sdkTimeout]) {
+      expect(classifyOpenAICompatibleError(timeout)).toMatchObject({
+        retryable: true,
+        disposition: 'retryable',
+        fallbackAllowed: true,
+        details: { category: 'timeout' },
+      });
+    }
+  });
+
   it('keeps a safe retry-after value for the retry decorator', () => {
     const failure = classifyOpenAICompatibleError(providerError(429, { headers: { 'retry-after': '1.5' } }));
     expect(failure.details).toMatchObject({ retryAfterMs: 1500 });
+  });
+
+  it('uses an injected clock to calculate HTTP-date retry-after values', () => {
+    const failure = classifyOpenAICompatibleError(providerError(429, {
+      headers: { 'retry-after': 'Thu, 01 Jan 1970 00:00:02 GMT' },
+    }), { now: () => 1_000 });
+
+    expect(failure.details).toMatchObject({ retryAfterMs: 1_000 });
   });
 });

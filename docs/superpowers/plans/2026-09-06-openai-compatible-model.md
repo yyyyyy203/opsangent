@@ -1,3 +1,5 @@
+> **Deprecated:** This native-fetch and multi-timeout draft is superseded by [2026-09-09 OpenAI-compatible SDK implementation plan](./2026-09-09-openai-compatible-model-sdk.md). Preserve it only as historical context; do not use it for implementation.
+
 # OpenAI-Compatible Model Adapter Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

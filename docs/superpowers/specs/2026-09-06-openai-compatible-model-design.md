@@ -83,6 +83,8 @@ usage 可出现在 finish chunk 或尾随 usage-only chunk；取最后一个合�
 - `retryable`：5xx、普通 429、网络连接错误，以及被显式识别为临时性的 403；指数退避后重试，耗尽后允许 fallback。
 - `aborted`：调用者 AbortSignal 或 Run deadline 触发；立即传播，不重试、不 fallback。
 
+SDK 传输超时（包括 `APIConnectionTimeoutError`、`TimeoutError` 和 `ETIMEDOUT`）属于 `timeout/retryable`，不得与调用者取消混淆；只有父 `AbortSignal` 和 Run deadline 进入 `aborted`。若 HTTP 400 的 provider `code` 或 `type` 命中显式 context-length 白名单，必须在通用 400 规则之前分类为 `context_length/fallback_only`。解析 HTTP-date 形式的 `Retry-After` 时，分类器必须使用可注入时钟，不能直接读取环境 `Date.now()`。
+
 403 不默认全部重试：只有 provider error code/type 命中可配置的 transient-forbidden 白名单时才进入 `retryable`，否则按 `fallback_only` 处理，避免权限错误被放大。429 必须先识别 quota code，再决定是 `terminal` 还是普通限流。`RetryingChatModel` 需要消费 `fallbackAllowed`/等价的结构化处置字段；不能对 terminal 或 aborted 无条件调用 fallback。遵循合法 Retry-After，但单次等待最大 2 秒；超过上限则本次调用直接失败，不提前请求。
 
 一旦已向 Harness 产出任意可见文本 delta，就禁止透明重试，避免重复文本和重复计费。工具参数分片不向 Harness 暴露，若流在首次可见文本之前中断可以重试；已经产生文本后截断必须失败。装饰器在首次尝试前创建 messages/tools 的只读数组快照，所有尝试复用相同对象引用；Formatter 的确定性序列化保证请求语义稳定。本轮不新增多模型路由或供应商选择策略，继续复用已有 `RetryingChatModel` 的可选 fallback，并按四级处置决定是否允许 fallback。

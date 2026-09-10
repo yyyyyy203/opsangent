@@ -87,6 +87,21 @@ describe('OpenAI-compatible ChatModel', () => {
     await expect(stream.next()).rejects.toMatchObject({ details: { category: 'network' } });
     expect(partial.returned).toBe(true);
   });
+
+  it('uses the model clock when classifying HTTP-date retry-after values', async () => {
+    const providerError = Object.assign(new Error('provider response'), {
+      status: 429,
+      headers: { 'retry-after': 'Thu, 01 Jan 1970 00:00:02 GMT' },
+    });
+    const model = new OpenAICompatibleChatModel(new ErrorThrowingClient(providerError), {
+      model: 'test-model',
+      clock: () => 1_000,
+    });
+
+    await expect(drainModel(model.stream([], [], callOptions()))).rejects.toMatchObject({
+      details: { category: 'rate_limit', retryAfterMs: 1_000 },
+    });
+  });
 });
 
 async function drainModel(stream: AsyncGenerator<ModelStreamEvent, ModelResponse>) {

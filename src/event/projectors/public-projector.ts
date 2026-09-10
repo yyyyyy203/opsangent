@@ -94,7 +94,12 @@ export class PublicEventProjectorV2 {
       case 'CONTENT_BLOCK_COMPLETED':
         return sanitizeRecord({ messageId: event.payload.messageId, blockId: event.payload.blockId, blockSummary: safeText(event.payload.blockSummary), index: event.payload.index });
       case 'MESSAGE_COMPLETED':
-        return sanitizeRecord({ messageId: event.payload.messageId, ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage as unknown as JsonObject }), completedAt: event.payload.completedAt });
+        return sanitizeRecord({
+          messageId: event.payload.messageId,
+          ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage as unknown as JsonObject }),
+          completedAt: event.payload.completedAt,
+          ...(event.payload.finishReason === undefined ? {} : { finishReason: event.payload.finishReason }),
+        });
       case 'MESSAGE_FAILED':
         return sanitizeRecord({ messageId: event.payload.messageId, error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable } });
       case 'TOOL_CALL_CREATED':

@@ -54,6 +54,7 @@ export class OpenAICompatibleChatModel implements ChatModel {
       if (error instanceof ModelFailure) throw error;
       throw classifyOpenAICompatibleError(error, {
         signal: combined.signal,
+        now: clock,
         ...(this.config.transientForbiddenCodes === undefined ? {} : { transientForbiddenCodes: this.config.transientForbiddenCodes }),
         ...(this.config.quotaCodes === undefined ? {} : { quotaCodes: this.config.quotaCodes }),
       });

@@ -59,14 +59,14 @@ export type ContentBlockTypeV2 = MessageBlockV2['type'];
 export interface ContentBlockStartedPayloadV2 { messageId: string; blockId: string; blockType: ContentBlockTypeV2; index: number }
 export interface ContentBlockDeltaPayloadV2 { messageId: string; blockId: string; delta: string; index: number; blockType?: ContentBlockTypeV2 }
 export interface ContentBlockCompletedPayloadV2 { messageId: string; blockId: string; blockSummary: string; index: number; block?: MessageBlockV2 }
-export interface MessageCompletedPayloadV2 { messageId: string; usage?: UsagePayloadV2; completedAt: string }
+export interface MessageCompletedPayloadV2 { messageId: string; usage?: UsagePayloadV2; completedAt: string; finishReason?: string }
 export interface MessageFailedPayloadV2 { messageId: string; error: EventErrorPayloadV2 }
 export const messageStreamEventPayloadSchemas = {
   MESSAGE_STARTED: strict({ messageId: identifierV2Schema, role: messageRoleV2Schema, status: messageStatusV2Schema }),
   CONTENT_BLOCK_STARTED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockType: contentBlockTypeV2Schema, index: z.number().int().nonnegative() }),
   CONTENT_BLOCK_DELTA: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, delta: z.string(), index: z.number().int().nonnegative(), blockType: contentBlockTypeV2Schema.optional() }),
   CONTENT_BLOCK_COMPLETED: strict({ messageId: identifierV2Schema, blockId: identifierV2Schema, blockSummary: z.string().min(1), index: z.number().int().nonnegative(), block: messageBlockV2Schema.optional() }),
-  MESSAGE_COMPLETED: strict({ messageId: identifierV2Schema, usage: usageSchema.optional(), completedAt: timestampV2Schema }),
+  MESSAGE_COMPLETED: strict({ messageId: identifierV2Schema, usage: usageSchema.optional(), completedAt: timestampV2Schema, finishReason: z.string().min(1).optional() }),
   MESSAGE_FAILED: strict({ messageId: identifierV2Schema, error: eventErrorPayloadV2Schema }),
 } as const;
 export interface EventV2PayloadMapSlice {

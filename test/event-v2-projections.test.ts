@@ -97,4 +97,18 @@ describe('PublicEventProjectorV2', () => {
       payload: { checkpointVersion: '3', resumeReason: 'explicit_resume', newStreamId: 'stream-2' },
     });
   });
+
+  it('preserves the safe finish reason on completed public messages', () => {
+    const projected = new PublicEventProjectorV2().project(event('MESSAGE_COMPLETED', {
+      messageId: 'message-1',
+      completedAt: '2026-09-07T10:00:01.000Z',
+      finishReason: 'tool_calls',
+    }));
+
+    expect(projected?.payload).toEqual({
+      messageId: 'message-1',
+      completedAt: '2026-09-07T10:00:01.000Z',
+      finishReason: 'tool_calls',
+    });
+  });
 });

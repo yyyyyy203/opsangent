@@ -52,7 +52,12 @@ export class EventedChatModel implements ChatModel {
         if (item.done) {
           if (textStarted) {
             await this.publish('CONTENT_BLOCK_COMPLETED', base, { messageId, blockId, blockSummary: 'text output', index: 0, block: { type: 'text', blockId, text } });
-            await this.publish('MESSAGE_COMPLETED', base, { messageId, completedAt: clock.now().toISOString(), ...(item.value.usage === undefined ? {} : { usage: item.value.usage }) });
+            await this.publish('MESSAGE_COMPLETED', base, {
+              messageId,
+              completedAt: clock.now().toISOString(),
+              ...(item.value.usage === undefined ? {} : { usage: item.value.usage }),
+              ...(item.value.finishReason === undefined ? {} : { finishReason: item.value.finishReason }),
+            });
           }
           await this.publish('MODEL_CALL_COMPLETED', base, {
             provider: this.config.provider, model: this.config.model, attempt: 1,

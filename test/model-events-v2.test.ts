@@ -33,7 +33,9 @@ describe('EventedChatModel', () => {
       'MODEL_CALL_STARTED', 'MESSAGE_STARTED', 'CONTENT_BLOCK_STARTED', 'CONTENT_BLOCK_DELTA',
       'CONTENT_BLOCK_COMPLETED', 'MESSAGE_COMPLETED', 'MODEL_CALL_COMPLETED',
     ]);
+    const messageCompleted = events.find((event) => event.type === 'MESSAGE_COMPLETED')?.payload as { finishReason?: string };
     const completed = events.at(-1)?.payload as { usage?: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }; durationMs?: unknown; finishReason?: string; cacheHit?: boolean };
+    expect(messageCompleted.finishReason).toBe('stop');
     expect(completed.usage).toEqual({ inputTokens: 2, outputTokens: 1, cachedInputTokens: 1 });
     expect(completed.finishReason).toBe('stop');
     expect(completed.cacheHit).toBe(true);
