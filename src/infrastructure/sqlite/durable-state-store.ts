@@ -95,10 +95,10 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     result: ToolExecutionResult;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
-      const existing = this.requireExecution(input.execution);
-      const execution = completedExecution(existing, input.result, this.clock);
       const context = appendCompletedResult(input.context, input.result);
       const checkpoint = this.writeCheckpoint(context, input.expectedRevision);
+      const existing = this.requireExecution(input.execution);
+      const execution = completedExecution(existing, input.result, this.clock);
       this.updateExecution(execution);
       return checkpoint;
     }).immediate());

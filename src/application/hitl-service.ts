@@ -1,4 +1,5 @@
-import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, EventFactoryV2Like, EventPublisherV2Like, ToolExecutionResult } from '../contracts/index.js';
+import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventFactoryV2Like, EventPublisherV2Like, ToolCall, ToolExecutionResult } from '../contracts/index.js';
+import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { AgentMessage } from '../contracts/message.js';
 
 export class HitlService {
@@ -6,11 +7,13 @@ export class HitlService {
     private readonly checkpoints: CheckpointStore,
     private readonly clock: Clock,
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
+    private readonly durableState?: DurableRunState,
   ) {}
 
   public async decide(decision: ConfirmationDecision): Promise<void> {
-    const context = await this.checkpoints.load(decision.runId);
-    if (context === null) throw new Error(`Checkpoint not found: ${decision.runId}`);
+    const stored = await this.loadCheckpoint(decision.runId);
+    if (stored === null) throw new Error(`Checkpoint not found: ${decision.runId}`);
+    const { context } = stored;
     const interrupt = context.pendingInterrupt;
     if (context.status !== 'awaiting_confirmation' || interrupt === undefined) {
       throw new Error(`Run is not awaiting confirmation: ${decision.runId}`);
@@ -18,16 +21,18 @@ export class HitlService {
     if (interrupt.toolCallId !== decision.toolCallId) {
       throw new Error(`Confirmation does not match pending tool call: ${decision.toolCallId}`);
     }
+    const pending = this.pendingCall(context, decision.toolCallId);
     if (interrupt.expiresAt !== undefined && this.clock.now().getTime() >= Date.parse(interrupt.expiresAt)) {
       const expiredAt = this.clock.now().toISOString();
-      const replacement = this.rejectedResult(context, decision.toolCallId, expiredAt, 'Confirmation expired.');
+      const replacement = this.rejectedResult(pending, expiredAt, 'Confirmation expired.');
       this.replaceInterruptedResult(context.messages, replacement);
+      this.storeTerminalPendingResult(context, replacement);
       context.pendingToolCalls = [];
       delete context.pendingInterrupt;
       context.rejectedToolCallIds.push(decision.toolCallId);
       context.status = 'running';
       context.contextVersion += 1;
-      await this.checkpoints.save(context);
+      await this.saveCheckpoint(context, stored.revision);
       await this.publishV2('CONFIRMATION_EXPIRED', context, {
         confirmationId: confirmationId(context.runId, decision.toolCallId), toolCallIds: [decision.toolCallId], expiredAt,
       });
@@ -39,12 +44,14 @@ export class HitlService {
       if (!context.confirmedToolCallIds.includes(decision.toolCallId)) {
         context.confirmedToolCallIds.push(decision.toolCallId);
       }
+      this.discardProvisionalPendingResult(context, decision.toolCallId);
+      if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'executing';
     } else {
       context.rejectedToolCallIds.push(decision.toolCallId);
       const now = this.clock.now().toISOString();
-      this.replaceInterruptedResult(context.messages, {
+      const replacement: ToolExecutionResult = {
         toolCallId: decision.toolCallId,
-        toolName: context.pendingToolCalls[0]?.name ?? 'unknown',
+        toolName: pending.name,
         status: 'aborted',
         error: {
           code: 'USER_REJECTED',
@@ -54,13 +61,15 @@ export class HitlService {
         },
         startedAt: now,
         finishedAt: now,
-      });
+      };
+      this.replaceInterruptedResult(context.messages, replacement);
+      this.storeTerminalPendingResult(context, replacement);
       context.pendingToolCalls = [];
       delete context.pendingInterrupt;
     }
     context.status = 'running';
     context.contextVersion += 1;
-    await this.checkpoints.save(context);
+    await this.saveCheckpoint(context, stored.revision);
     await this.publishV2('CONFIRMATION_RESOLVED', context, {
       decision: decision.confirmed ? 'approved' : 'rejected', actor: decision.actor, toolCallIds: [decision.toolCallId], decidedAt: decision.decidedAt,
     });
@@ -84,8 +93,72 @@ export class HitlService {
     }
   }
 
-  private rejectedResult(context: AgentContext, toolCallId: string, now: string, message: string): ToolExecutionResult {
-    return { toolCallId, toolName: context.pendingToolCalls[0]?.name ?? 'unknown', status: 'aborted', error: { code: 'CONFIRMATION_EXPIRED', message, retryable: false }, startedAt: now, finishedAt: now };
+  private rejectedResult(call: ToolCall, now: string, message: string): ToolExecutionResult {
+    return { toolCallId: call.id, toolName: call.name, status: 'aborted', error: { code: 'CONFIRMATION_EXPIRED', message, retryable: false }, startedAt: now, finishedAt: now };
+  }
+
+  private async loadCheckpoint(runId: string): Promise<{ context: AgentContext; revision?: number } | null> {
+    if (this.durableState === undefined) {
+      const context = await this.checkpoints.load(runId);
+      return context === null ? null : { context };
+    }
+    const checkpoint = await this.durableState.checkpoints.load(runId);
+    return checkpoint === null ? null : { context: checkpoint.context, revision: checkpoint.revision };
+  }
+
+  private async saveCheckpoint(context: AgentContext, revision: number | undefined): Promise<void> {
+    if (this.durableState === undefined) {
+      await this.checkpoints.save(context);
+      return;
+    }
+    if (revision === undefined) throw new Error(`Missing durable checkpoint revision: ${context.runId}`);
+    try {
+      await this.durableState.checkpoints.save(context, revision);
+    } catch (error) {
+      throw durableStorageError(error);
+    }
+  }
+
+  private pendingCall(context: AgentContext, toolCallId: string): ToolCall {
+    const batch = context.pendingToolBatch;
+    if (this.durableState !== undefined && batch === undefined) {
+      throw new Error(`Durable confirmation is missing its pending batch: ${context.runId}`);
+    }
+    const call = batch?.calls.find((candidate) => candidate.id === toolCallId)
+      ?? context.pendingToolCalls.find((candidate) => candidate.id === toolCallId);
+    if (call === undefined) throw new Error(`Pending tool call not found: ${toolCallId}`);
+    return call;
+  }
+
+  private discardProvisionalPendingResult(context: AgentContext, toolCallId: string): void {
+    const batch = context.pendingToolBatch;
+    if (batch === undefined) return;
+    batch.completedResults = batch.completedResults.filter((candidate) => (
+      candidate.toolCallId !== toolCallId || !isProvisionalResult(candidate)
+    ));
+  }
+
+  private storeTerminalPendingResult(context: AgentContext, result: ToolExecutionResult): void {
+    const batch = context.pendingToolBatch;
+    if (batch === undefined) return;
+    if (isProvisionalResult(result)) throw new Error(`Confirmation result is not terminal: ${result.toolCallId}`);
+    const call = batch.calls.find((candidate) => candidate.id === result.toolCallId);
+    if (call === undefined || call.name !== result.toolName) {
+      throw new Error(`Confirmation result does not belong to pending batch: ${result.toolCallId}`);
+    }
+    const index = batch.completedResults.findIndex((candidate) => candidate.toolCallId === result.toolCallId);
+    if (index < 0) {
+      batch.completedResults.push(structuredClone(result));
+      return;
+    }
+    const existing = batch.completedResults[index];
+    if (existing !== undefined && isProvisionalResult(existing)) {
+      batch.completedResults[index] = structuredClone(result);
+      return;
+    }
+    if (existing !== undefined && checkpointChecksum(existing) !== checkpointChecksum(result)) {
+      throw new Error(`Confirmation result conflicts with pending batch: ${result.toolCallId}`);
+    }
   }
 
   private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], toolCallId?: string): Promise<void> {
@@ -105,3 +178,18 @@ export class HitlService {
 }
 
 function confirmationId(runId: string, toolCallId: string): string { return `confirmation:${runId}:${toolCallId}`; }
+
+function isProvisionalResult(result: ToolExecutionResult): boolean {
+  return result.status === 'interrupted' || result.status === 'awaiting_external';
+}
+
+function durableStorageError(error: unknown): Error {
+  if (error instanceof CheckpointConflictError) {
+    return Object.assign(new Error(error.message), {
+      code: 'STORAGE_ERROR' as const,
+      retryable: false,
+      details: { category: error.category },
+    });
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}

@@ -151,6 +151,15 @@ export class ToolExecutionPipeline {
       };
     }
 
+    const execution = await this.prepareExecution(tool, normalizedCall, context, stepId);
+    if (execution?.state === 'succeeded' || execution?.state === 'failed') {
+      if (execution.result === undefined) throw new Error(`Terminal execution is missing a result: ${call.id}`);
+      return { type: 'completed', result: execution.result, risk, execution };
+    }
+    if (execution?.state === 'uncertain') {
+      throw new Error(`Uncertain execution cannot be invoked: ${call.id}`);
+    }
+
     if (tool.call === undefined) {
       const interrupt = {
         hookId: 'external-tool-execution',
@@ -205,15 +214,6 @@ export class ToolExecutionPipeline {
       input: hookContext.input,
       attributes: { toolKind: tool.kind, riskSeverity: risk.severity },
     });
-
-    const execution = await this.prepareExecution(tool, normalizedCall, context, stepId);
-    if (execution?.state === 'succeeded' || execution?.state === 'failed') {
-      if (execution.result === undefined) throw new Error(`Terminal execution is missing a result: ${call.id}`);
-      return { type: 'completed', result: execution.result, risk, execution };
-    }
-    if (execution?.state === 'uncertain') {
-      throw new Error(`Uncertain execution cannot be invoked: ${call.id}`);
-    }
 
     let toolStream: ReturnType<ToolRunner['stream']> | undefined;
     let streamCompleted = false;

@@ -1,13 +1,18 @@
 import type {
+  AgentContext,
   CheckpointStore,
   Clock,
+  DurableRunState,
   EventSink,
   ResolvedRisk,
   ToolExecutionResult,
   ToolResponse,
+  ToolExecutionRecord,
+  ToolCall,
   EventFactoryV2Like,
   EventPublisherV2Like,
 } from '../contracts/index.js';
+import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
@@ -29,11 +34,13 @@ export class ExternalToolResultService {
     private readonly events: EventSink,
     private readonly eventFactory: EventFactory,
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
+    private readonly durableState?: DurableRunState,
   ) {}
 
   public async submit(submission: ExternalToolResultSubmission): Promise<void> {
-    const context = await this.checkpoints.load(submission.runId);
-    if (context === null) throw new Error(`Checkpoint not found: ${submission.runId}`);
+    const stored = await this.loadCheckpoint(submission.runId);
+    if (stored === null) throw new Error(`Checkpoint not found: ${submission.runId}`);
+    const { context } = stored;
     const interrupt = context.pendingInterrupt;
     if (context.status !== 'paused' || interrupt?.interruptType !== 'external_tool_execution') {
       throw new Error(`Run is not awaiting external tool execution: ${submission.runId}`);
@@ -41,8 +48,7 @@ export class ExternalToolResultService {
     if (interrupt.toolCallId !== submission.toolCallId) {
       throw new Error(`External result does not match pending tool call: ${submission.toolCallId}`);
     }
-    const pending = context.pendingToolCalls.find((call) => call.id === submission.toolCallId);
-    if (pending === undefined) throw new Error(`Pending tool call not found: ${submission.toolCallId}`);
+    const pending = this.pendingCall(context, submission.toolCallId);
 
     const now = this.clock.now().toISOString();
     let replacement: ToolExecutionResult = {
@@ -55,6 +61,7 @@ export class ExternalToolResultService {
     };
     const tool = this.toolkit.get(pending.name);
     if (tool === undefined) throw new Error(`Tool not found while ingesting external result: ${pending.name}`);
+    const execution = await this.externalExecution(context, pending, tool.kind, stored.revision);
     const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: pending });
     const hookResult = await this.hooks.runAfter({
       context,
@@ -74,7 +81,6 @@ export class ExternalToolResultService {
     if (tool.kind === 'action'
       && interrupt.payload.mode === 'execute'
       && replacement.status === 'success') {
-      await this.checkpoints.recordExecuted(pending, replacement);
       context.executedActions.push(replacement);
     }
     for (const message of context.messages) {
@@ -86,10 +92,30 @@ export class ExternalToolResultService {
     }
     context.pendingToolCalls = [];
     delete context.pendingInterrupt;
+    if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'executing';
     context.status = 'running';
     context.stage = pending.name === 'bash' ? 'verification' : context.stage;
     context.contextVersion += 1;
-    await this.checkpoints.save(context);
+    this.storeTerminalPendingResult(context, replacement);
+    if (this.durableState === undefined || execution === undefined) {
+      if (tool.kind === 'action'
+        && interrupt.payload.mode === 'execute'
+        && replacement.status === 'success') {
+        await this.checkpoints.recordExecuted(pending, replacement);
+      }
+      await this.checkpoints.save(context);
+    } else {
+      try {
+        await this.durableState.stateUnitOfWork.commitToolResult({
+          expectedRevision: this.requireRevision(stored.revision, context.runId),
+          context,
+          execution,
+          result: replacement,
+        });
+      } catch (error) {
+        throw durableStorageError(error);
+      }
+    }
     if (this.v2Events === undefined) {
       await this.events.publish(this.eventFactory.create(
         'TOOL_RESULT',
@@ -126,6 +152,88 @@ export class ExternalToolResultService {
       }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }));
     }
   }
+
+  private async loadCheckpoint(runId: string): Promise<{ context: AgentContext; revision?: number } | null> {
+    if (this.durableState === undefined) {
+      const context = await this.checkpoints.load(runId);
+      return context === null ? null : { context };
+    }
+    const checkpoint = await this.durableState.checkpoints.load(runId);
+    return checkpoint === null ? null : { context: checkpoint.context, revision: checkpoint.revision };
+  }
+
+  private pendingCall(context: AgentContext, toolCallId: string): ToolCall {
+    const batch = context.pendingToolBatch;
+    if (this.durableState !== undefined && batch === undefined) {
+      throw new Error(`Durable external execution is missing its pending batch: ${context.runId}`);
+    }
+    const call = batch?.calls.find((candidate) => candidate.id === toolCallId)
+      ?? context.pendingToolCalls.find((candidate) => candidate.id === toolCallId);
+    if (call === undefined) throw new Error(`Pending tool call not found: ${toolCallId}`);
+    return call;
+  }
+
+  private async externalExecution(
+    context: AgentContext,
+    call: ToolCall,
+    toolKind: ToolExecutionRecord['toolKind'],
+    expectedRevision: number | undefined,
+  ): Promise<ToolExecutionRecord | undefined> {
+    if (this.durableState === undefined) return undefined;
+    const batch = context.pendingToolBatch;
+    if (batch === undefined) throw new Error(`Durable external execution is missing its pending batch: ${context.runId}`);
+    const existing = await this.durableState.executions.get(call.id);
+    const execution = existing ?? await this.durableState.executions.prepare({
+      toolCallId: call.id,
+      runId: context.runId,
+      stepId: batch.stepId,
+      toolName: call.name,
+      toolKind,
+      inputDigest: checkpointChecksum(call.input),
+      state: 'prepared',
+      preparedAt: this.clock.now().toISOString(),
+    });
+    if (execution.runId !== context.runId
+      || execution.stepId !== batch.stepId
+      || execution.toolName !== call.name
+      || execution.toolKind !== toolKind
+      || execution.inputDigest !== checkpointChecksum(call.input)) {
+      throw new Error(`External execution journal identity does not match pending call: ${call.id}`);
+    }
+    if (execution.state !== 'prepared') {
+      const latest = await this.durableState.checkpoints.load(context.runId);
+      throw new CheckpointConflictError(context.runId, expectedRevision ?? null, latest?.revision ?? null);
+    }
+    return execution;
+  }
+
+  private storeTerminalPendingResult(context: AgentContext, result: ToolExecutionResult): void {
+    const batch = context.pendingToolBatch;
+    if (batch === undefined) return;
+    if (isProvisionalResult(result)) throw new Error(`External result is not terminal: ${result.toolCallId}`);
+    const call = batch.calls.find((candidate) => candidate.id === result.toolCallId);
+    if (call === undefined || call.name !== result.toolName) {
+      throw new Error(`External result does not belong to pending batch: ${result.toolCallId}`);
+    }
+    const index = batch.completedResults.findIndex((candidate) => candidate.toolCallId === result.toolCallId);
+    if (index < 0) {
+      batch.completedResults.push(structuredClone(result));
+      return;
+    }
+    const existing = batch.completedResults[index];
+    if (existing !== undefined && isProvisionalResult(existing)) {
+      batch.completedResults[index] = structuredClone(result);
+      return;
+    }
+    if (existing !== undefined && checkpointChecksum(existing) !== checkpointChecksum(result)) {
+      throw new Error(`External result conflicts with pending batch: ${result.toolCallId}`);
+    }
+  }
+
+  private requireRevision(revision: number | undefined, runId: string): number {
+    if (revision === undefined) throw new Error(`Missing durable checkpoint revision: ${runId}`);
+    return revision;
+  }
 }
 
 function isResolvedRisk(value: unknown): value is ResolvedRisk {
@@ -134,4 +242,19 @@ function isResolvedRisk(value: unknown): value is ResolvedRisk {
   return typeof candidate.severity === 'string'
     && typeof candidate.requireConfirmation === 'boolean'
     && Array.isArray(candidate.findings);
+}
+
+function isProvisionalResult(result: ToolExecutionResult): boolean {
+  return result.status === 'interrupted' || result.status === 'awaiting_external';
+}
+
+function durableStorageError(error: unknown): Error {
+  if (error instanceof CheckpointConflictError) {
+    return Object.assign(new Error(error.message), {
+      code: 'STORAGE_ERROR' as const,
+      retryable: false,
+      details: { category: error.category },
+    });
+  }
+  return error instanceof Error ? error : new Error(String(error));
 }

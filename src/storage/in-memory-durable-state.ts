@@ -69,10 +69,10 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
     result: ToolExecutionResult;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => {
-      const existing = this.requireCompatibleExecution(input.execution);
-      const nextExecution = completedExecution(existing, input.result, this.clock);
       const nextContext = appendCompletedResult(input.context, input.result);
       const checkpoint = this.nextCheckpoint(nextContext, input.expectedRevision);
+      const existing = this.requireCompatibleExecution(input.execution);
+      const nextExecution = completedExecution(existing, input.result, this.clock);
 
       this.executions.set(nextExecution.toolCallId, clone(nextExecution));
       this.checkpoints.set(nextContext.runId, clone(checkpoint));

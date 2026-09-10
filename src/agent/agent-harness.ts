@@ -440,7 +440,7 @@ export class AgentHarness implements DiagnosisAgent {
     const pending = context.pendingToolCalls[0];
     if (pending === undefined || !context.confirmedToolCallIds.includes(pending.id)) return false;
 
-    const stepId = this.dependencies.ids.next('step');
+    const stepId = context.pendingToolBatch?.stepId ?? this.dependencies.ids.next('step');
     const batch = yield* this.dependencies.batchExecutor.executeStream(
       [pending],
       context,
@@ -624,6 +624,7 @@ export class AgentHarness implements DiagnosisAgent {
   private async persistUnjournaledResult(frame: RunExecutionFrame, result: ToolExecutionResult): Promise<void> {
     const pending = frame.context.pendingToolBatch;
     if (pending === undefined || !pending.calls.some((call) => call.id === result.toolCallId)) return;
+    if (!isTerminalBatchResult(result)) return;
     if (pending.completedResults.some((candidate) => candidate.toolCallId === result.toolCallId)) return;
     await this.persistCompletedOutcome(frame, undefined, result);
   }
@@ -917,6 +918,10 @@ function toolResultPayload(result: ToolExecutionResult): AgentEventPayloadMap['T
 function interruptRisk(interrupt: { payload: Record<string, unknown> }): RiskSeverity {
   const value = interrupt.payload.severity;
   return value === 'LOW' || value === 'MEDIUM' || value === 'HIGH' || value === 'CRITICAL' ? value : 'SAFE';
+}
+
+function isTerminalBatchResult(result: ToolExecutionResult): boolean {
+  return result.status !== 'interrupted' && result.status !== 'awaiting_external';
 }
 
 function asDurableAgentError(error: unknown): unknown {

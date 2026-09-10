@@ -204,7 +204,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     durableState,
     evidence,
     evidenceRecorder,
-    hitl: new HitlService(checkpoints, clock, { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` }),
+    hitl: new HitlService(
+      checkpoints,
+      clock,
+      { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+      durableState,
+    ),
     externalTools: new ExternalToolResultService(
       checkpoints,
       clock,
@@ -214,6 +219,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       events,
       eventFactory,
       { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+      durableState,
     ),
     eventStoreV2,
     replayV2,
