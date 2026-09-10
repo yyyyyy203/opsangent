@@ -35,14 +35,14 @@ MemoryFacade 是门面，内部拆召回、案例存取、语义检索和候选�
 
 ## 存储与恢复
 
-SQLite WAL 保存 runs、消息、调用尝试、事件、报告、证据元数据、定时任务、记忆与 Checkpoint。采用事务迁移和 schemaVersion；核心依赖 Store 接口。原始证据通过 BlobStore/文件适配器保存，EvidenceStore 提供统一回查。
+SQLite WAL 保存 runs、消息、调用尝试、事件、报告、证据元数据、定时任务、记忆与 Checkpoint。采用事务迁移和 schemaVersion；核心依赖 Store 接口。已确认的第一持久化增量允许把不超过 1 MiB 的指标原文保存在 SQLite，EvidenceStore 隔离具体形态；后续日志、Trace 和其他大对象改由 BlobStore/文件适配器保存，不改变 Tool 与 Harness。
 
-证据提交：写 pending 元数据 → 临时原文写入并校验哈希 → 原子改名 → 事务标记 committed。只有 committed 引用可进入报告。启动时回收或修复 pending，处理孤立文件；文件改名与 SQLite 并非跨资源原子事务。
+第一持久化增量的有界指标证据在同一 SQLite 事务中保存摘要、原文和哈希；事务提交成功后引用才可进入 ToolResult。后续 BlobStore/文件实现采用 pending 元数据 → 临时原文写入并校验哈希 → 原子改名 → 标记 committed 的协议，并在启动时回收或修复 pending 与孤立文件。
 
 Checkpoint 保存父子关系、消息/上下文版本、待调用、授权、中断、执行事实、剩余预算、纠错链、压缩状态、工具快照版本和截止时间。恢复不重置时间和次数。保存完整批次进度，避免仅恢复一个 pending 调用而丢失其他分支。
 
-V1 单进程持久化优先，运行恢复用版本校验/租约防重复；不宣称已有跨 Worker 分布式事务。后续更换数据库必须实现同一 Store 契约及恢复测试。
+V1 单进程持久化优先，运行恢复使用存储 revision 和执行日志防止重复；不宣称已有跨 Worker 租约或分布式事务。后续更换数据库必须实现同一 Store 契约及恢复测试。
 
 ## 当前实现
 
-当前已实现：结构化 `AgentContext`、规则压缩器、内存 Memory/Checkpoint/EvidenceStore，以及 Event/Message V2 的内存/SQLite EventStore、MessageStore、ReplayBuffer、MessageAssembler 和投影 checkpoint。尚未实现或未完整验收：完整 L0/L1/L2 与可回查原始证据生命周期、持久化 Run Checkpoint/EvidenceStore、可替换 MemoryFacade 生命周期、跨进程租约和关系化 runs/记忆存储。
+当前已实现：结构化 `AgentContext`、规则压缩器、内存 Memory/Checkpoint/EvidenceStore，以及 Event/Message V2 的内存/SQLite EventStore、MessageStore、ReplayBuffer、MessageAssembler 和投影 checkpoint。持久化 Run Checkpoint/EvidenceStore 的下一增量设计已经确认，见 [Durable Run State & Evidence V1](../superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)，但代码尚未实施。完整 L0/L1/L2、可替换 MemoryFacade 生命周期、跨进程租约和关系化 runs/记忆存储仍未实现或未完整验收。

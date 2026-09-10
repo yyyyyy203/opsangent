@@ -22,6 +22,8 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
+下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
+
 最新已实现能力与检查结果见 [实现进度](./implementation-status.md)。
 
 V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./documentation-audit-v2.md)。
