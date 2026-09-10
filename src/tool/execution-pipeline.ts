@@ -169,6 +169,7 @@ export class ToolExecutionPipeline {
     }
 
     const toolContext = {
+      toolCallId: call.id,
       runId: context.runId,
       stepId,
       ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),

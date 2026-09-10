@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { EvidenceStore, Tool, ToolResponse } from '../contracts/index.js';
+import { DefaultEvidenceRecorder, type EvidenceRecorder } from '../application/evidence-recorder.js';
 import type { McpConnection } from '../mcp/types.js';
 import { bindReadonlyMcpTools } from '../mcp/readonly-tools.js';
 import { type ResilientExecutor, SourceFailure } from '../mcp/resilience.js';
@@ -16,11 +17,13 @@ function decode(response: ToolResponse) {
 }
 
 export async function bindSettlementEvidenceTool(options: {
-  connection: McpConnection; evidence: EvidenceStore; executor: ResilientExecutor;
+  connection: McpConnection; recorder?: EvidenceRecorder; /** @deprecated Inject an EvidenceRecorder for audit-event publication. */ evidence?: EvidenceStore; executor: ResilientExecutor;
   signal: AbortSignal; id?: () => string; now?: () => number;
 }): Promise<Tool> {
   const now = options.now ?? Date.now;
   const id = options.id ?? randomUUID;
+  const recorder = options.recorder ?? (options.evidence === undefined ? undefined : new DefaultEvidenceRecorder({ evidence: options.evidence }));
+  if (recorder === undefined) throw new Error('Settlement Evidence Tool requires an EvidenceRecorder');
   const validated: McpConnection = {
     connect: (signal) => options.connection.connect(signal),
     close: () => options.connection.close(),
@@ -51,9 +54,27 @@ export async function bindSettlementEvidenceTool(options: {
       service: 'checkout', environment: 'simulation', start: result.start, end: result.end, missingEvidence: ['logs', 'traces'],
     };
     callOptions.signal.throwIfAborted();
+    if (callOptions.toolCallId === undefined) throw new SourceFailure('STORAGE_ERROR');
     const evidenceId = id();
-    try { await options.evidence.save({ evidenceId, runId: callOptions.runId, source: 'metric', summary,
-      raw: result.raw, businessTraceIds: [], capturedAt: new Date(now()).toISOString() }); }
+    const capturedAt = new Date(now()).toISOString();
+    const failureRate = summary.failureRate === null ? 'unavailable' : `${(summary.failureRate * 100).toFixed(2)}%`;
+    try { await recorder.capture({
+      record: {
+        evidenceId,
+        runId: callOptions.runId,
+        source: 'metric',
+        summary,
+        raw: result.raw,
+        businessTraceIds: [],
+        capturedAt,
+        toolCallId: callOptions.toolCallId,
+        captureKey: `metric:${callOptions.runId}:${callOptions.toolCallId}:0`,
+      },
+      stepId: callOptions.stepId,
+      toolCallId: callOptions.toolCallId,
+      coverage: 1,
+      publicSummary: `结算指标状态为 ${summary.status}，失败率为 ${failureRate}。`,
+    }); }
     catch { throw new SourceFailure('STORAGE_ERROR'); }
     callOptions.signal.throwIfAborted();
     return { blocks: [{ type: 'json', value: summary }, { type: 'evidence_ref', evidenceId }], evidenceIds: [evidenceId] };

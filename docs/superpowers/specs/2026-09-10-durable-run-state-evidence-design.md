@@ -322,6 +322,8 @@ export interface SqlitePersistenceBundle {
 
 保留 `createAgentRuntime({ sqlitePath })` 作为兼容入口，但它必须改为创建完整 bundle，而不是只持久化 Event/Message。调用方显式传入 bundle 时由调用方关闭；Runtime 自己创建时由 `runtime.close()` 关闭，禁止双重 close。
 
+`runtime.close()` 是异步资源边界：它必须等待启动期 replay 完成后再关闭 bundle，调用方必须 `await runtime.close()`，避免回放协程在已关闭的 SQLite 连接上继续访问。
+
 ## 9. 恢复状态机
 
 启动或显式 `resumeStream(runId)` 时按以下确定性顺序执行：

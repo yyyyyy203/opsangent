@@ -22,7 +22,7 @@ describe('OpenAI-compatible runtime composition', () => {
 
       expect(result.finalText).toBe('本地诊断');
       expect(result.status).toBe('completed');
-      runtime.close();
+      await runtime.close();
     });
   });
 
@@ -71,7 +71,7 @@ describe('OpenAI-compatible runtime composition', () => {
       expect(requestCount).toBe(2);
       expect(Array.isArray(secondMessages)).toBe(true);
       expect((secondMessages as Array<Record<string, unknown>>).some((message) => message.role === 'tool')).toBe(true);
-      runtime.close();
+      await runtime.close();
     });
   });
 });

@@ -1,5 +1,5 @@
 import { AgentHarness } from '../agent/agent-harness.js';
-import type { ChatModel, CheckpointStore, Clock, EventStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
+import type { ChatModel, CheckpointStore, Clock, EventStore, EvidenceStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
 import { EventBus } from '../event/event-bus.js';
@@ -12,6 +12,8 @@ import { RiskActionHook } from '../hooks/risk-action-hook.js';
 import type { ToolHook } from '../hooks/types.js';
 import { NoopObservability } from '../observability/noop-observability.js';
 import { InMemoryCheckpointStore } from '../storage/in-memory-checkpoint-store.js';
+import { InMemoryEvidenceStore } from '../storage/in-memory-evidence-store.js';
+import { VersionedCheckpointStoreAdapter } from '../storage/versioned-checkpoint-adapter.js';
 import { ToolBatchExecutor } from '../tool/batch-executor.js';
 import { createExternalBashTool } from '../tool/builtin/bash-tool.js';
 import { ToolExecutionPipeline } from '../tool/execution-pipeline.js';
@@ -19,6 +21,7 @@ import { DefaultToolRunner } from '../tool/tool-runner.js';
 import { Toolkit } from '../tool/toolkit.js';
 import { ToolAdmission } from '../tool/admission.js';
 import { ExternalToolResultService } from './external-tool-result-service.js';
+import { DefaultEvidenceRecorder, type EvidenceRecorder } from './evidence-recorder.js';
 import { HitlService } from './hitl-service.js';
 import { EventFactoryV2 } from '../event/v2/event-factory.js';
 import { EventPublisherV2, InMemoryProjectionFailureSink } from '../event/v2/event-publisher.js';
@@ -36,8 +39,7 @@ import { CompositeModelAttemptObserver } from '../model/model-attempt-observer.j
 import { V2ModelAttemptObserver } from '../model/v2-attempt-observer.js';
 import { MessageAssemblerV2 } from '../event/v2/message-assembler.js';
 import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/v2/projection-runner.js';
-import { SqliteProjectionCheckpointStore, SqliteProjectionFailureSink } from '../infrastructure/sqlite/index.js';
-import { SqliteDatabase, SqliteEventMessageStore } from '../infrastructure/sqlite/index.js';
+import { createSqlitePersistence } from '../infrastructure/sqlite/persistence-bundle.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -48,6 +50,8 @@ export interface AgentRuntimeOptions {
   guardians?: Guardian[];
   hooks?: ToolHook[];
   checkpoints?: CheckpointStore;
+  evidence?: EvidenceStore;
+  evidenceRecorder?: EvidenceRecorder;
   observability?: Observability;
   clock?: Clock;
   ids?: IdGenerator;
@@ -58,24 +62,28 @@ export interface AgentRuntimeOptions {
   modelRetry?: RetryingChatModelOptions;
   /** Use a durable V2 event/message store. Defaults to the in-memory store for tests. */
   eventMessageStore?: EventMessageStore;
-  /** SQLite path used when eventMessageStore is not supplied. */
+  /** SQLite path for the complete Event, Checkpoint, Evidence and execution persistence bundle. */
   sqlitePath?: string;
 }
 
 export function createAgentRuntime(options: AgentRuntimeOptions) {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
-  const checkpoints = options.checkpoints ?? new InMemoryCheckpointStore();
+  if (options.sqlitePath !== undefined && (options.checkpoints !== undefined || options.eventMessageStore !== undefined)) {
+    throw new Error('sqlitePath cannot be combined with partial persistence injection');
+  }
+  const persistence = options.sqlitePath === undefined ? undefined : createSqlitePersistence({ path: options.sqlitePath, clock });
+  const checkpoints = options.checkpoints
+    ?? (persistence === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(persistence.checkpoints));
+  const evidence = options.evidence ?? persistence?.evidence ?? new InMemoryEvidenceStore();
   const observability = options.observability ?? new NoopObservability();
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
-  const sqliteDatabase = options.eventMessageStore === undefined && options.sqlitePath !== undefined
-    ? SqliteDatabase.open(options.sqlitePath)
-    : undefined;
   const eventStoreV2: EventMessageStore = options.eventMessageStore
-    ?? (sqliteDatabase === undefined ? new InMemoryEventMessageStore() : new SqliteEventMessageStore(sqliteDatabase));
+    ?? persistence?.eventMessages
+    ?? new InMemoryEventMessageStore();
   const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
-  const projectionFailuresV2 = sqliteDatabase === undefined ? new InMemoryProjectionFailureSink() : new SqliteProjectionFailureSink(sqliteDatabase);
+  const projectionFailuresV2 = persistence?.projectionFailures ?? new InMemoryProjectionFailureSink();
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
   const eventFactoryV2 = new EventFactoryV2(clock, ids);
   const v1ProjectorV2 = new V1CompatibilityProjector();
@@ -83,7 +91,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     name: 'v1-event-bus',
     project: (event) => Promise.all(v1ProjectorV2.project(event).map((legacy) => events.publish(legacy))).then(() => undefined),
   });
-  const projectionCheckpointsV2 = sqliteDatabase === undefined ? new InMemoryProjectionCheckpointStore() : new SqliteProjectionCheckpointStore(sqliteDatabase);
+  const projectionCheckpointsV2 = persistence?.projectionCheckpoints ?? new InMemoryProjectionCheckpointStore();
   const auditProjectorV2 = new AuditProjectorV2();
   const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
@@ -95,6 +103,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const publicProjectorV2 = new PublicEventProjectorV2();
   // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
   const ready = eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler', 'v1-event-bus'] });
+  const evidenceRecorder = options.evidenceRecorder ?? new DefaultEvidenceRecorder({
+    evidence,
+    events: { factory: eventFactoryV2, publisher: eventPublisherV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
+  });
   const model = options.modelRetry === undefined
     ? options.model
     : new RetryingChatModel(options.model, {
@@ -178,6 +190,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     toolkit,
     events,
     checkpoints,
+    evidence,
+    evidenceRecorder,
     hitl: new HitlService(checkpoints, clock, { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` }),
     externalTools: new ExternalToolResultService(
       checkpoints,
@@ -201,6 +215,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     messageAssemblerV2,
     replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
-    close: () => sqliteDatabase?.close(),
+    close: async (): Promise<void> => {
+      try {
+        await ready;
+      } finally {
+        persistence?.close();
+      }
+    },
   };
 }

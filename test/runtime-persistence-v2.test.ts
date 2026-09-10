@@ -23,7 +23,7 @@ describe('runtime SQLite restart recovery', () => {
     const result = await first.agent.reply({ message: '巡检', profileId: 'group-buy-market' });
     const before = await first.eventStoreV2.listMessagesByRun(result.runId);
     expect(before.filter(({ message }) => message.role === 'assistant')).toHaveLength(1);
-    first.close?.();
+    await first.close?.();
 
     const second = createAgentRuntime({
       model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]), workspaceRoots: [], sqlitePath: path,
@@ -34,7 +34,7 @@ describe('runtime SQLite restart recovery', () => {
     expect(messages.find(({ message }) => message.role === 'assistant')?.message.status).toBe('completed');
     expect(await second.projectionCheckpointsV2.load('audit', result.runId))
       .toBe(await second.eventStoreV2.currentSequence(result.runId));
-    second.close?.();
+    await second.close?.();
   });
 
   it('recovers projection checkpoints across non-durable sequence gaps', async () => {
@@ -60,6 +60,6 @@ describe('runtime SQLite restart recovery', () => {
     });
     expect(await runtime.ready).toBe(1);
     expect(await runtime.projectionCheckpointsV2.load('audit', 'run-gap')).toBe(2);
-    runtime.close?.();
+    await runtime.close?.();
   });
 });
