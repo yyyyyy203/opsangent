@@ -121,8 +121,14 @@ export class HitlService {
 
   private pendingCall(context: AgentContext, toolCallId: string): ToolCall {
     const batch = context.pendingToolBatch;
-    if (this.durableState !== undefined && batch === undefined) {
-      throw new Error(`Durable confirmation is missing its pending batch: ${context.runId}`);
+    if (this.durableState !== undefined) {
+      if (batch === undefined) throw new Error(`Durable confirmation is missing its pending batch: ${context.runId}`);
+      if (batch.state !== 'awaiting_confirmation') {
+        throw new Error(`Durable confirmation batch is not awaiting confirmation: ${context.runId}`);
+      }
+      const durableCall = batch.calls.find((candidate) => candidate.id === toolCallId);
+      if (durableCall === undefined) throw new Error(`Pending tool call not found in durable batch: ${toolCallId}`);
+      return durableCall;
     }
     const call = batch?.calls.find((candidate) => candidate.id === toolCallId)
       ?? context.pendingToolCalls.find((candidate) => candidate.id === toolCallId);

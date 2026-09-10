@@ -165,7 +165,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     eventFactory,
     observability,
     clock,
-    { actionMode: options.actionMode ?? 'dry_run' },
+    {
+      actionMode: options.actionMode ?? 'dry_run',
+      deferV2ResultPublication: durableState !== undefined,
+    },
     { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
     durableState?.executions,
   );

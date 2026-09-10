@@ -13,7 +13,8 @@ import type {
   ToolExecutionRecord,
   ToolExecutionResult,
 } from '../src/contracts/index.js';
-import { createSqlitePersistence } from '../src/infrastructure/sqlite/persistence-bundle.js';
+import { createSqlitePersistence, SqliteDatabase } from '../src/infrastructure/sqlite/index.js';
+import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { checkpointChecksum } from '../src/storage/durable-codec.js';
 import type { DiagnosisRunResult } from '../src/agent/types.js';
@@ -67,12 +68,80 @@ describe('durable Harness recovery', () => {
     });
 
     try {
+      await runtime.eventPublisherV2.publish(new EventFactoryV2(clock, { next: (prefix) => `${prefix}-seeded` }).create('TOOL_RESULT', {
+        runId: 'run-parallel',
+        sessionId: 'session-run-parallel',
+        replyId: 'reply-run-parallel',
+        streamId: 'stream-run-parallel',
+        correlationId: 'run:run-parallel',
+        visibility: 'audit',
+        durability: 'durable',
+        stepId: 'step-recovery',
+        toolCallId: finishedCall.id,
+      }, {
+        result: completedResult,
+        durationMs: 0,
+        evidenceIds: [],
+      }));
       const resumed = await drain(runtime.agent.resumeStream('run-parallel'));
       expect(resumed.status).toBe('completed');
       expect(finishedCalls).toBe(0);
       expect(unfinishedCalls).toBe(1);
       expect(await runtime.durableState?.executions.get(unfinishedCall.id)).toMatchObject({ state: 'succeeded' });
       expect((await runtime.checkpoints.load('run-parallel'))?.pendingToolBatch).toBeUndefined();
+      expect((await runtime.eventStoreV2.readRun('run-parallel', 0, 100))
+        .filter((event) => event.type === 'TOOL_RESULT')
+        .map((event) => event.payload.result.toolCallId)).toEqual([finishedCall.id, unfinishedCall.id]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('reconciles a terminal journal missing from the batch exactly once on every result channel', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-recovery-'));
+    roots.push(root);
+    const sqlitePath = join(root, 'runtime.sqlite');
+    const call: ToolCall = { id: 'journal-terminal-call', name: 'metrics.journal-terminal', input: { service: 'settlement' } };
+    const terminal = resultFor(call, 'success');
+    const initial = checkpointContext('run-journal-terminal', [call]);
+    const seed = createSqlitePersistence({ path: sqlitePath, clock });
+    try {
+      await seed.checkpoints.save(initial, null);
+      await seed.executions.prepare(preparedExecution(initial, call, 'evidence'));
+    } finally {
+      seed.close();
+    }
+    const database = SqliteDatabase.open(sqlitePath);
+    try {
+      database.raw.prepare(`
+        UPDATE tool_executions
+        SET state = ?, result_json = ?, finished_at = ?
+        WHERE tool_call_id = ?
+      `).run('succeeded', JSON.stringify(terminal), timestamp, call.id);
+    } finally {
+      database.close();
+    }
+
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'recovery complete', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      sqlitePath,
+      clock,
+      tools: [evidenceTool(call.name, 'replay_safe', () => undefined)],
+    });
+    try {
+      const projected: AgentEvent[] = [];
+      runtime.events.subscribe((event) => { projected.push(event); });
+      const resumed = await collect(runtime.agent.resumeStream('run-journal-terminal'));
+
+      expect(resumed.result.status).toBe('completed');
+      expect((await runtime.eventStoreV2.readRun('run-journal-terminal', 0, 100))
+        .filter((event) => event.type === 'TOOL_RESULT')
+        .map((event) => event.payload.result.toolCallId)).toEqual([call.id]);
+      expect(toolResultCallIds(resumed.events)).toEqual([call.id]);
+      expect(toolResultCallIds(projected.filter((event) => event.runId === initial.runId))).toEqual([call.id]);
+      expect((await runtime.checkpoints.load('run-journal-terminal'))?.pendingToolBatch).toBeUndefined();
     } finally {
       await runtime.close();
     }
@@ -279,4 +348,24 @@ async function drain(stream: AsyncGenerator<AgentEvent, DiagnosisRunResult>): Pr
     const item = await stream.next();
     if (item.done) return item.value;
   }
+}
+
+async function collect(stream: AsyncGenerator<AgentEvent, DiagnosisRunResult>): Promise<{ events: AgentEvent[]; result: DiagnosisRunResult }> {
+  const events: AgentEvent[] = [];
+  while (true) {
+    const item = await stream.next();
+    if (item.done) return { events, result: item.value };
+    events.push(item.value);
+  }
+}
+
+function toolResultCallIds(events: readonly AgentEvent[]): string[] {
+  return events.filter((event) => event.type === 'TOOL_RESULT').map((event) => {
+    const { payload } = event;
+    if (typeof payload !== 'object' || payload === null
+      || !('toolCallId' in payload) || typeof payload.toolCallId !== 'string') {
+      throw new Error('TOOL_RESULT event must carry a toolCallId');
+    }
+    return payload.toolCallId;
+  });
 }

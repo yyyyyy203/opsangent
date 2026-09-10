@@ -136,14 +136,13 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     const row = this.checkpointRow(normalized.runId);
     const current = row === undefined ? undefined : this.parseCheckpoint(row);
     const checksum = checkpointChecksum(normalized);
-    if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return current;
-
     const actualRevision = current?.revision ?? null;
     const validCreate = current === undefined && expectedRevision === null;
     const validUpdate = current !== undefined && expectedRevision === actualRevision;
     if (!validCreate && !validUpdate) {
       throw new CheckpointConflictError(normalized.runId, expectedRevision, actualRevision);
     }
+    if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return current;
 
     const savedAt = this.clock.now().toISOString();
     const checkpoint: StoredRunCheckpoint = {

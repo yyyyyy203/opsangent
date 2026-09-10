@@ -333,16 +333,6 @@ export class AgentHarness implements DiagnosisAgent {
           yield* this.publishStream('TOOL_CALL_CREATED', frame.context, { id: call.id, name: call.name }, stepId);
         }
       }
-      for (const result of admission.rejected) {
-        if (this.dependencies.v2Events === undefined) yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
-        await this.publishV2('TOOL_CALL_REJECTED', frame.context, {
-          toolName: result.toolName,
-          gate: gateForError(result.error?.code),
-          error: eventError(result.error),
-        }, stepId, result.toolCallId);
-        await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), stepId, result.toolCallId);
-        if (this.dependencies.v2Events !== undefined) yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
-      }
       if (admission.calls.length > 0) {
         this.openPendingBatch(frame, admission.calls, stepId);
         if (this.dependencies.durableState !== undefined) await this.saveCheckpoint(frame);
@@ -371,6 +361,7 @@ export class AgentHarness implements DiagnosisAgent {
         }
         frame.context.contextVersion += 1;
         await this.saveCheckpoint(frame);
+        yield* this.publishAdmissionRejectionsStream(frame.context, admission.rejected, stepId);
         const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
         if (frame.context.status === 'awaiting_confirmation') {
           const risk = interruptRisk(batch.interrupt);
@@ -422,6 +413,7 @@ export class AgentHarness implements DiagnosisAgent {
         await this.publishV2('STAGE_CHANGED', frame.context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
       }
       await this.saveCheckpoint(frame);
+      yield* this.publishAdmissionRejectionsStream(frame.context, admission.rejected, stepId);
       await this.publishV2('STEP_COMPLETED', frame.context, {
         iteration: frame.context.budget.iteration,
         exitDecision: 'continue',
@@ -507,7 +499,8 @@ export class AgentHarness implements DiagnosisAgent {
     if (plan.type === 'storage_error') throw Object.assign(new Error(plan.error.message), plan.error);
 
     for (const completed of plan.completed) {
-      await this.persistCompletedOutcome(frame, undefined, completed.result, completed.execution);
+      const committed = await this.persistCompletedOutcome(frame, undefined, completed.result, completed.execution);
+      if (committed) yield* this.publishStream('TOOL_RESULT', context, completed.result, pending.stepId);
     }
 
     if (plan.type === 'uncertain') {
@@ -614,7 +607,9 @@ export class AgentHarness implements DiagnosisAgent {
     let tail: Promise<void> = Promise.resolve();
     return {
       onCompleted: (call, outcome) => {
-        const completion = tail.then(() => this.persistCompletedOutcome(frame, call, outcome.result, outcome.execution));
+        const completion = tail.then(async () => {
+          await this.persistCompletedOutcome(frame, call, outcome.result, outcome.execution);
+        });
         tail = completion.then(() => undefined, () => undefined);
         return completion;
       },
@@ -634,14 +629,21 @@ export class AgentHarness implements DiagnosisAgent {
     call: ToolCall | undefined,
     result: ToolExecutionResult,
     execution?: ToolExecutionRecord,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const pending = frame.context.pendingToolBatch;
-    if (pending === undefined || !pending.calls.some((candidate) => candidate.id === result.toolCallId)) return;
+    if (pending === undefined || !pending.calls.some((candidate) => candidate.id === result.toolCallId)) return false;
     if (call !== undefined && (call.id !== result.toolCallId || call.name !== result.toolName)) {
       throw new Error(`Batch callback result does not match call: ${result.toolCallId}`);
     }
+    const existing = pending.completedResults.find((candidate) => candidate.toolCallId === result.toolCallId);
+    if (existing !== undefined) {
+      if (checkpointChecksum(existing) !== checkpointChecksum(result)) {
+        throw new Error(`Tool result conflicts with pending batch: ${result.toolCallId}`);
+      }
+      return false;
+    }
     const durable = this.dependencies.durableState;
-    if (durable === undefined) return;
+    if (durable === undefined) return false;
     if (execution !== undefined) {
       const saved = await durable.stateUnitOfWork.commitToolResult({
         expectedRevision: this.requireCheckpointRevision(frame),
@@ -651,10 +653,29 @@ export class AgentHarness implements DiagnosisAgent {
       });
       this.appendPendingResult(frame.context, result);
       frame.checkpointRevision = saved.revision;
-      return;
+      await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), pending.stepId, result.toolCallId);
+      return true;
     }
     this.appendPendingResult(frame.context, result);
     await this.saveCheckpoint(frame);
+    await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), pending.stepId, result.toolCallId);
+    return true;
+  }
+
+  private async *publishAdmissionRejectionsStream(
+    context: AgentContext,
+    results: readonly ToolExecutionResult[],
+    stepId: string,
+  ): AsyncGenerator<AgentEvent, void> {
+    for (const result of results) {
+      await this.publishV2('TOOL_CALL_REJECTED', context, {
+        toolName: result.toolName,
+        gate: gateForError(result.error?.code),
+        error: eventError(result.error),
+      }, stepId, result.toolCallId);
+      await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
+      yield* this.publishStream('TOOL_RESULT', context, result, stepId);
+    }
   }
 
   private appendPendingResult(context: AgentContext, result: ToolExecutionResult): void {

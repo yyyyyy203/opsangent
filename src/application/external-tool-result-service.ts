@@ -61,7 +61,12 @@ export class ExternalToolResultService {
     };
     const tool = this.toolkit.get(pending.name);
     if (tool === undefined) throw new Error(`Tool not found while ingesting external result: ${pending.name}`);
-    const execution = await this.externalExecution(context, pending, tool.kind, stored.revision);
+    let execution: ToolExecutionRecord | undefined;
+    try {
+      execution = await this.externalExecution(context, pending, tool.kind, stored.revision);
+    } catch (error) {
+      throw durableStorageError(error);
+    }
     const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: pending });
     const hookResult = await this.hooks.runAfter({
       context,
@@ -164,8 +169,14 @@ export class ExternalToolResultService {
 
   private pendingCall(context: AgentContext, toolCallId: string): ToolCall {
     const batch = context.pendingToolBatch;
-    if (this.durableState !== undefined && batch === undefined) {
-      throw new Error(`Durable external execution is missing its pending batch: ${context.runId}`);
+    if (this.durableState !== undefined) {
+      if (batch === undefined) throw new Error(`Durable external execution is missing its pending batch: ${context.runId}`);
+      if (batch.state !== 'awaiting_external') {
+        throw new Error(`Durable external execution batch is not awaiting external execution: ${context.runId}`);
+      }
+      const durableCall = batch.calls.find((candidate) => candidate.id === toolCallId);
+      if (durableCall === undefined) throw new Error(`Pending tool call not found in durable batch: ${toolCallId}`);
+      return durableCall;
     }
     const call = batch?.calls.find((candidate) => candidate.id === toolCallId)
       ?? context.pendingToolCalls.find((candidate) => candidate.id === toolCallId);
@@ -182,17 +193,8 @@ export class ExternalToolResultService {
     if (this.durableState === undefined) return undefined;
     const batch = context.pendingToolBatch;
     if (batch === undefined) throw new Error(`Durable external execution is missing its pending batch: ${context.runId}`);
-    const existing = await this.durableState.executions.get(call.id);
-    const execution = existing ?? await this.durableState.executions.prepare({
-      toolCallId: call.id,
-      runId: context.runId,
-      stepId: batch.stepId,
-      toolName: call.name,
-      toolKind,
-      inputDigest: checkpointChecksum(call.input),
-      state: 'prepared',
-      preparedAt: this.clock.now().toISOString(),
-    });
+    const execution = await this.durableState.executions.get(call.id);
+    if (execution === null) throw missingExecutionJournalError(context.runId, call.id);
     if (execution.runId !== context.runId
       || execution.stepId !== batch.stepId
       || execution.toolName !== call.name
@@ -257,4 +259,12 @@ function durableStorageError(error: unknown): Error {
     });
   }
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function missingExecutionJournalError(runId: string, toolCallId: string): Error {
+  return Object.assign(new Error(`Prepared tool execution is missing: ${toolCallId}`), {
+    code: 'STORAGE_ERROR' as const,
+    retryable: false,
+    details: { category: 'execution_journal_missing', runId },
+  });
 }

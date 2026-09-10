@@ -112,14 +112,13 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
   ): StoredRunCheckpoint {
     const current = this.checkpoints.get(context.runId);
     const checksum = checkpointChecksum(context);
-    if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return clone(current);
-
     const actualRevision = current?.revision ?? null;
     const validCreate = current === undefined && expectedRevision === null;
     const validUpdate = current !== undefined && expectedRevision === actualRevision;
     if (!validCreate && !validUpdate) {
       throw new CheckpointConflictError(context.runId, expectedRevision, actualRevision);
     }
+    if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return clone(current);
 
     return {
       context: clone(context),

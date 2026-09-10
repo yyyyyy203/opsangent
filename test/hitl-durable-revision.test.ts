@@ -3,8 +3,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
-import type { Clock } from '../src/contracts/index.js';
+import type { ChatModel, Clock, Tool, ToolCall } from '../src/contracts/index.js';
+import { SqliteDatabase } from '../src/infrastructure/sqlite/index.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import { z } from 'zod';
 
 const timestamp = '2026-09-10T00:00:00.000Z';
 const clock: Clock = { now: () => new Date(timestamp) };
@@ -35,6 +37,61 @@ describe('durable HITL revision control', () => {
       });
       expect((await runtime.eventStoreV2.readRun(run.runId, 0, 100))
         .filter((event) => event.type === 'CONFIRMATION_RESOLVED')).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('rejects an identical duplicate confirmation before publishing a second decision event', async () => {
+    const runtime = await createPausedBashRuntime();
+    try {
+      const run = await runtime.agent.reply({ runId: 'run-identical-confirm', message: 'inspect', profileId: 'group-buy-market' });
+      const decision = { runId: run.runId, toolCallId: 'bash-1', confirmed: true, actor: 'operator', decidedAt: timestamp };
+
+      const outcomes = await Promise.allSettled([
+        runtime.hitl.decide(decision),
+        runtime.hitl.decide(decision),
+      ]);
+
+      expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+      expect(outcomes.find((outcome) => outcome.status === 'rejected')).toMatchObject({
+        reason: { code: 'STORAGE_ERROR', details: { category: 'checkpoint_conflict' } },
+      });
+      expect((await runtime.eventStoreV2.readRun(run.runId, 0, 100))
+        .filter((event) => event.type === 'CONFIRMATION_RESOLVED')).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('uses the persisted pending batch as the authority for durable confirmations', async () => {
+    const runtime = await createPausedBashRuntime();
+    try {
+      const run = await runtime.agent.reply({ runId: 'run-batch-authority-confirm', message: 'inspect', profileId: 'group-buy-market' });
+      const checkpoint = await runtime.durableState?.checkpoints.load(run.runId);
+      if (checkpoint === null || checkpoint === undefined || checkpoint.context.pendingInterrupt === undefined) {
+        throw new Error('Expected a durable confirmation checkpoint.');
+      }
+      const corrupted = structuredClone(checkpoint.context);
+      const unexpected: ToolCall = { id: 'outside-batch', name: 'bash', input: { command: 'pnpm test', cwd: roots.at(-1)! } };
+      if (corrupted.pendingInterrupt === undefined) throw new Error('Expected a durable confirmation interrupt.');
+      corrupted.pendingInterrupt.toolCallId = unexpected.id;
+      corrupted.pendingToolCalls = [unexpected];
+      await runtime.durableState?.checkpoints.save(corrupted, checkpoint.revision);
+
+      await expect(runtime.hitl.decide({
+        runId: run.runId,
+        toolCallId: unexpected.id,
+        confirmed: true,
+        actor: 'operator',
+        decidedAt: timestamp,
+      })).rejects.toThrow();
+
+      const unchanged = await runtime.durableState?.checkpoints.load(run.runId);
+      expect(unchanged?.context.status).toBe('awaiting_confirmation');
+      expect(unchanged?.context.confirmedToolCallIds).not.toContain(unexpected.id);
+      expect((await runtime.eventStoreV2.readRun(run.runId, 0, 100))
+        .filter((event) => event.type === 'CONFIRMATION_RESOLVED')).toHaveLength(0);
     } finally {
       await runtime.close();
     }
@@ -141,6 +198,151 @@ describe('durable HITL revision control', () => {
       ]);
       expect((await runtime.eventStoreV2.readRun(run.runId, 0, 200))
         .filter((event) => event.type === 'EXTERNAL_EXECUTION_RESOLVED')).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('uses the persisted pending batch as the authority for durable external results', async () => {
+    const runtime = await createPausedBashRuntime();
+    try {
+      const run = await runtime.agent.reply({ runId: 'run-batch-authority-external', message: 'inspect', profileId: 'group-buy-market' });
+      await runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: true, actor: 'operator', decidedAt: timestamp });
+      await drain(runtime.agent.resumeStream(run.runId));
+      const checkpoint = await runtime.durableState?.checkpoints.load(run.runId);
+      if (checkpoint === null || checkpoint === undefined || checkpoint.context.pendingInterrupt === undefined) {
+        throw new Error('Expected a durable external execution checkpoint.');
+      }
+      const corrupted = structuredClone(checkpoint.context);
+      const unexpected: ToolCall = { id: 'outside-batch', name: 'bash', input: { command: 'pnpm test', cwd: roots.at(-1)! } };
+      if (corrupted.pendingInterrupt === undefined) throw new Error('Expected a durable external execution interrupt.');
+      corrupted.pendingInterrupt.toolCallId = unexpected.id;
+      corrupted.pendingToolCalls = [unexpected];
+      await runtime.durableState?.checkpoints.save(corrupted, checkpoint.revision);
+
+      await expect(runtime.externalTools.submit({
+        runId: run.runId,
+        toolCallId: unexpected.id,
+        response: { blocks: [{ type: 'text', text: 'host complete' }] },
+      })).rejects.toThrow();
+
+      expect(await runtime.durableState?.executions.get(unexpected.id)).toBeNull();
+      expect((await runtime.eventStoreV2.readRun(run.runId, 0, 100))
+        .filter((event) => event.type === 'EXTERNAL_EXECUTION_RESOLVED')).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('fails closed when a durable external result has no prepared execution journal', async () => {
+    const runtime = await createPausedBashRuntime();
+    try {
+      const run = await runtime.agent.reply({ runId: 'run-missing-journal', message: 'inspect', profileId: 'group-buy-market' });
+      await runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: true, actor: 'operator', decidedAt: timestamp });
+      await drain(runtime.agent.resumeStream(run.runId));
+      expect(await runtime.durableState?.executions.get('bash-1')).toMatchObject({ state: 'prepared' });
+
+      const database = SqliteDatabase.open(join(roots.at(-1)!, 'runtime.sqlite'));
+      try {
+        database.raw.prepare('DELETE FROM tool_executions WHERE tool_call_id = ?').run('bash-1');
+      } finally {
+        database.close();
+      }
+
+      await expect(runtime.externalTools.submit({
+        runId: run.runId,
+        toolCallId: 'bash-1',
+        response: { blocks: [{ type: 'text', text: 'host complete' }] },
+      })).rejects.toMatchObject({
+        code: 'STORAGE_ERROR',
+        details: { category: 'execution_journal_missing' },
+      });
+
+      const paused = await runtime.durableState?.checkpoints.load(run.runId);
+      expect(paused?.context.status).toBe('paused');
+      expect((await runtime.eventStoreV2.readRun(run.runId, 0, 100))
+        .filter((event) => event.type === 'EXTERNAL_EXECUTION_RESOLVED')).toHaveLength(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not publish a durable tool result when its checkpoint commit fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-result-commit-'));
+    roots.push(root);
+    const runtimeRef: { current?: ReturnType<typeof createAgentRuntime> } = {};
+    const tool: Tool = {
+      name: 'utility.advance_checkpoint',
+      description: 'Advances the durable checkpoint for a controlled failure test.',
+      kind: 'utility',
+      inputSchema: z.object({}),
+      isConcurrencySafe: () => true,
+      call: async () => {
+        const checkpoint = await runtimeRef.current?.durableState?.checkpoints.load('run-result-commit-failure');
+        if (checkpoint === null || checkpoint === undefined) throw new Error('Expected a durable checkpoint.');
+        const advanced = structuredClone(checkpoint.context);
+        advanced.contextVersion += 1;
+        await runtime.durableState?.checkpoints.save(advanced, checkpoint.revision);
+        return { blocks: [{ type: 'text', text: 'completed before persistence conflict' }] };
+      },
+    };
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ toolCalls: [{ id: 'commit-failure-1', name: tool.name, input: {} }] }]),
+      tools: [tool],
+      workspaceRoots: [root],
+      sqlitePath: join(root, 'runtime.sqlite'),
+      clock,
+      includeExternalBash: false,
+    });
+    runtimeRef.current = runtime;
+    try {
+      await expect(runtime.agent.reply({
+        runId: 'run-result-commit-failure',
+        message: 'inspect',
+        profileId: 'group-buy-market',
+      })).rejects.toMatchObject({ category: 'checkpoint_conflict' });
+      const events = await runtime.eventStoreV2.readRun('run-result-commit-failure', 0, 100);
+
+      expect(events.filter((event) => event.type === 'TOOL_RESULT')).toHaveLength(0);
+      expect(events.filter((event) => event.type === 'RUN_FAILED')).toHaveLength(1);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not publish an admission rejection before its checkpoint persists', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-admission-commit-'));
+    roots.push(root);
+    const runtimeRef: { current?: ReturnType<typeof createAgentRuntime> } = {};
+    const model: ChatModel = {
+      async *stream(_messages, _tools, options) {
+        const checkpoint = await runtimeRef.current?.durableState?.checkpoints.load(options.runId);
+        if (checkpoint === null || checkpoint === undefined) throw new Error('Expected a durable checkpoint.');
+        const advanced = structuredClone(checkpoint.context);
+        advanced.contextVersion += 1;
+        await runtimeRef.current?.durableState?.checkpoints.save(advanced, checkpoint.revision);
+        yield* [];
+        return { toolCalls: [], rawToolCalls: [{ id: 'rejected-1', name: 'not.registered', arguments: '{}' }] };
+      },
+    };
+    const runtime = createAgentRuntime({
+      model,
+      workspaceRoots: [root],
+      sqlitePath: join(root, 'runtime.sqlite'),
+      clock,
+      includeExternalBash: false,
+    });
+    runtimeRef.current = runtime;
+    try {
+      await expect(runtime.agent.reply({
+        runId: 'run-admission-commit-failure',
+        message: 'inspect',
+        profileId: 'group-buy-market',
+      })).rejects.toMatchObject({ category: 'checkpoint_conflict' });
+      const events = await runtime.eventStoreV2.readRun('run-admission-commit-failure', 0, 100);
+
+      expect(events.filter((event) => event.type === 'TOOL_CALL_REJECTED')).toHaveLength(0);
+      expect(events.filter((event) => event.type === 'TOOL_RESULT')).toHaveLength(0);
     } finally {
       await runtime.close();
     }

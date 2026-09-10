@@ -103,6 +103,8 @@ describe('in-memory durable-state contract', () => {
     expect(updated.revision).toBe(2);
     await expect(state.save({ ...created.context, stage: 'action' }, created.revision))
       .rejects.toMatchObject({ category: 'checkpoint_conflict' });
+    await expect(state.save(updated.context, created.revision))
+      .rejects.toMatchObject({ category: 'checkpoint_conflict' });
     expect((await state.load('run-1'))?.context.stage).toBe('hypothesis');
   });
 

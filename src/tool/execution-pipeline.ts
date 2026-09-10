@@ -31,6 +31,8 @@ import {
 
 export interface ExecutionPipelineOptions {
   actionMode: 'dry_run' | 'execute';
+  /** The Harness publishes V2 results only after its durable result commit succeeds. */
+  deferV2ResultPublication?: boolean;
 }
 
 export class ToolExecutionPipeline {
@@ -67,11 +69,13 @@ export class ToolExecutionPipeline {
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
       };
     }
-    await this.publishV2('TOOL_RESULT', context, {
-      result: outcome.result,
-      durationMs: durationOf(outcome.result),
-      evidenceIds: outcome.result.response?.evidenceIds ?? [],
-    }, stepId, call.id);
+    if (!this.options.deferV2ResultPublication) {
+      await this.publishV2('TOOL_RESULT', context, {
+        result: outcome.result,
+        durationMs: durationOf(outcome.result),
+        evidenceIds: outcome.result.response?.evidenceIds ?? [],
+      }, stepId, call.id);
+    }
     yield* this.emitLegacy(context, 'TOOL_RESULT', outcome.result, stepId);
     return outcome;
   }

@@ -106,6 +106,20 @@ describe('SQLite durable-state persistence', () => {
     second.close();
   });
 
+  it('rejects an exact checkpoint retry when its expected revision is stale', async () => {
+    const bundle = createSqlitePersistence({ path: await databasePath(), clock });
+    try {
+      const created = await bundle.checkpoints.save(context('run-1'), null);
+      const updated = await bundle.checkpoints.save({ ...created.context, stage: 'hypothesis' }, created.revision);
+
+      await expect(bundle.checkpoints.save(updated.context, created.revision))
+        .rejects.toMatchObject({ category: 'checkpoint_conflict' });
+      expect((await bundle.checkpoints.load('run-1'))?.revision).toBe(updated.revision);
+    } finally {
+      bundle.close();
+    }
+  });
+
   it('maps a corrupted checkpoint to a safe storage corruption error', async () => {
     const path = await databasePath();
     const first = createSqlitePersistence({ path, clock });

@@ -100,6 +100,38 @@ describe('Agent Harness direct AsyncGenerator delivery', () => {
     expect(result.events.every((event) => event.runId === result.result.runId && !Number.isNaN(Date.parse(event.timestamp)))).toBe(true);
   });
 
+  it('keeps V1 generator and EventBus result ordering aligned after an admission rejection', async () => {
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([
+        { toolCalls: [
+          { id: 'rejected-1', name: 'not.registered', input: {} },
+          { id: 'query-1', name: 'metrics.query', input: { service: 'settlement' } },
+        ] },
+        { text: 'done', toolCalls: [] },
+      ]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      tools: [streamingEvidenceTool()],
+    });
+    const projected: AgentEvent[] = [];
+    runtime.events.subscribe((event) => { projected.push(event); });
+
+    const result = await drain(runtime.agent.replyStream({ runId: 'rejection-parity-run', message: 'inspect', profileId: 'group-buy-market' }));
+    const fromEventBus = projected.filter((event) => event.runId === result.result.runId);
+
+    expect(result.result.status).toBe('completed');
+    expect(result.events.map(comparable)).toEqual(fromEventBus.map(comparable));
+    expect(result.events.filter((event) => event.type === 'TOOL_RESULT').map((event) => {
+      const { payload } = event;
+      if (typeof payload !== 'object' || payload === null
+        || !('toolCallId' in payload) || typeof payload.toolCallId !== 'string') {
+        throw new Error('TOOL_RESULT event must carry a toolCallId');
+      }
+      return payload.toolCallId;
+    }))
+      .toEqual(['query-1', 'rejected-1']);
+  });
+
   it('saves and flushes once when a consumer closes an active stream', async () => {
     const checkpoints = new CountingCheckpointStore();
     const observability = new CountingObservability();
