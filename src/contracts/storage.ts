@@ -68,6 +68,13 @@ export interface AgentStateUnitOfWork {
   }): Promise<StoredRunCheckpoint>;
 }
 
+/** Injected durable control-plane ports used by the Harness without infrastructure coupling. */
+export interface DurableRunState {
+  checkpoints: VersionedCheckpointStore;
+  executions: ToolExecutionJournal;
+  stateUnitOfWork: AgentStateUnitOfWork;
+}
+
 export interface EvidenceRecord {
   evidenceId: string;
   runId: string;

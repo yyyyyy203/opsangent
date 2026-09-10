@@ -12,6 +12,10 @@ export interface BatchExecutionResult {
   interrupt?: SerializableInterrupt;
 }
 
+export interface BatchExecutionCallbacks {
+  onCompleted?: (call: ToolCall, outcome: Extract<ExecutionOutcome, { type: 'completed' }>) => Promise<void>;
+}
+
 export class ToolBatchExecutor {
   public constructor(
     private readonly toolkit: Toolkit,
@@ -24,14 +28,15 @@ export class ToolBatchExecutor {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    callbacks: BatchExecutionCallbacks = {},
   ): AsyncGenerator<AgentEvent, BatchExecutionResult> {
     const evidenceOrUtility = calls.filter((call) => this.toolkit.get(call.name)?.kind !== 'action');
     const actions = calls.filter((call) => this.toolkit.get(call.name)?.kind === 'action');
     if (evidenceOrUtility.length > 0 && actions.length > 0) {
-      const batch = yield* this.executeWithoutMixedActionsStream(evidenceOrUtility, context, stepId, signal);
+      const batch = yield* this.executeWithoutMixedActionsStream(evidenceOrUtility, context, stepId, signal, callbacks);
       return { ...batch, deferredActions: actions };
     }
-    return yield* this.executeWithoutMixedActionsStream(calls, context, stepId, signal);
+    return yield* this.executeWithoutMixedActionsStream(calls, context, stepId, signal, callbacks);
   }
 
   public async execute(
@@ -39,8 +44,9 @@ export class ToolBatchExecutor {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    callbacks: BatchExecutionCallbacks = {},
   ): Promise<BatchExecutionResult> {
-    const stream = this.executeStream(calls, context, stepId, signal);
+    const stream = this.executeStream(calls, context, stepId, signal, callbacks);
     while (true) {
       const item = await stream.next();
       if (item.done) return item.value;
@@ -52,6 +58,7 @@ export class ToolBatchExecutor {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    callbacks: BatchExecutionCallbacks,
   ): AsyncGenerator<AgentEvent, BatchExecutionResult> {
     const isSafe = (call: ToolCall): boolean => {
       const tool = this.toolkit.get(call.name);
@@ -61,11 +68,11 @@ export class ToolBatchExecutor {
     };
     const safe = calls.filter(isSafe);
     const unsafe = calls.filter((call) => !isSafe(call));
-    const safeStreams = safe.map((call) => this.executeOneStream(call, context, stepId, signal));
+    const safeStreams = safe.map((call) => this.executeOneStream(call, context, stepId, signal, callbacks));
     const outcomes: ExecutionOutcome[] = yield* mergeAsyncGenerators(safeStreams);
 
     for (const call of unsafe) {
-      const outcome = yield* this.executeOneStream(call, context, stepId, signal);
+      const outcome = yield* this.executeOneStream(call, context, stepId, signal, callbacks);
       outcomes.push(outcome);
       if (outcome.type === 'interrupted') {
         const completed = new Set(outcomes.map((item) => item.result.toolCallId));
@@ -90,12 +97,16 @@ export class ToolBatchExecutor {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    callbacks: BatchExecutionCallbacks,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
+    let outcome: ExecutionOutcome;
     try {
-      return yield* this.pipeline.executeStream(call, context, stepId, signal);
+      outcome = yield* this.pipeline.executeStream(call, context, stepId, signal);
     } catch {
-      return this.failure(call, signal);
+      outcome = this.failure(call, signal);
     }
+    if (outcome.type === 'completed') await callbacks.onCompleted?.(call, outcome);
+    return outcome;
   }
 
   private ordered(calls: ToolCall[], outcomes: ExecutionOutcome[]): ToolExecutionResult[] {

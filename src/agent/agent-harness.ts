@@ -4,6 +4,7 @@ import type {
   AgentMessage,
   ChatModel,
   CheckpointStore,
+  DurableRunState,
   Clock,
   IdGenerator,
   MessageBlock,
@@ -18,17 +19,19 @@ import type {
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
+  ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
-import { toAgentError } from '../contracts/index.js';
+import { CheckpointConflictError, checkpointChecksum, toAgentError } from '../contracts/index.js';
 import type { ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
-import type { ToolBatchExecutor } from '../tool/batch-executor.js';
+import type { BatchExecutionCallbacks, ToolBatchExecutor } from '../tool/batch-executor.js';
 import type { Toolkit } from '../tool/toolkit.js';
 import type { ToolAdmission } from '../tool/admission.js';
 import { legacyRunFinishedPayload } from '../event/v1-payloads.js';
 import { admitToolBatch } from './admit-tool-batch.js';
+import { planPendingBatchRecovery } from './run-recovery.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 
 export interface AgentHarnessDependencies {
@@ -43,6 +46,7 @@ export interface AgentHarnessDependencies {
   clock: Clock;
   ids: IdGenerator;
   admission: ToolAdmission;
+  durableState?: DurableRunState;
   v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: string | ((runId: string) => string) };
 }
 
@@ -53,6 +57,7 @@ interface RunExecutionFrame {
   finalText: string;
   activeStepId?: string;
   activeStepStartedAt?: number;
+  checkpointRevision?: number;
   terminalOutcome?: RunTerminalOutcome;
   naturalExit: boolean;
 }
@@ -78,14 +83,22 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
-    const context = await this.dependencies.checkpoints.load(runId);
-    if (context === null) throw new Error(`Checkpoint not found: ${runId}`);
+    const loaded = await this.loadCheckpoint(runId);
+    if (loaded === null) throw new Error(`Checkpoint not found: ${runId}`);
+    const { context } = loaded;
     context.sessionId ??= this.dependencies.ids.next('session');
     context.replyId ??= this.dependencies.ids.next('reply');
     const newStreamId = this.dependencies.ids.next('stream');
     context.streamId = newStreamId;
-    await this.publishV2('RUN_RESUMED', context, { checkpointVersion: String(context.contextVersion), resumeReason: 'explicit_resume', newStreamId });
-    const frame: RunExecutionFrame = { context, finalText: '', naturalExit: false };
+    await this.publishV2('RUN_RESUMED', context, {
+      checkpointVersion: String(loaded.revision ?? context.contextVersion), resumeReason: 'explicit_resume', newStreamId,
+    });
+    const frame: RunExecutionFrame = {
+      context,
+      finalText: '',
+      naturalExit: false,
+      ...(loaded.revision === undefined ? {} : { checkpointRevision: loaded.revision }),
+    };
     return yield* this.forwardRunStream(this.run(frame, signal, true));
   }
 
@@ -134,11 +147,20 @@ export class AgentHarness implements DiagnosisAgent {
           versionSnapshot: {},
         });
         yield* this.publishStream('RUN_STARTED', frame.context, { profileId: frame.context.profileId });
+        if (this.dependencies.durableState !== undefined) await this.saveCheckpoint(frame);
       }
 
       delete frame.context.failure;
       const pausedForExternalExecution = yield* this.resumePendingToolCallStream(frame, signal);
       if (pausedForExternalExecution) {
+        const result = this.result(frame.context, frame.finalText);
+        frame.terminalOutcome = 'paused';
+        rootSpan.end(result);
+        frame.naturalExit = true;
+        return result;
+      }
+      const pausedForRecovery = yield* this.resumePendingToolBatchStream(frame, signal);
+      if (pausedForRecovery) {
         const result = this.result(frame.context, frame.finalText);
         frame.terminalOutcome = 'paused';
         rootSpan.end(result);
@@ -151,7 +173,7 @@ export class AgentHarness implements DiagnosisAgent {
       context.status = signal.aborted ? 'cancelled' : 'failed';
       const failure = signal.aborted
         ? { code: 'ABORTED' as const, message: 'Agent run aborted.', retryable: false }
-        : toAgentError(error);
+        : toAgentError(asDurableAgentError(error));
       context.failure = failure;
       frame.terminalOutcome = context.status;
       const failureCategory = typeof failure.details?.category === 'string' ? failure.details.category : undefined;
@@ -196,7 +218,7 @@ export class AgentHarness implements DiagnosisAgent {
         });
       }
       try {
-        await this.dependencies.checkpoints.save(frame.context);
+        await this.saveCheckpoint(frame);
       } finally {
         await this.dependencies.observability.flush();
       }
@@ -321,9 +343,20 @@ export class AgentHarness implements DiagnosisAgent {
         await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), stepId, result.toolCallId);
         if (this.dependencies.v2Events !== undefined) yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
       }
-      const batch = yield* this.dependencies.batchExecutor.executeStream(admission.calls, frame.context, stepId, signal);
+      if (admission.calls.length > 0) {
+        this.openPendingBatch(frame, admission.calls, stepId);
+        if (this.dependencies.durableState !== undefined) await this.saveCheckpoint(frame);
+      }
+      const batch = yield* this.dependencies.batchExecutor.executeStream(
+        admission.calls,
+        frame.context,
+        stepId,
+        signal,
+        this.completionCallbacks(frame),
+      );
       const results = [...admission.rejected, ...batch.results];
       for (const deferred of batch.deferredActions) results.push(this.deferredResult(deferred));
+      for (const result of results) await this.persistUnjournaledResult(frame, result);
       const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
       this.appendToolExchange(frame.context, response.text, candidates, orderedResults);
 
@@ -331,7 +364,13 @@ export class AgentHarness implements DiagnosisAgent {
         frame.context.status = batch.interrupt.interruptType === 'external_tool_execution' ? 'paused' : 'awaiting_confirmation';
         frame.context.pendingInterrupt = batch.interrupt;
         frame.context.pendingToolCalls = admission.calls.filter((call) => call.id === batch.interrupt?.toolCallId);
-        await this.dependencies.checkpoints.save(frame.context);
+        if (frame.context.pendingToolBatch !== undefined) {
+          frame.context.pendingToolBatch.state = batch.interrupt.interruptType === 'external_tool_execution'
+            ? 'awaiting_external'
+            : 'awaiting_confirmation';
+        }
+        frame.context.contextVersion += 1;
+        await this.saveCheckpoint(frame);
         const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
         if (frame.context.status === 'awaiting_confirmation') {
           const risk = interruptRisk(batch.interrupt);
@@ -356,7 +395,7 @@ export class AgentHarness implements DiagnosisAgent {
           interruptId: batch.interrupt.hookId,
           reason: batch.interrupt.interruptType,
           expiresAt,
-          checkpointVersion: String(frame.context.contextVersion),
+          checkpointVersion: this.checkpointVersion(frame),
         }, stepId);
         await this.publishV2('STEP_COMPLETED', frame.context, {
           iteration: frame.context.budget.iteration,
@@ -374,13 +413,15 @@ export class AgentHarness implements DiagnosisAgent {
       }
 
       frame.context.pendingToolCalls = [];
+      delete frame.context.pendingToolBatch;
+      frame.context.contextVersion += 1;
       const nextStage = this.nextStage(admission.calls);
       if (nextStage !== frame.context.stage) {
         const previousStage = frame.context.stage;
         frame.context.stage = nextStage;
         await this.publishV2('STAGE_CHANGED', frame.context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
       }
-      await this.dependencies.checkpoints.save(frame.context);
+      await this.saveCheckpoint(frame);
       await this.publishV2('STEP_COMPLETED', frame.context, {
         iteration: frame.context.budget.iteration,
         exitDecision: 'continue',
@@ -400,7 +441,13 @@ export class AgentHarness implements DiagnosisAgent {
     if (pending === undefined || !context.confirmedToolCallIds.includes(pending.id)) return false;
 
     const stepId = this.dependencies.ids.next('step');
-    const batch = yield* this.dependencies.batchExecutor.executeStream([pending], context, stepId, signal);
+    const batch = yield* this.dependencies.batchExecutor.executeStream(
+      [pending],
+      context,
+      stepId,
+      signal,
+      this.completionCallbacks(frame),
+    );
     if (batch.interrupt !== undefined) {
       if (batch.interrupt.interruptType !== 'external_tool_execution') {
         throw new Error(`Confirmed tool call was interrupted again: ${pending.id}`);
@@ -408,8 +455,9 @@ export class AgentHarness implements DiagnosisAgent {
       this.replaceToolResult(context, batch.results[0] ?? this.deferredResult(pending));
       context.pendingInterrupt = batch.interrupt;
       context.status = 'paused';
+      if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'awaiting_external';
       context.contextVersion += 1;
-      await this.dependencies.checkpoints.save(context);
+      await this.saveCheckpoint(frame);
       const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
       const external = {
         requestId: `external:${context.runId}:${batch.interrupt.toolCallId}`,
@@ -423,7 +471,7 @@ export class AgentHarness implements DiagnosisAgent {
         interruptId: batch.interrupt.hookId,
         reason: 'external_tool_execution',
         expiresAt,
-        checkpointVersion: String(context.contextVersion),
+        checkpointVersion: this.checkpointVersion(frame),
       }, stepId);
       yield* this.publishStream('RUN_PAUSED', context, { reason: 'external_tool_execution' }, stepId);
       return true;
@@ -436,8 +484,238 @@ export class AgentHarness implements DiagnosisAgent {
     context.status = 'running';
     context.stage = 'verification';
     context.contextVersion += 1;
-    await this.dependencies.checkpoints.save(context);
+    await this.saveCheckpoint(frame);
     return false;
+  }
+
+  private async *resumePendingToolBatchStream(
+    frame: RunExecutionFrame,
+    signal: AbortSignal,
+  ): AsyncGenerator<AgentEvent, boolean> {
+    const durable = this.dependencies.durableState;
+    const context = frame.context;
+    const pending = context.pendingToolBatch;
+    if (durable === undefined || pending === undefined || context.pendingInterrupt !== undefined) return false;
+
+    const plan = await planPendingBatchRecovery({
+      context,
+      toolkit: this.dependencies.toolkit,
+      executions: durable.executions,
+      now: this.dependencies.clock.now().toISOString(),
+    });
+    if (plan.type === 'none') return false;
+    if (plan.type === 'storage_error') throw Object.assign(new Error(plan.error.message), plan.error);
+
+    for (const completed of plan.completed) {
+      await this.persistCompletedOutcome(frame, undefined, completed.result, completed.execution);
+    }
+
+    if (plan.type === 'uncertain') {
+      const wasPrepared = plan.execution.state === 'prepared';
+      context.status = 'paused';
+      context.pendingToolCalls = [];
+      const missing = `recovery_verification:${plan.call.id}`;
+      if (!context.missingEvidence.includes(missing)) context.missingEvidence.push(missing);
+      context.contextVersion += 1;
+      if (wasPrepared) {
+        const saved = await durable.stateUnitOfWork.markToolUncertain({
+          expectedRevision: this.requireCheckpointRevision(frame),
+          context,
+          execution: plan.execution,
+          reasonCode: 'prepared_action_recovery',
+        });
+        frame.checkpointRevision = saved.revision;
+        await this.publishV2('EXTERNAL_EXECUTION_UNCERTAIN', context, {
+          requestId: `external:${context.runId}:${plan.call.id}`,
+          reason: 'prepared_action_recovery',
+          requiredVerification: 'Verify the external action state before any retry.',
+        }, pending.stepId, plan.call.id);
+      } else {
+        await this.saveCheckpoint(frame);
+      }
+      yield* this.publishRecoveredPause(frame, pending.stepId, `recovery-uncertain-${plan.call.id}`, 'external_execution_uncertain');
+      return true;
+    }
+
+    if (plan.type === 'verification_required') {
+      context.status = 'paused';
+      context.pendingToolCalls = [];
+      const missing = `recovery_verification:${plan.call.id}`;
+      if (!context.missingEvidence.includes(missing)) context.missingEvidence.push(missing);
+      context.contextVersion += 1;
+      await this.saveCheckpoint(frame);
+      yield* this.publishRecoveredPause(frame, pending.stepId, `recovery-verify-${plan.call.id}`, 'recovery_verification_required');
+      return true;
+    }
+
+    if (plan.type === 'execute') {
+      const batch = yield* this.dependencies.batchExecutor.executeStream(
+        plan.calls,
+        context,
+        pending.stepId,
+        signal,
+        this.completionCallbacks(frame),
+      );
+      for (const result of batch.results) await this.persistUnjournaledResult(frame, result);
+      if (batch.interrupt !== undefined) {
+        context.status = batch.interrupt.interruptType === 'external_tool_execution' ? 'paused' : 'awaiting_confirmation';
+        context.pendingInterrupt = batch.interrupt;
+        context.pendingToolCalls = [plan.calls.find((call) => call.id === batch.interrupt?.toolCallId) ?? plan.calls[0]].filter(
+          (call): call is ToolCall => call !== undefined,
+        );
+        const pendingBatch = context.pendingToolBatch;
+        if (pendingBatch === undefined) throw new Error(`Recovered batch disappeared: ${context.runId}`);
+        pendingBatch.state = batch.interrupt.interruptType === 'external_tool_execution'
+          ? 'awaiting_external'
+          : 'awaiting_confirmation';
+        context.contextVersion += 1;
+        await this.saveCheckpoint(frame);
+        yield* this.publishRecoveredPause(frame, pending.stepId, batch.interrupt.hookId, batch.interrupt.interruptType);
+        return true;
+      }
+    }
+
+    this.completeRecoveredBatch(frame);
+    await this.saveCheckpoint(frame);
+    return false;
+  }
+
+  private async *publishRecoveredPause(
+    frame: RunExecutionFrame,
+    stepId: string,
+    interruptId: string,
+    reason: string,
+  ): AsyncGenerator<AgentEvent, void> {
+    const expiresAt = new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
+    await this.publishV2('RUN_PAUSED', frame.context, {
+      interruptId,
+      reason,
+      expiresAt,
+      checkpointVersion: this.checkpointVersion(frame),
+    }, stepId);
+    yield* this.publishStream('RUN_PAUSED', frame.context, { reason }, stepId);
+  }
+
+  private openPendingBatch(frame: RunExecutionFrame, calls: ToolCall[], stepId: string): void {
+    frame.context.pendingToolBatch = {
+      batchId: this.dependencies.ids.next('batch'),
+      stepId,
+      calls: structuredClone(calls),
+      completedResults: [],
+      state: 'admitted',
+      createdAt: this.dependencies.clock.now().toISOString(),
+    };
+    frame.context.pendingToolCalls = structuredClone(calls);
+    frame.context.contextVersion += 1;
+  }
+
+  private completionCallbacks(frame: RunExecutionFrame): BatchExecutionCallbacks {
+    if (this.dependencies.durableState === undefined) return {};
+    let tail: Promise<void> = Promise.resolve();
+    return {
+      onCompleted: (call, outcome) => {
+        const completion = tail.then(() => this.persistCompletedOutcome(frame, call, outcome.result, outcome.execution));
+        tail = completion.then(() => undefined, () => undefined);
+        return completion;
+      },
+    };
+  }
+
+  private async persistUnjournaledResult(frame: RunExecutionFrame, result: ToolExecutionResult): Promise<void> {
+    const pending = frame.context.pendingToolBatch;
+    if (pending === undefined || !pending.calls.some((call) => call.id === result.toolCallId)) return;
+    if (pending.completedResults.some((candidate) => candidate.toolCallId === result.toolCallId)) return;
+    await this.persistCompletedOutcome(frame, undefined, result);
+  }
+
+  private async persistCompletedOutcome(
+    frame: RunExecutionFrame,
+    call: ToolCall | undefined,
+    result: ToolExecutionResult,
+    execution?: ToolExecutionRecord,
+  ): Promise<void> {
+    const pending = frame.context.pendingToolBatch;
+    if (pending === undefined || !pending.calls.some((candidate) => candidate.id === result.toolCallId)) return;
+    if (call !== undefined && (call.id !== result.toolCallId || call.name !== result.toolName)) {
+      throw new Error(`Batch callback result does not match call: ${result.toolCallId}`);
+    }
+    const durable = this.dependencies.durableState;
+    if (durable === undefined) return;
+    if (execution !== undefined) {
+      const saved = await durable.stateUnitOfWork.commitToolResult({
+        expectedRevision: this.requireCheckpointRevision(frame),
+        context: frame.context,
+        execution,
+        result,
+      });
+      this.appendPendingResult(frame.context, result);
+      frame.checkpointRevision = saved.revision;
+      return;
+    }
+    this.appendPendingResult(frame.context, result);
+    await this.saveCheckpoint(frame);
+  }
+
+  private appendPendingResult(context: AgentContext, result: ToolExecutionResult): void {
+    const pending = context.pendingToolBatch;
+    if (pending === undefined) return;
+    const call = pending.calls.find((candidate) => candidate.id === result.toolCallId);
+    if (call === undefined || call.name !== result.toolName) {
+      throw new Error(`Tool result does not belong to pending batch: ${result.toolCallId}`);
+    }
+    const existing = pending.completedResults.find((candidate) => candidate.toolCallId === result.toolCallId);
+    if (existing !== undefined) {
+      if (checkpointChecksum(existing) !== checkpointChecksum(result)) {
+        throw new Error(`Tool result conflicts with pending batch: ${result.toolCallId}`);
+      }
+      return;
+    }
+    pending.completedResults.push(structuredClone(result));
+  }
+
+  private completeRecoveredBatch(frame: RunExecutionFrame): void {
+    const pending = frame.context.pendingToolBatch;
+    if (pending === undefined) return;
+    if (pending.completedResults.length !== pending.calls.length) {
+      throw new Error(`Recovered batch is incomplete: ${pending.batchId}`);
+    }
+    this.appendToolExchange(frame.context, undefined, pending.calls, pending.completedResults);
+    frame.context.pendingToolCalls = [];
+    delete frame.context.pendingInterrupt;
+    delete frame.context.pendingToolBatch;
+    frame.context.status = 'running';
+    const nextStage = this.nextStage(pending.calls);
+    if (nextStage !== frame.context.stage) frame.context.stage = nextStage;
+    frame.context.contextVersion += 1;
+  }
+
+  private async saveCheckpoint(frame: RunExecutionFrame): Promise<void> {
+    const durable = this.dependencies.durableState;
+    if (durable === undefined) {
+      await this.dependencies.checkpoints.save(frame.context);
+      return;
+    }
+    const saved = await durable.checkpoints.save(frame.context, frame.checkpointRevision ?? null);
+    frame.checkpointRevision = saved.revision;
+  }
+
+  private async loadCheckpoint(runId: string): Promise<{ context: AgentContext; revision?: number } | null> {
+    const durable = this.dependencies.durableState;
+    if (durable === undefined) {
+      const context = await this.dependencies.checkpoints.load(runId);
+      return context === null ? null : { context };
+    }
+    const checkpoint = await durable.checkpoints.load(runId);
+    return checkpoint === null ? null : { context: checkpoint.context, revision: checkpoint.revision };
+  }
+
+  private requireCheckpointRevision(frame: RunExecutionFrame): number {
+    if (frame.checkpointRevision === undefined) throw new Error(`Missing durable checkpoint revision: ${frame.context.runId}`);
+    return frame.checkpointRevision;
+  }
+
+  private checkpointVersion(frame: RunExecutionFrame): string {
+    return String(frame.checkpointRevision ?? frame.context.contextVersion);
   }
 
   private replaceToolResult(context: AgentContext, replacement: ToolExecutionResult): void {
@@ -639,4 +917,16 @@ function toolResultPayload(result: ToolExecutionResult): AgentEventPayloadMap['T
 function interruptRisk(interrupt: { payload: Record<string, unknown> }): RiskSeverity {
   const value = interrupt.payload.severity;
   return value === 'LOW' || value === 'MEDIUM' || value === 'HIGH' || value === 'CRITICAL' ? value : 'SAFE';
+}
+
+function asDurableAgentError(error: unknown): unknown {
+  if (error instanceof CheckpointConflictError) {
+    return {
+      code: 'STORAGE_ERROR' as const,
+      message: error.message,
+      retryable: false,
+      details: { category: error.category },
+    };
+  }
+  return error;
 }

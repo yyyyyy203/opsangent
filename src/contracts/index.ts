@@ -1,4 +1,5 @@
 export * from './common.js';
+export * from './stable-json.js';
 export * from './context.js';
 export * from './errors.js';
 export * from './event.js';

@@ -1,5 +1,5 @@
 import { AgentHarness } from '../agent/agent-harness.js';
-import type { ChatModel, CheckpointStore, Clock, EventStore, EvidenceStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
+import type { ChatModel, CheckpointStore, Clock, DurableRunState, EventStore, EvidenceStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
 import { EventBus } from '../event/event-bus.js';
@@ -12,6 +12,7 @@ import { RiskActionHook } from '../hooks/risk-action-hook.js';
 import type { ToolHook } from '../hooks/types.js';
 import { NoopObservability } from '../observability/noop-observability.js';
 import { InMemoryCheckpointStore } from '../storage/in-memory-checkpoint-store.js';
+import { InMemoryDurableState } from '../storage/in-memory-durable-state.js';
 import { InMemoryEvidenceStore } from '../storage/in-memory-evidence-store.js';
 import { VersionedCheckpointStoreAdapter } from '../storage/versioned-checkpoint-adapter.js';
 import { ToolBatchExecutor } from '../tool/batch-executor.js';
@@ -73,9 +74,17 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     throw new Error('sqlitePath cannot be combined with partial persistence injection');
   }
   const persistence = options.sqlitePath === undefined ? undefined : createSqlitePersistence({ path: options.sqlitePath, clock });
+  const inMemoryDurable = persistence === undefined && options.checkpoints === undefined
+    ? new InMemoryDurableState(clock)
+    : undefined;
+  const durableState: DurableRunState | undefined = persistence ?? (inMemoryDurable === undefined ? undefined : {
+    checkpoints: inMemoryDurable,
+    executions: inMemoryDurable,
+    stateUnitOfWork: inMemoryDurable,
+  });
   const checkpoints = options.checkpoints
-    ?? (persistence === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(persistence.checkpoints));
-  const evidence = options.evidence ?? persistence?.evidence ?? new InMemoryEvidenceStore();
+    ?? (durableState === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(durableState.checkpoints));
+  const evidence = options.evidence ?? persistence?.evidence ?? inMemoryDurable?.evidence ?? new InMemoryEvidenceStore();
   const observability = options.observability ?? new NoopObservability();
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
@@ -142,7 +151,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ...(options.guardians ?? []),
   ]);
   const hooks = new HookExecutor([
-    new EvidenceBudgetHook(),
+    new EvidenceBudgetHook(clock),
     new RiskActionHook(clock),
     ...(options.hooks ?? []),
   ]);
@@ -158,6 +167,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     { actionMode: options.actionMode ?? 'dry_run' },
     { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+    durableState?.executions,
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
@@ -183,6 +193,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     admission: new ToolAdmission(toolkit),
+    ...(durableState === undefined ? {} : { durableState }),
     v2Events: { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId: string) => `run:${runId}` },
   });
   return {
@@ -190,6 +201,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     toolkit,
     events,
     checkpoints,
+    durableState,
     evidence,
     evidenceRecorder,
     hitl: new HitlService(checkpoints, clock, { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` }),

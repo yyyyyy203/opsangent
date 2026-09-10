@@ -7,10 +7,13 @@ import type {
   ToolCall,
   ToolResponse,
   ToolExecutionResult,
+  ToolExecutionJournal,
+  ToolExecutionRecord,
   AgentEventPayloadMap,
   EventFactoryV2Like,
   EventPublisherV2Like,
 } from '../contracts/index.js';
+import { checkpointChecksum } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
@@ -43,6 +46,7 @@ export class ToolExecutionPipeline {
     private readonly clock: Clock,
     private readonly options: ExecutionPipelineOptions,
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
+    private readonly executionJournal?: ToolExecutionJournal,
   ) {}
 
   public async *executeStream(
@@ -202,6 +206,15 @@ export class ToolExecutionPipeline {
       attributes: { toolKind: tool.kind, riskSeverity: risk.severity },
     });
 
+    const execution = await this.prepareExecution(tool, normalizedCall, context, stepId);
+    if (execution?.state === 'succeeded' || execution?.state === 'failed') {
+      if (execution.result === undefined) throw new Error(`Terminal execution is missing a result: ${call.id}`);
+      return { type: 'completed', result: execution.result, risk, execution };
+    }
+    if (execution?.state === 'uncertain') {
+      throw new Error(`Uncertain execution cannot be invoked: ${call.id}`);
+    }
+
     let toolStream: ReturnType<ToolRunner['stream']> | undefined;
     let streamCompleted = false;
     try {
@@ -240,7 +253,12 @@ export class ToolExecutionPipeline {
       const post = await this.hooks.runAfter(hookContext);
       if (post.type === 'abort') {
         span.fail(post.error);
-        return { type: 'completed', result: { ...result, status: 'failed', error: post.error }, risk };
+        return {
+          type: 'completed',
+          result: { ...result, status: 'failed', error: post.error },
+          risk,
+          ...(execution === undefined ? {} : { execution }),
+        };
       }
       for (const evidenceId of response.evidenceIds ?? []) {
         if (!context.evidenceIds.includes(evidenceId)) context.evidenceIds.push(evidenceId);
@@ -250,7 +268,7 @@ export class ToolExecutionPipeline {
         context.executedActions.push(result);
       }
       span.end(response);
-      return { type: 'completed', result, risk };
+      return { type: 'completed', result, risk, ...(execution === undefined ? {} : { execution }) };
     } catch (error) {
       const agentError = signal.aborted
         ? { code: 'ABORTED' as const, message: 'Tool execution aborted.', retryable: false }
@@ -258,7 +276,7 @@ export class ToolExecutionPipeline {
       const result = this.result(call, signal.aborted ? 'aborted' : 'failed', startedAt, undefined, agentError);
       span.fail(agentError);
       await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id);
-      return { type: 'completed', result, risk };
+      return { type: 'completed', result, risk, ...(execution === undefined ? {} : { execution }) };
     } finally {
       if (!streamCompleted && toolStream !== undefined) {
         await toolStream.return(undefined as unknown as ToolResponse).catch(() => undefined);
@@ -282,6 +300,25 @@ export class ToolExecutionPipeline {
       ...(response === undefined ? {} : { response }),
       ...(error === undefined ? {} : { error }),
     };
+  }
+
+  private prepareExecution(
+    tool: NonNullable<ReturnType<Toolkit['get']>>,
+    call: ToolCall,
+    context: AgentContext,
+    stepId: string,
+  ): Promise<ToolExecutionRecord | undefined> {
+    if (this.executionJournal === undefined) return Promise.resolve(undefined);
+    return this.executionJournal.prepare({
+      toolCallId: call.id,
+      runId: context.runId,
+      stepId,
+      toolName: tool.name,
+      toolKind: tool.kind,
+      inputDigest: checkpointChecksum(call.input),
+      state: 'prepared',
+      preparedAt: this.clock.now().toISOString(),
+    });
   }
 
   private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], stepId: string, toolCallId?: string): Promise<void> {

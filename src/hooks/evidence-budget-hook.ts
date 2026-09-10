@@ -1,7 +1,10 @@
+import { systemClock, type Clock } from '../contracts/common.js';
 import type { HookContext, HookResult, ToolHook } from './types.js';
 
 export class EvidenceBudgetHook implements ToolHook {
   public readonly id = 'evidence-budget';
+
+  public constructor(private readonly clock: Clock = systemClock) {}
 
   public matches(context: HookContext): boolean {
     return context.tool.kind === 'evidence';
@@ -12,7 +15,7 @@ export class EvidenceBudgetHook implements ToolHook {
     // Resuming an admitted call must not charge it again.
     if (context.context.admittedToolCallIds?.includes(context.toolCall.id)) return Promise.resolve({ type: 'continue' });
     const budget = context.context.budget;
-    const elapsedMs = Date.now() - Date.parse(budget.startedAt);
+    const elapsedMs = this.clock.now().getTime() - Date.parse(budget.startedAt);
     if (budget.toolCallsUsed >= budget.maxToolCalls || elapsedMs >= budget.maxDurationMs) {
       return Promise.resolve({
         type: 'abort',

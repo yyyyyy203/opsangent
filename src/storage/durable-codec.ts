@@ -1,6 +1,5 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
-import type { JsonObject, JsonValue } from '../contracts/common.js';
+import { canonicalJson, checkpointChecksum } from '../contracts/stable-json.js';
 import type { AgentContext, PendingToolBatch } from '../contracts/context.js';
 import type { EvidenceRecord, ToolExecutionRecord } from '../contracts/storage.js';
 
@@ -141,13 +140,7 @@ const evidenceRecord = z.object({
 }).strict();
 
 /** Produces stable JSON for checksums without accepting lossy JSON values. */
-export function canonicalJson(value: unknown): string {
-  return JSON.stringify(canonicalize(value));
-}
-
-export function checkpointChecksum(value: unknown): string {
-  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
-}
+export { canonicalJson, checkpointChecksum };
 
 export function parsePendingToolBatch(value: unknown): PendingToolBatch {
   const parsed = pendingToolBatch.parse(value);
@@ -172,24 +165,4 @@ export function parseToolExecutionRecord(value: unknown): ToolExecutionRecord {
 
 export function parseEvidenceRecord(value: unknown): EvidenceRecord {
   return structuredClone(evidenceRecord.parse(value)) as EvidenceRecord;
-}
-
-function canonicalize(value: unknown): JsonValue {
-  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new TypeError('canonical JSON does not support non-finite numbers');
-    return value;
-  }
-  if (Array.isArray(value)) return value.map((item) => canonicalize(item));
-  if (typeof value !== 'object') throw new TypeError(`canonical JSON does not support ${typeof value}`);
-  const prototype = Reflect.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) throw new TypeError('canonical JSON only supports plain objects');
-  const record = value as Record<string, unknown>;
-  const normalized: JsonObject = {};
-  for (const key of Object.keys(record).sort()) {
-    const property = record[key];
-    if (property === undefined) throw new TypeError(`canonical JSON does not support undefined property ${key}`);
-    normalized[key] = canonicalize(property);
-  }
-  return normalized;
 }
