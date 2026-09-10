@@ -263,6 +263,7 @@ CREATE TABLE evidence_records (
   summary_json TEXT NOT NULL,
   raw_json TEXT NOT NULL,
   raw_sha256 TEXT NOT NULL,
+  business_trace_ids_json TEXT NOT NULL,
   schema_version INTEGER NOT NULL,
   UNIQUE (capture_key)
 );

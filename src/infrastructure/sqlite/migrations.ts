@@ -42,6 +42,53 @@ const MIGRATIONS = [
       created_at TEXT NOT NULL
     );
   `,
+  `
+    CREATE TABLE agent_checkpoints (
+      run_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      context_version INTEGER NOT NULL CHECK (context_version > 0),
+      status TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      profile_id TEXT NOT NULL,
+      checkpoint_schema_version INTEGER NOT NULL CHECK (checkpoint_schema_version > 0),
+      checkpoint_json TEXT NOT NULL,
+      checksum TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX agent_checkpoints_status_updated ON agent_checkpoints(status, updated_at);
+
+    CREATE TABLE evidence_records (
+      evidence_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      tool_call_id TEXT,
+      capture_key TEXT UNIQUE,
+      source TEXT NOT NULL CHECK (source IN ('metric', 'log', 'trace', 'change')),
+      captured_at TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      raw_json TEXT NOT NULL,
+      raw_sha256 TEXT NOT NULL,
+      business_trace_ids_json TEXT NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version > 0)
+    );
+    CREATE INDEX evidence_records_run_captured ON evidence_records(run_id, captured_at, evidence_id);
+    CREATE INDEX evidence_records_source_captured ON evidence_records(source, captured_at, evidence_id);
+
+    CREATE TABLE tool_executions (
+      tool_call_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      tool_kind TEXT NOT NULL CHECK (tool_kind IN ('evidence', 'action', 'utility')),
+      input_digest TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('prepared', 'succeeded', 'failed', 'uncertain')),
+      result_json TEXT,
+      reason_code TEXT,
+      prepared_at TEXT NOT NULL,
+      finished_at TEXT
+    );
+    CREATE INDEX tool_executions_run_state ON tool_executions(run_id, state, tool_call_id);
+  `,
 ] as const;
 
 export function migrateSqlite(database: Database.Database): void {
