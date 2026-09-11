@@ -51,4 +51,33 @@ describe('Event V2 complete catalog', () => {
       durability: 'transient',
     })).toThrow();
   });
+
+  it('registers and validates LOOP_DETECTED as a V2-only event fact', () => {
+    const event = {
+      schemaVersion: 2,
+      eventId: 'event-loop-1',
+      sequence: 3,
+      type: 'LOOP_DETECTED' as const,
+      payload: {
+        level: 'hard' as const,
+        repeatCount: 5,
+        toolName: 'metrics.query',
+        signatureDigest: 'loop-signature-v1',
+        action: 'signature_blocked' as const,
+        stage: 'evidence_collection' as const,
+      },
+      runId: 'run-1',
+      correlationId: 'correlation-1',
+      timestamp,
+      visibility: 'audit' as const,
+      durability: 'durable' as const,
+    };
+
+    expect(AGENT_EVENT_TYPES_V2).toContain('LOOP_DETECTED');
+    expect(parseAgentEventV2(event)).toMatchObject({
+      type: 'LOOP_DETECTED',
+      payload: { level: 'hard', repeatCount: 5, action: 'signature_blocked' },
+    });
+    expect(() => parseAgentEventV2({ ...event, payload: { ...event.payload, repeatCount: 0 } })).toThrow();
+  });
 });

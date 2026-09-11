@@ -14,6 +14,14 @@ export type FallbackMode = 'reduced_scope' | 'cached' | 'readonly' | 'snapshot' 
 export type ErrorPayload = { code: ErrorCode; message: string; retryable: boolean; details?: Record<string, JsonValue> };
 
 export interface SubsystemEventPayloadMap {
+  LOOP_DETECTED: {
+    level: 'warn' | 'hard' | 'force_break';
+    repeatCount: number;
+    toolName: Identifier;
+    signatureDigest: Identifier;
+    action: 'hint_injected' | 'signature_blocked' | 'run_terminated';
+    stage: SubagentStage;
+  };
   SUBAGENT_STARTED: {
     subagentType: Identifier; childRunId: Identifier; parentRunId: Identifier;
     budget: { type: BudgetType; limit: number; used: number };
@@ -58,6 +66,14 @@ const fallback = z.enum(['reduced_scope', 'cached', 'readonly', 'snapshot', 'emp
 const level = z.enum(['L0', 'L1', 'L2']);
 
 export const subsystemEventPayloadSchemaMap = {
+  LOOP_DETECTED: z.object({
+    level: z.enum(['warn', 'hard', 'force_break']),
+    repeatCount: z.number().int().positive(),
+    toolName: id,
+    signatureDigest: id,
+    action: z.enum(['hint_injected', 'signature_blocked', 'run_terminated']),
+    stage: commonStage,
+  }).strict(),
   SUBAGENT_STARTED: z.object({ subagentType: id, childRunId: id, parentRunId: id, budget }).strict(),
   SUBAGENT_PROGRESS: z.object({ childRunId: id, stage: commonStage, displaySummary: z.string() }).strict(),
   SUBAGENT_RETRY_SCHEDULED: z.object({ childRunId: id, attempt: z.number().int().positive(), reasonCode: id }).strict(),

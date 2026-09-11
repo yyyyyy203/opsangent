@@ -5,6 +5,7 @@ import {
 } from '../src/contracts/event-v2/subsystem.js';
 
 const eventTypes: Array<keyof SubsystemEventPayloadMap> = [
+  'LOOP_DETECTED',
   'SUBAGENT_STARTED', 'SUBAGENT_PROGRESS', 'SUBAGENT_RETRY_SCHEDULED', 'SUBAGENT_FALLBACK_ACTIVATED',
   'SUBAGENT_COMPLETED', 'SUBAGENT_FAILED',
   'MCP_CONNECTION_STARTED', 'MCP_CONNECTION_COMPLETED', 'MCP_CONNECTION_FAILED', 'MCP_CONNECTION_DEGRADED',
@@ -18,6 +19,10 @@ const eventTypes: Array<keyof SubsystemEventPayloadMap> = [
 
 const payloadFor = (type: keyof SubsystemEventPayloadMap): Record<string, unknown> => {
   switch (type) {
+    case 'LOOP_DETECTED': return {
+      level: 'hard', repeatCount: 5, toolName: 'metrics.query', signatureDigest: 'loop-signature-v1',
+      action: 'signature_blocked', stage: 'evidence_collection',
+    };
     case 'SUBAGENT_STARTED': return {
       subagentType: 'prometheus', childRunId: 'child-1', parentRunId: 'run-1',
       budget: { type: 'tokens', limit: 1000, used: 0 },
