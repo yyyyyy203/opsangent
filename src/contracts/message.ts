@@ -16,6 +16,12 @@ export interface ContextSummary {
   pendingActionIds: string[];
   executedActionIds: string[];
   unresolvedRisks: string[];
+  sourceMessageIds?: string[];
+  keyToolCalls?: string[];
+  evidenceIds?: string[];
+  confirmationIds?: string[];
+  riskRuleIds?: string[];
+  summaryVersion?: number;
 }
 
 export interface AgentMessage {

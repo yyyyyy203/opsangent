@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { canonicalJson, checkpointChecksum } from '../contracts/stable-json.js';
 import type { AgentContext, PendingToolBatch } from '../contracts/context.js';
+import { createInitialRunGovernanceState, type ToolBatchGovernanceSnapshot } from '../contracts/governance.js';
 import type { EvidenceRecord, ToolExecutionRecord } from '../contracts/storage.js';
 
 const timestamp = z.string().datetime({ offset: true });
@@ -77,6 +78,57 @@ const pendingToolBatch = z.object({
   completedResults: z.array(toolResult),
   state: z.enum(['admitted', 'executing', 'awaiting_confirmation', 'awaiting_external']),
   createdAt: timestamp,
+  governance: z.unknown().optional(),
+}).strict();
+
+const governance = z.object({
+  schemaVersion: z.literal(1),
+  profile: z.object({
+    profileId: z.string().min(1),
+    revision: z.string().min(1),
+    digest: z.string().min(1),
+    serviceName: z.string().min(1),
+    serviceLevel: z.enum(['S0', 'S1', 'S2', 'S3']),
+    timezone: z.string().min(1),
+    allowedActions: z.array(z.string()),
+    forbiddenActions: z.array(z.string()),
+    changeFreezePeriods: z.array(z.object({
+      id: z.string().min(1),
+      startsAt: timestamp,
+      endsAt: timestamp,
+      reason: z.string().optional(),
+    }).strict()),
+    impactPolicy: z.object({
+      unavailable: z.object({
+        S0: z.literal('deny'), S1: z.literal('deny'), S2: z.literal('confirm'), S3: z.literal('confirm'),
+      }).strict(),
+    }).strict(),
+    policyVersion: z.string().min(1),
+    capturedAt: timestamp,
+    source: z.enum(['legacy_checkpoint', 'resolved']),
+  }).strict(),
+  loop: z.object({
+    history: z.array(z.object({
+      signature: z.string().min(1),
+      toolName: z.string().min(1),
+      stage: z.enum(['triage', 'evidence_collection', 'hypothesis', 'risk_gate', 'action', 'verification', 'postmortem']),
+      status: z.enum(['success', 'failed', 'timeout', 'skipped']),
+      stepId: z.string().min(1),
+      recordedAt: timestamp,
+    }).strict()),
+    lastSignature: z.string().min(1).optional(),
+    consecutiveCount: z.number().int().nonnegative(),
+    level: z.enum(['none', 'warn', 'hard', 'force_break']),
+    blockedSignatures: z.array(z.string().min(1)),
+  }).strict(),
+  compression: z.object({
+    summaryVersion: z.number().int().nonnegative(),
+    lastLevel: z.enum(['none', 'L0', 'L1', 'L2']),
+    sourceMessageIds: z.array(z.string().min(1)),
+    protectedMessageIds: z.array(z.string().min(1)),
+    offloadedEvidenceIds: z.array(z.string().min(1)),
+    lastCompressedAt: timestamp.optional(),
+  }).strict(),
 }).strict();
 
 const agentContext = z.object({
@@ -108,6 +160,7 @@ const agentContext = z.object({
   toolCorrections: z.record(z.object({ firstCallId: z.string().min(1), failures: z.number().int().nonnegative() }).strict()).optional(),
   admittedToolCallIds: z.array(z.string().min(1)).optional(),
   networkAttemptBudget: z.object({ remaining: z.number().int().nonnegative() }).strict().optional(),
+  governance: governance.optional(),
   failure: agentError.optional(),
 }).strict();
 
@@ -152,11 +205,52 @@ export function parsePendingToolBatch(value: unknown): PendingToolBatch {
     if (completedIds.has(result.toolCallId)) throw new Error('pending batch contains duplicate completed results');
     completedIds.add(result.toolCallId);
   }
+  if (parsed.governance !== undefined) parseToolBatchGovernanceSnapshot(parsed.governance);
   return structuredClone(parsed) as PendingToolBatch;
 }
 
 export function parseAgentContext(value: unknown): AgentContext {
-  return structuredClone(agentContext.parse(value)) as AgentContext;
+  const parsed = agentContext.parse(value);
+  if (parsed.pendingToolBatch?.governance !== undefined) parseToolBatchGovernanceSnapshot(parsed.pendingToolBatch.governance);
+  const migrated = {
+    ...parsed,
+    governance: parsed.governance ?? createInitialRunGovernanceState({
+      profileId: parsed.profileId,
+      capturedAt: parsed.budget.startedAt,
+    }),
+  };
+  return structuredClone(migrated) as AgentContext;
+}
+
+function parseToolBatchGovernanceSnapshot(value: unknown): ToolBatchGovernanceSnapshot {
+  const severity = z.enum(['SAFE', 'LOW', 'MEDIUM', 'HIGH', 'CRITICAL']);
+  const finding = z.object({
+    ruleId: z.string().min(1), severity, description: z.string(), toolName: z.string().min(1), metadata: z.record(z.unknown()).optional(),
+  }).strict();
+  const impact = z.discriminatedUnion('status', [
+    z.object({
+      status: z.literal('available'), capturedAt: timestamp, expiresAt: timestamp,
+      affectedUsers: z.number().finite(), errorRate: z.number().finite(), baselineErrorRate: z.number().finite(),
+      currentQps: z.number().finite(), peakQps: z.number().finite(), downstreamHealthy: z.boolean(),
+      quality: z.enum(['complete', 'partial']), evidenceIds: z.array(z.string().min(1)),
+    }).strict(),
+    z.object({
+      status: z.enum(['unavailable', 'stale']), reasonCode: z.string().min(1), capturedAt: timestamp.optional(), evidenceIds: z.array(z.string().min(1)),
+    }).strict(),
+  ]);
+  return structuredClone(z.object({
+    profileRevision: z.string().min(1),
+    profileDigest: z.string().min(1),
+    impact,
+    decisions: z.array(z.object({
+      toolCallId: z.string().min(1),
+      inputDigest: z.string().min(1),
+      decision: z.object({
+        disposition: z.enum(['allow', 'confirm', 'deny']), severity, requireConfirmation: z.boolean(), findings: z.array(finding), policyVersion: z.string().min(1),
+      }).strict(),
+    }).strict()),
+    evaluatedAt: timestamp,
+  }).strict().parse(value)) as ToolBatchGovernanceSnapshot;
 }
 
 export function parseToolExecutionRecord(value: unknown): ToolExecutionRecord {

@@ -22,7 +22,7 @@ import type {
   ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
-import { CheckpointConflictError, checkpointChecksum, toAgentError } from '../contracts/index.js';
+import { CheckpointConflictError, checkpointChecksum, createInitialRunGovernanceState, toAgentError } from '../contracts/index.js';
 import type { ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
@@ -815,6 +815,7 @@ export class AgentHarness implements DiagnosisAgent {
         maxDurationMs: options.maxDurationMs ?? 120_000,
       },
       contextVersion: 1,
+      governance: createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now }),
     };
   }
 

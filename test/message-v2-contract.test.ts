@@ -68,6 +68,34 @@ describe('Message V2 contracts', () => {
     expect(parsed.blocks.map((block) => block.type)).toEqual(['text', 'evidence_ref', 'diagnosis']);
   });
 
+  it('keeps legacy context summaries valid while accepting additive governance references', () => {
+    const legacy = parseAgentMessageV2({ ...baseMessage, blocks: [blockFor('context_summary')] });
+    expect(legacy.blocks[0]).toMatchObject({ type: 'context_summary' });
+
+    const enriched = blockFor('context_summary');
+    const summary = enriched.summary as Record<string, unknown>;
+    Object.assign(summary, {
+      sourceMessageIds: ['message-1'],
+      keyToolCalls: ['call-1'],
+      evidenceIds: ['evidence-1'],
+      confirmationIds: ['confirmation-1'],
+      riskRuleIds: ['risk.freeze-window'],
+      summaryVersion: 1,
+    });
+
+    expect(parseAgentMessageV2({ ...baseMessage, blocks: [enriched] }).blocks[0]).toMatchObject({
+      type: 'context_summary',
+      summary: {
+        sourceMessageIds: ['message-1'],
+        keyToolCalls: ['call-1'],
+        evidenceIds: ['evidence-1'],
+        confirmationIds: ['confirmation-1'],
+        riskRuleIds: ['risk.freeze-window'],
+        summaryVersion: 1,
+      },
+    });
+  });
+
   it.each([
     'text', 'reasoning_summary', 'tool_call', 'raw_tool_call', 'tool_result', 'evidence_ref', 'artifact_ref', 'image_ref',
     'context_summary', 'confirmation_request', 'confirmation_result', 'diagnosis', 'action_proposal', 'action_result', 'error',

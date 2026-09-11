@@ -69,6 +69,12 @@ const contextSummarySchema = z.object({
   pendingActionIds: z.array(z.string()),
   executedActionIds: z.array(z.string()),
   unresolvedRisks: z.array(z.string()),
+  sourceMessageIds: z.array(identifierSchema).optional(),
+  keyToolCalls: z.array(identifierSchema).optional(),
+  evidenceIds: z.array(identifierSchema).optional(),
+  confirmationIds: z.array(identifierSchema).optional(),
+  riskRuleIds: z.array(identifierSchema).optional(),
+  summaryVersion: z.number().int().nonnegative().optional(),
 }).strict();
 
 const blockBaseSchema = z.object({

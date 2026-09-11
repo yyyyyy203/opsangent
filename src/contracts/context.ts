@@ -1,4 +1,5 @@
 import type { AgentError } from './errors.js';
+import type { RunGovernanceState, ToolBatchGovernanceSnapshot } from './governance.js';
 import type { SerializableInterrupt } from './hitl.js';
 import type { AgentMessage } from './message.js';
 import type { ToolCall, ToolExecutionResult } from './tool.js';
@@ -23,6 +24,8 @@ export interface PendingToolBatch {
   completedResults: ToolExecutionResult[];
   state: 'admitted' | 'executing' | 'awaiting_confirmation' | 'awaiting_external';
   createdAt: string;
+  /** Immutable risk facts captured when this batch was admitted. */
+  governance?: ToolBatchGovernanceSnapshot;
 }
 
 export interface AgentContext {
@@ -49,5 +52,7 @@ export interface AgentContext {
   toolCorrections?: Record<string, { firstCallId: string; failures: number }>;
   admittedToolCallIds?: string[];
   networkAttemptBudget?: { remaining: number };
+  /** Additive Run-level governance state; legacy checkpoints are migrated by the durable codec. */
+  governance?: RunGovernanceState;
   failure?: AgentError;
 }

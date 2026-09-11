@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import type { AgentError } from './errors.js';
 
 export type ToolKind = 'evidence' | 'action' | 'utility';
+export type ToolSource = 'builtin' | 'mcp' | 'skill' | 'subagent' | 'external';
 export type ToolRecoveryPolicy = 'replay_safe' | 'verify_before_retry' | 'never_replay';
 export type ToolExecutionStatus =
   | 'success'
@@ -86,6 +87,8 @@ export interface Tool {
   readonly name: string;
   readonly description: string;
   readonly kind: ToolKind;
+  /** Execution origin used by governance and presentation; omitted only for legacy adapters. */
+  readonly source?: ToolSource;
   readonly inputSchema: z.ZodObject<z.ZodRawShape> | ToolInputSchema;
   readonly call?: (input: Record<string, unknown>, options: ToolCallOptions) => ToolCallReturn;
   readonly requireUserConfirm?: boolean;
