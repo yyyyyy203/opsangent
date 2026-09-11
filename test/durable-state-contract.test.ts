@@ -99,6 +99,10 @@ describe('in-memory durable-state contract', () => {
     const updated = await state.save({ ...created.context, stage: 'hypothesis' }, created.revision);
 
     expect(created.revision).toBe(1);
+    expect(created.context.governance?.profile).toMatchObject({
+      profileId: 'group-buy-market',
+      source: 'legacy_checkpoint',
+    });
     expect(retried.revision).toBe(created.revision);
     expect(updated.revision).toBe(2);
     await expect(state.save({ ...created.context, stage: 'action' }, created.revision))

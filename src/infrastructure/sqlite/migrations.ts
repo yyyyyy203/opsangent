@@ -89,6 +89,18 @@ const MIGRATIONS = [
     );
     CREATE INDEX tool_executions_run_state ON tool_executions(run_id, state, tool_call_id);
   `,
+  `
+    CREATE TABLE durable_event_outbox (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      event_json TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'published')),
+      created_at TEXT NOT NULL,
+      published_at TEXT
+    );
+    CREATE INDEX durable_event_outbox_pending_run
+      ON durable_event_outbox(state, run_id, event_id);
+  `,
 ] as const;
 
 export function migrateSqlite(database: Database.Database): void {

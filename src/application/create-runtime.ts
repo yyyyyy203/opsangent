@@ -77,11 +77,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const inMemoryDurable = persistence === undefined && options.checkpoints === undefined
     ? new InMemoryDurableState(clock)
     : undefined;
-  const durableState: DurableRunState | undefined = persistence ?? (inMemoryDurable === undefined ? undefined : {
-    checkpoints: inMemoryDurable,
-    executions: inMemoryDurable,
-    stateUnitOfWork: inMemoryDurable,
-  });
+  const durableState: DurableRunState | undefined = persistence ?? inMemoryDurable;
   const checkpoints = options.checkpoints
     ?? (durableState === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(durableState.checkpoints));
   const evidence = options.evidence ?? persistence?.evidence ?? inMemoryDurable?.evidence ?? new InMemoryEvidenceStore();

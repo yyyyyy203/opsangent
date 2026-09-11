@@ -6,12 +6,14 @@ import type {
   AgentContext,
   Clock,
   EvidenceRecord,
+  PendingAgentEventV2,
   PendingToolBatch,
   ToolCall,
   ToolExecutionRecord,
   ToolExecutionResult,
 } from '../src/contracts/index.js';
 import { createSqlitePersistence, SqliteDatabase } from '../src/infrastructure/sqlite/index.js';
+import { checkpointChecksum } from '../src/storage/durable-codec.js';
 
 const roots: string[] = [];
 const now = '2026-09-10T00:00:00.000Z';
@@ -78,6 +80,22 @@ function result(toolCallId: string): ToolExecutionResult {
   };
 }
 
+function outboxEvent(eventId = 'outbox-event-1'): PendingAgentEventV2<'TOOL_RESULT'> {
+  return {
+    schemaVersion: 2,
+    eventId,
+    type: 'TOOL_RESULT',
+    payload: { result: result('call-1'), durationMs: 0, evidenceIds: [] },
+    runId: 'run-1',
+    correlationId: 'run:run-1',
+    timestamp: now,
+    visibility: 'audit',
+    durability: 'durable',
+    stepId: 'step-1',
+    toolCallId: 'call-1',
+  };
+}
+
 function evidence(evidenceId: string, capturedAt: string): EvidenceRecord {
   return {
     evidenceId,
@@ -132,6 +150,82 @@ describe('SQLite durable-state persistence', () => {
     const second = createSqlitePersistence({ path, clock });
     try {
       await expect(second.checkpoints.load('run-1')).rejects.toMatchObject({ recordType: 'checkpoint', recordId: 'run-1' });
+    } finally {
+      second.close();
+    }
+  });
+
+  it('loads a legacy checkpoint checksum and upgrades its next write to the governance schema', async () => {
+    const path = await databasePath();
+    const legacy = context('run-legacy');
+    const database = SqliteDatabase.open(path);
+    database.raw.prepare(`
+      INSERT INTO agent_checkpoints(
+        run_id, revision, context_version, status, stage, profile_id, checkpoint_schema_version,
+        checkpoint_json, checksum, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      legacy.runId, 1, legacy.contextVersion, legacy.status, legacy.stage, legacy.profileId,
+      1, JSON.stringify(legacy), checkpointChecksum(legacy), now, now,
+    );
+    database.close();
+
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      const loaded = await persistence.checkpoints.load('run-legacy');
+      if (loaded === null) throw new Error('expected legacy checkpoint');
+      expect(loaded.context.governance?.profile).toMatchObject({
+        profileId: 'group-buy-market',
+        source: 'legacy_checkpoint',
+      });
+      await persistence.checkpoints.save(loaded.context, loaded.revision);
+    } finally {
+      persistence.close();
+    }
+
+    const upgraded = SqliteDatabase.open(path);
+    try {
+      const row = upgraded.raw.prepare(`
+        SELECT checkpoint_schema_version, checkpoint_json
+        FROM agent_checkpoints WHERE run_id = ?
+      `).get('run-legacy') as { checkpoint_schema_version: number; checkpoint_json: string };
+      expect(row.checkpoint_schema_version).toBe(2);
+      expect(JSON.parse(row.checkpoint_json)).toMatchObject({ governance: { schemaVersion: 1 } });
+    } finally {
+      upgraded.close();
+    }
+  });
+
+  it('reopens a pending durable Outbox event after SQLite restarts', async () => {
+    const path = await databasePath();
+    const first = createSqlitePersistence({ path, clock });
+    await first.outbox.enqueue({ events: [outboxEvent()], createdAt: now });
+    first.close();
+
+    const second = createSqlitePersistence({ path, clock });
+    try {
+      expect(await second.outbox.listPending({ runId: 'run-1', limit: 10 })).toEqual([
+        { event: outboxEvent(), enqueuedAt: now },
+      ]);
+    } finally {
+      second.close();
+    }
+  });
+
+  it('maps a corrupted durable Outbox event to a safe storage corruption error', async () => {
+    const path = await databasePath();
+    const first = createSqlitePersistence({ path, clock });
+    await first.outbox.enqueue({ events: [outboxEvent()], createdAt: now });
+    first.close();
+    const database = SqliteDatabase.open(path);
+    database.raw.prepare('UPDATE durable_event_outbox SET event_json = ? WHERE event_id = ?')
+      .run('{"not":"an-event"}', 'outbox-event-1');
+    database.close();
+
+    const second = createSqlitePersistence({ path, clock });
+    try {
+      await expect(second.outbox.listPending({ runId: 'run-1', limit: 10 }))
+        .rejects.toMatchObject({ recordType: 'event', recordId: 'outbox-event-1' });
     } finally {
       second.close();
     }

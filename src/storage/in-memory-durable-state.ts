@@ -1,8 +1,15 @@
 import { systemClock, type Clock } from '../contracts/common.js';
 import type { AgentContext } from '../contracts/context.js';
+import { EventIdConflictError, type PendingAgentEventV2 } from '../contracts/event-store.js';
+import { parseAgentEventV2 } from '../contracts/event-v2/schema.js';
 import {
   CheckpointConflictError,
   type AgentStateUnitOfWork,
+  type DurableEventOutbox,
+  type DurableExecutionTransition,
+  type DurableOutboxRecord,
+  type DurableRunState,
+  type DurableTransitionUnitOfWork,
   type EvidencePage,
   type EvidenceQueryStore,
   type EvidenceRecord,
@@ -13,7 +20,7 @@ import {
   type VersionedCheckpointStore,
 } from '../contracts/storage.js';
 import type { ToolExecutionResult } from '../contracts/tool.js';
-import { checkpointChecksum } from './durable-codec.js';
+import { checkpointChecksum, parseAgentContext } from './durable-codec.js';
 
 const DEFAULT_EVIDENCE_PAGE_SIZE = 50;
 const MAX_EVIDENCE_PAGE_SIZE = 100;
@@ -22,23 +29,30 @@ const MAX_EVIDENCE_PAGE_SIZE = 100;
  * Deterministic in-memory implementation of the durable Run state contracts.
  * It is intentionally a test/default-runtime implementation, not a persistence fallback.
  */
-export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork {
-  private readonly checkpoints = new Map<string, StoredRunCheckpoint>();
-  private readonly executions = new Map<string, ToolExecutionRecord>();
+export class InMemoryDurableState implements DurableRunState, VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork, DurableTransitionUnitOfWork, DurableEventOutbox {
+  private readonly checkpointRecords = new Map<string, StoredRunCheckpoint>();
+  private readonly executionRecords = new Map<string, ToolExecutionRecord>();
+  private readonly outboxRecords = new Map<string, DurableOutboxRecord>();
+
+  public readonly checkpoints: VersionedCheckpointStore = this;
+  public readonly executions: ToolExecutionJournal = this;
+  public readonly stateUnitOfWork: AgentStateUnitOfWork = this;
+  public readonly transitions: DurableTransitionUnitOfWork = this;
+  public readonly outbox: DurableEventOutbox = this;
 
   public readonly evidence = new InMemoryEvidenceRepository();
 
   public constructor(private readonly clock: Clock = systemClock) {}
 
   public load(runId: string): Promise<StoredRunCheckpoint | null> {
-    const checkpoint = this.checkpoints.get(runId);
+    const checkpoint = this.checkpointRecords.get(runId);
     return Promise.resolve(checkpoint === undefined ? null : clone(checkpoint));
   }
 
   public save(context: AgentContext, expectedRevision: number | null): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => {
       const checkpoint = this.nextCheckpoint(context, expectedRevision);
-      this.checkpoints.set(context.runId, clone(checkpoint));
+      this.checkpointRecords.set(context.runId, clone(checkpoint));
       return clone(checkpoint);
     });
   }
@@ -46,19 +60,19 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
   public prepare(record: ToolExecutionRecord): Promise<ToolExecutionRecord> {
     return Promise.resolve().then(() => {
       validatePreparedExecution(record);
-      const existing = this.executions.get(record.toolCallId);
+      const existing = this.executionRecords.get(record.toolCallId);
       if (existing !== undefined) {
         if (!sameExecutionIdentity(existing, record)) throw new Error(`tool execution identity collision: ${record.toolCallId}`);
         return clone(existing);
       }
       const stored = clone(record);
-      this.executions.set(record.toolCallId, stored);
+      this.executionRecords.set(record.toolCallId, stored);
       return clone(stored);
     });
   }
 
   public get(toolCallId: string): Promise<ToolExecutionRecord | null> {
-    const execution = this.executions.get(toolCallId);
+    const execution = this.executionRecords.get(toolCallId);
     return Promise.resolve(execution === undefined ? null : clone(execution));
   }
 
@@ -68,15 +82,11 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
     execution: ToolExecutionRecord;
     result: ToolExecutionResult;
   }): Promise<StoredRunCheckpoint> {
-    return Promise.resolve().then(() => {
-      const nextContext = appendCompletedResult(input.context, input.result);
-      const checkpoint = this.nextCheckpoint(nextContext, input.expectedRevision);
-      const existing = this.requireCompatibleExecution(input.execution);
-      const nextExecution = completedExecution(existing, input.result, this.clock);
-
-      this.executions.set(nextExecution.toolCallId, clone(nextExecution));
-      this.checkpoints.set(nextContext.runId, clone(checkpoint));
-      return clone(checkpoint);
+    return this.commit({
+      expectedRevision: input.expectedRevision,
+      context: input.context,
+      execution: { kind: 'completed', record: input.execution, result: input.result },
+      outboxEvents: [],
     });
   }
 
@@ -86,20 +96,86 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
     execution: ToolExecutionRecord;
     reasonCode: string;
   }): Promise<StoredRunCheckpoint> {
-    return Promise.resolve().then(() => {
-      const existing = this.requireCompatibleExecution(input.execution);
-      const shouldAdvanceCheckpoint = existing.state === 'prepared';
-      const nextExecution = uncertainExecution(existing, input.reasonCode, this.clock);
-      const checkpoint = this.nextCheckpoint(input.context, input.expectedRevision, shouldAdvanceCheckpoint);
+    return this.commit({
+      expectedRevision: input.expectedRevision,
+      context: input.context,
+      execution: { kind: 'uncertain', record: input.execution, reasonCode: input.reasonCode },
+      outboxEvents: [],
+    });
+  }
 
-      this.executions.set(nextExecution.toolCallId, clone(nextExecution));
-      this.checkpoints.set(input.context.runId, clone(checkpoint));
+  public commit(input: {
+    expectedRevision: number | null;
+    context: AgentContext;
+    execution?: DurableExecutionTransition;
+    outboxEvents: readonly PendingAgentEventV2[];
+  }): Promise<StoredRunCheckpoint> {
+    return Promise.resolve().then(() => {
+      const transition = input.execution;
+      const nextContext = transition?.kind === 'completed'
+        ? appendCompletedResult(input.context, transition.result)
+        : clone(input.context);
+      let existing: ToolExecutionRecord | undefined;
+      let nextExecution: ToolExecutionRecord | undefined;
+      // Preserve the legacy CAS-first error contract for completed results:
+      // a stale checkpoint must be reported before a now-terminal execution.
+      // Uncertain transitions retain their former execution-first behavior,
+      // because the prepared state determines whether a no-op context must
+      // still advance its revision.
+      if (transition?.kind === 'uncertain') {
+        existing = this.requireCompatibleExecution(transition.record);
+        nextExecution = uncertainExecution(existing, transition.reasonCode, this.clock);
+      }
+      const checkpoint = this.nextCheckpoint(
+        nextContext,
+        input.expectedRevision,
+        transition?.kind === 'uncertain' && existing?.state === 'prepared',
+      );
+      if (transition?.kind === 'completed') {
+        existing = this.requireCompatibleExecution(transition.record);
+        nextExecution = completedExecution(existing, transition.result, this.clock);
+      }
+      const outbox = this.planOutbox(input.outboxEvents, this.clock.now().toISOString(), nextContext.runId);
+
+      if (nextExecution !== undefined) this.executionRecords.set(nextExecution.toolCallId, clone(nextExecution));
+      this.checkpointRecords.set(nextContext.runId, clone(checkpoint));
+      for (const record of outbox) this.outboxRecords.set(record.event.eventId, clone(record));
       return clone(checkpoint);
     });
   }
 
+  public enqueue(input: { events: readonly PendingAgentEventV2[]; createdAt: string }): Promise<readonly DurableOutboxRecord[]> {
+    return Promise.resolve().then(() => {
+      const records = this.planOutbox(input.events, input.createdAt);
+      for (const record of records) this.outboxRecords.set(record.event.eventId, clone(record));
+      return records.map((record) => clone(record));
+    });
+  }
+
+  public listPending(input: { runId?: string; limit: number }): Promise<readonly DurableOutboxRecord[]> {
+    return Promise.resolve().then(() => {
+      assertOutboxLimit(input.limit);
+      return [...this.outboxRecords.values()]
+        .filter((record) => record.publishedAt === undefined && (input.runId === undefined || record.event.runId === input.runId))
+        .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt) || left.event.eventId.localeCompare(right.event.eventId))
+        .slice(0, input.limit)
+        .map((record) => clone(record));
+    });
+  }
+
+  public markPublished(input: { eventId: string; publishedAt: string }): Promise<void> {
+    return Promise.resolve().then(() => {
+      assertTimestamp(input.publishedAt, 'publishedAt');
+      const existing = this.outboxRecords.get(input.eventId);
+      if (existing === undefined) throw new Error(`Outbox event not found: ${input.eventId}`);
+      if (existing.publishedAt === undefined) {
+        this.outboxRecords.set(input.eventId, { ...clone(existing), publishedAt: input.publishedAt });
+      }
+    });
+  }
+
   private requireCompatibleExecution(incoming: ToolExecutionRecord): ToolExecutionRecord {
-    const existing = this.executions.get(incoming.toolCallId);
+    const existing = this.executionRecords.get(incoming.toolCallId);
     if (existing === undefined) throw new Error(`prepared tool execution not found: ${incoming.toolCallId}`);
     if (!sameExecutionIdentity(existing, incoming)) throw new Error(`tool execution identity collision: ${incoming.toolCallId}`);
     return existing;
@@ -110,22 +186,47 @@ export class InMemoryDurableState implements VersionedCheckpointStore, ToolExecu
     expectedRevision: number | null,
     forceRevisionAdvance = false,
   ): StoredRunCheckpoint {
-    const current = this.checkpoints.get(context.runId);
-    const checksum = checkpointChecksum(context);
+    const normalized = parseAgentContext(context);
+    const current = this.checkpointRecords.get(normalized.runId);
+    const checksum = checkpointChecksum(normalized);
     const actualRevision = current?.revision ?? null;
     const validCreate = current === undefined && expectedRevision === null;
     const validUpdate = current !== undefined && expectedRevision === actualRevision;
     if (!validCreate && !validUpdate) {
-      throw new CheckpointConflictError(context.runId, expectedRevision, actualRevision);
+      throw new CheckpointConflictError(normalized.runId, expectedRevision, actualRevision);
     }
     if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return clone(current);
 
     return {
-      context: clone(context),
+      context: clone(normalized),
       revision: (actualRevision ?? 0) + 1,
       savedAt: this.clock.now().toISOString(),
       checksum,
     };
+  }
+
+  private planOutbox(
+    events: readonly PendingAgentEventV2[],
+    createdAt: string,
+    expectedRunId?: string,
+  ): DurableOutboxRecord[] {
+    assertTimestamp(createdAt, 'createdAt');
+    const eventIds = new Set<string>();
+    return events.map((event) => {
+      const normalized = parsePendingEvent(event);
+      if (expectedRunId !== undefined && normalized.runId !== expectedRunId) {
+        throw new Error(`Outbox event runId mismatch: expected ${expectedRunId}, received ${normalized.runId}`);
+      }
+      if (normalized.durability !== 'durable') throw new Error('Outbox accepts durable events only');
+      if (eventIds.has(normalized.eventId)) throw new EventIdConflictError(normalized.eventId);
+      eventIds.add(normalized.eventId);
+      const existing = this.outboxRecords.get(normalized.eventId);
+      if (existing !== undefined) {
+        if (!samePendingEvent(existing.event, normalized)) throw new EventIdConflictError(normalized.eventId);
+        return clone(existing);
+      }
+      return { event: normalized, enqueuedAt: createdAt };
+    });
   }
 }
 
@@ -307,6 +408,27 @@ function compareEvidencePosition(record: EvidenceRecord, cursor: EvidenceCursor)
 
 function sameJson(left: unknown, right: unknown): boolean {
   return checkpointChecksum(left) === checkpointChecksum(right);
+}
+
+function parsePendingEvent(event: PendingAgentEventV2): PendingAgentEventV2 {
+  const parsed = parseAgentEventV2({ ...clone(event), sequence: 1 });
+  const { sequence, ...pending } = parsed;
+  void sequence;
+  return pending;
+}
+
+function samePendingEvent(left: PendingAgentEventV2, right: PendingAgentEventV2): boolean {
+  return checkpointChecksum(left) === checkpointChecksum(right);
+}
+
+function assertOutboxLimit(limit: number): void {
+  if (!Number.isSafeInteger(limit) || limit <= 0) {
+    throw new RangeError('Outbox limit must be a positive safe integer');
+  }
+}
+
+function assertTimestamp(value: string, label: string): void {
+  if (!Number.isFinite(Date.parse(value))) throw new Error(`${label} must be an ISO timestamp`);
 }
 
 function clone<T>(value: T): T {

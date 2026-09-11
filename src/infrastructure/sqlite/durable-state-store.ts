@@ -1,9 +1,11 @@
 import type { Clock } from '../../contracts/common.js';
 import type { AgentContext } from '../../contracts/context.js';
-import { StoredDataCorruptionError } from '../../contracts/event-store.js';
+import { StoredDataCorruptionError, type PendingAgentEventV2 } from '../../contracts/event-store.js';
 import {
   CheckpointConflictError,
   type AgentStateUnitOfWork,
+  type DurableExecutionTransition,
+  type DurableTransitionUnitOfWork,
   type StoredRunCheckpoint,
   type ToolExecutionJournal,
   type ToolExecutionRecord,
@@ -16,8 +18,10 @@ import {
   parseToolExecutionRecord,
 } from '../../storage/durable-codec.js';
 import type { SqliteDatabase } from './database.js';
+import { enqueueOutboxEvents } from './event-outbox-store.js';
 
-const CHECKPOINT_SCHEMA_VERSION = 1;
+const LEGACY_CHECKPOINT_SCHEMA_VERSION = 1;
+const CHECKPOINT_SCHEMA_VERSION = 2;
 
 interface CheckpointRow {
   run_id: string;
@@ -26,6 +30,7 @@ interface CheckpointRow {
   status: string;
   stage: string;
   profile_id: string;
+  checkpoint_schema_version: number;
   checkpoint_json: string;
   checksum: string;
   created_at: string;
@@ -47,7 +52,7 @@ interface ExecutionRow {
 }
 
 /** SQLite control-plane implementation for checkpoint CAS and execution journal transitions. */
-export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork {
+export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolExecutionJournal, AgentStateUnitOfWork, DurableTransitionUnitOfWork {
   public constructor(
     private readonly database: SqliteDatabase,
     private readonly clock: Clock,
@@ -94,14 +99,12 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     execution: ToolExecutionRecord;
     result: ToolExecutionResult;
   }): Promise<StoredRunCheckpoint> {
-    return Promise.resolve().then(() => this.database.raw.transaction(() => {
-      const context = appendCompletedResult(input.context, input.result);
-      const checkpoint = this.writeCheckpoint(context, input.expectedRevision);
-      const existing = this.requireExecution(input.execution);
-      const execution = completedExecution(existing, input.result, this.clock);
-      this.updateExecution(execution);
-      return checkpoint;
-    }).immediate());
+    return this.commit({
+      expectedRevision: input.expectedRevision,
+      context: input.context,
+      execution: { kind: 'completed', record: input.execution, result: input.result },
+      outboxEvents: [],
+    });
   }
 
   public markToolUncertain(input: {
@@ -110,11 +113,49 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     execution: ToolExecutionRecord;
     reasonCode: string;
   }): Promise<StoredRunCheckpoint> {
+    return this.commit({
+      expectedRevision: input.expectedRevision,
+      context: input.context,
+      execution: { kind: 'uncertain', record: input.execution, reasonCode: input.reasonCode },
+      outboxEvents: [],
+    });
+  }
+
+  public commit(input: {
+    expectedRevision: number | null;
+    context: AgentContext;
+    execution?: DurableExecutionTransition;
+    outboxEvents: readonly PendingAgentEventV2[];
+  }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
-      const existing = this.requireExecution(input.execution);
-      const execution = uncertainExecution(existing, input.reasonCode, this.clock);
-      const checkpoint = this.writeCheckpoint(input.context, input.expectedRevision, existing.state === 'prepared');
-      this.updateExecution(execution);
+      const transition = input.execution;
+      const context = transition?.kind === 'completed'
+        ? appendCompletedResult(input.context, transition.result)
+        : structuredClone(input.context);
+      let existing: ToolExecutionRecord | undefined;
+      let execution: ToolExecutionRecord | undefined;
+      // Keep the established CAS-first result contract.  The checkpoint write
+      // remains inside this transaction, so an execution or outbox failure
+      // below rolls the write back without weakening atomicity.
+      if (transition?.kind === 'uncertain') {
+        existing = this.requireExecution(transition.record);
+        execution = uncertainExecution(existing, transition.reasonCode, this.clock);
+      }
+      const checkpoint = this.writeCheckpoint(
+        context,
+        input.expectedRevision,
+        transition?.kind === 'uncertain' && existing?.state === 'prepared',
+      );
+      if (transition?.kind === 'completed') {
+        existing = this.requireExecution(transition.record);
+        execution = completedExecution(existing, transition.result, this.clock);
+      }
+      if (execution !== undefined) this.updateExecution(execution);
+      enqueueOutboxEvents(
+        this.database,
+        { events: input.outboxEvents, createdAt: this.clock.now().toISOString() },
+        { expectedRunId: checkpoint.context.runId },
+      );
       return checkpoint;
     }).immediate());
   }
@@ -183,7 +224,8 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
 
   private checkpointRow(runId: string): CheckpointRow | undefined {
     return this.database.raw.prepare(`
-      SELECT run_id, revision, context_version, status, stage, profile_id, checkpoint_json, checksum, created_at, updated_at
+      SELECT run_id, revision, context_version, status, stage, profile_id, checkpoint_schema_version,
+             checkpoint_json, checksum, created_at, updated_at
       FROM agent_checkpoints WHERE run_id = ?
     `).get(runId) as CheckpointRow | undefined;
   }
@@ -221,14 +263,20 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
   private parseCheckpoint(row: CheckpointRow): StoredRunCheckpoint {
     try {
       const decoded: unknown = JSON.parse(row.checkpoint_json) as unknown;
+      const storedChecksum = checkpointChecksum(decoded);
       const context = parseAgentContext(decoded);
+      const checksum = row.checkpoint_schema_version === LEGACY_CHECKPOINT_SCHEMA_VERSION
+        ? storedChecksum
+        : checkpointChecksum(context);
       if (!Number.isSafeInteger(row.revision) || row.revision <= 0
+        || (row.checkpoint_schema_version !== LEGACY_CHECKPOINT_SCHEMA_VERSION
+          && row.checkpoint_schema_version !== CHECKPOINT_SCHEMA_VERSION)
         || context.runId !== row.run_id
         || context.contextVersion !== row.context_version
         || context.status !== row.status
         || context.stage !== row.stage
         || context.profileId !== row.profile_id
-        || checkpointChecksum(context) !== row.checksum) {
+        || checksum !== row.checksum) {
         throw new Error('checkpoint row integrity mismatch');
       }
       return { context, revision: row.revision, savedAt: row.updated_at, checksum: row.checksum };

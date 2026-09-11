@@ -1,4 +1,5 @@
 import type { AgentContext } from './context.js';
+import type { PendingAgentEventV2 } from './event-store.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
 
 export interface CheckpointStore {
@@ -68,11 +69,43 @@ export interface AgentStateUnitOfWork {
   }): Promise<StoredRunCheckpoint>;
 }
 
+export type DurableExecutionTransition =
+  | { kind: 'completed'; record: ToolExecutionRecord; result: ToolExecutionResult }
+  | { kind: 'uncertain'; record: ToolExecutionRecord; reasonCode: string };
+
+/** Couples a checkpoint/execution transition with the durable facts that describe it. */
+export interface DurableTransitionUnitOfWork {
+  commit(input: {
+    expectedRevision: number | null;
+    context: AgentContext;
+    execution?: DurableExecutionTransition;
+    outboxEvents: readonly PendingAgentEventV2[];
+  }): Promise<StoredRunCheckpoint>;
+}
+
+export interface DurableOutboxRecord {
+  event: PendingAgentEventV2;
+  enqueuedAt: string;
+  publishedAt?: string;
+}
+
+/** Durable post-commit event queue. Publishers must mark entries only after EventStore append succeeds. */
+export interface DurableEventOutbox {
+  enqueue(input: {
+    events: readonly PendingAgentEventV2[];
+    createdAt: string;
+  }): Promise<readonly DurableOutboxRecord[]>;
+  listPending(input: { runId?: string; limit: number }): Promise<readonly DurableOutboxRecord[]>;
+  markPublished(input: { eventId: string; publishedAt: string }): Promise<void>;
+}
+
 /** Injected durable control-plane ports used by the Harness without infrastructure coupling. */
 export interface DurableRunState {
   checkpoints: VersionedCheckpointStore;
   executions: ToolExecutionJournal;
   stateUnitOfWork: AgentStateUnitOfWork;
+  transitions: DurableTransitionUnitOfWork;
+  outbox: DurableEventOutbox;
 }
 
 export interface EvidenceRecord {

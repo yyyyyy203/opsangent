@@ -2,6 +2,8 @@ import { systemClock, type Clock } from '../../contracts/common.js';
 import type { EventStore, MessageStore } from '../../contracts/event-store.js';
 import type {
   AgentStateUnitOfWork,
+  DurableEventOutbox,
+  DurableTransitionUnitOfWork,
   EvidenceQueryStore,
   EvidenceStore,
   ToolExecutionJournal,
@@ -11,6 +13,7 @@ import type { ProjectionCheckpointStoreV2 } from '../../event/v2/projection-runn
 import type { ProjectionFailureSinkV2 } from '../../event/v2/event-publisher.js';
 import { SqliteDatabase } from './database.js';
 import { SqliteDurableStateStore } from './durable-state-store.js';
+import { SqliteEventOutboxStore } from './event-outbox-store.js';
 import { SqliteEventMessageStore } from './event-message-store.js';
 import { SqliteProjectionCheckpointStore, SqliteProjectionFailureSink } from './projection-store.js';
 import { SqliteEvidenceStore } from './sqlite-evidence-store.js';
@@ -30,6 +33,8 @@ export interface SqlitePersistenceBundle {
   checkpoints: VersionedCheckpointStore;
   executions: ToolExecutionJournal;
   stateUnitOfWork: AgentStateUnitOfWork;
+  transitions: DurableTransitionUnitOfWork;
+  outbox: DurableEventOutbox;
   evidence: EvidenceStore & EvidenceQueryStore;
   eventMessages: EventStore & MessageStore;
   projectionCheckpoints: ProjectionCheckpointStoreV2;
@@ -42,6 +47,7 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
   try {
     const clock = options.clock ?? systemClock;
     const durable = new SqliteDurableStateStore(database, clock);
+    const outbox = new SqliteEventOutboxStore(database);
     const eventMessages = new SqliteEventMessageStore(database);
     const evidence = new SqliteEvidenceStore(database, {
       ...(options.limits?.maxEvidenceRawBytes === undefined ? {} : { maxRawBytes: options.limits.maxEvidenceRawBytes }),
@@ -51,6 +57,8 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       checkpoints: durable,
       executions: durable,
       stateUnitOfWork: durable,
+      transitions: durable,
+      outbox,
       evidence,
       eventMessages,
       projectionCheckpoints: new SqliteProjectionCheckpointStore(database),
