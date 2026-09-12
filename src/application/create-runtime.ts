@@ -26,7 +26,9 @@ import { DefaultEvidenceRecorder, type EvidenceRecorder } from './evidence-recor
 import { HitlService } from './hitl-service.js';
 import { EventFactoryV2 } from '../event/v2/event-factory.js';
 import { EventPublisherV2, InMemoryProjectionFailureSink } from '../event/v2/event-publisher.js';
+import { DurableOutboxDispatcher } from '../event/v2/durable-outbox-dispatcher.js';
 import { InMemoryEventMessageStore } from '../event/v2/in-memory-event-store.js';
+import { OutboxedEventPublisher } from '../event/v2/outboxed-event-publisher.js';
 import { ReplayBufferV2 } from '../event/v2/replay-buffer.js';
 import { PublicEventProjectorV2 } from '../event/projectors/public-projector.js';
 import { V1CompatibilityProjector } from '../event/projectors/v1-projector.js';
@@ -91,6 +93,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const projectionFailuresV2 = persistence?.projectionFailures ?? new InMemoryProjectionFailureSink();
   const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
   const eventFactoryV2 = new EventFactoryV2(clock, ids);
+  const durableOutboxDispatcher = durableState === undefined
+    ? undefined
+    : new DurableOutboxDispatcher({ outbox: durableState.outbox, publisher: eventPublisherV2, clock });
+  const publishingV2 = durableOutboxDispatcher === undefined
+    ? eventPublisherV2
+    : new OutboxedEventPublisher({
+      outbox: durableState!.outbox,
+      dispatcher: durableOutboxDispatcher,
+      publisher: eventPublisherV2,
+      eventStore: eventStoreV2,
+      clock,
+    });
   const v1ProjectorV2 = new V1CompatibilityProjector();
   eventPublisherV2.subscribe({
     name: 'v1-event-bus',
@@ -107,10 +121,13 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   eventPublisherV2.subscribe({ name: 'message-assembler', project: (event) => messageAssemblerV2.apply(event).then(() => undefined) });
   const publicProjectorV2 = new PublicEventProjectorV2();
   // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
-  const ready = eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler', 'v1-event-bus'] });
+  const ready = Promise.resolve().then(async () => {
+    await durableOutboxDispatcher?.drainAll();
+    return eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler', 'v1-event-bus'] });
+  });
   const evidenceRecorder = options.evidenceRecorder ?? new DefaultEvidenceRecorder({
     evidence,
-    events: { factory: eventFactoryV2, publisher: eventPublisherV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
+    events: { factory: eventFactoryV2, publisher: publishingV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
   });
   const model = options.modelRetry === undefined
     ? options.model
@@ -119,7 +136,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       onFallback: async (info) => {
         await options.modelRetry?.onFallback?.(info);
         if (options.modelRetry?.fallback !== undefined) {
-          await eventPublisherV2.publish(eventFactoryV2.create('MODEL_FALLBACK_ACTIVATED', {
+          await publishingV2.publish(eventFactoryV2.create('MODEL_FALLBACK_ACTIVATED', {
             runId: info.runId,
             correlationId: `run:${info.runId}`,
             visibility: 'audit',
@@ -136,7 +153,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       },
       observer: options.modelRetry.observer ?? new CompositeModelAttemptObserver([
         new ObservabilityModelAttemptObserver(observability),
-        new V2ModelAttemptObserver({ factory: eventFactoryV2, publisher: eventPublisherV2, provider: options.modelProvider ?? 'configured', model: options.modelName ?? 'configured', correlationId: (runId) => `run:${runId}`, ids, now: () => clock.now().getTime() }),
+        new V2ModelAttemptObserver({ factory: eventFactoryV2, publisher: publishingV2, provider: options.modelProvider ?? 'configured', model: options.modelName ?? 'configured', correlationId: (runId) => `run:${runId}`, ids, now: () => clock.now().getTime() }),
       ]),
     });
   const toolkit = new Toolkit();
@@ -165,12 +182,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       actionMode: options.actionMode ?? 'dry_run',
       deferV2ResultPublication: durableState !== undefined,
     },
-    { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+    { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
     durableState?.executions,
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
-    model: new EventedChatModel(model, eventPublisherV2, eventFactoryV2, {
+    model: new EventedChatModel(model, publishingV2, eventFactoryV2, {
       provider: options.modelProvider ?? 'configured',
       model: options.modelName ?? 'configured',
       purpose: 'inspection',
@@ -193,7 +210,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ids,
     admission: new ToolAdmission(toolkit),
     ...(durableState === undefined ? {} : { durableState }),
-    v2Events: { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId: string) => `run:${runId}` },
+    v2Events: { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId: string) => `run:${runId}` },
   });
   return {
     agent,
@@ -206,7 +223,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     hitl: new HitlService(
       checkpoints,
       clock,
-      { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+      { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
       durableState,
     ),
     externalTools: new ExternalToolResultService(
@@ -217,7 +234,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       hooks,
       events,
       eventFactory,
-      { factory: eventFactoryV2, publisher: eventPublisherV2, correlationId: (runId) => `run:${runId}` },
+      { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
       durableState,
     ),
     eventStoreV2,

@@ -3,9 +3,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
+import type { AgentContext, Clock, PendingAgentEventV2 } from '../src/contracts/index.js';
+import { createSqlitePersistence } from '../src/infrastructure/sqlite/index.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
 const roots: string[] = [];
+const timestamp = '2026-09-11T00:00:00.000Z';
+const clock: Clock = { now: () => new Date(timestamp) };
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -45,6 +49,61 @@ describe('runtime durable persistence', () => {
       expect(await second.checkpoints.load(result.runId)).toMatchObject({ runId: result.runId, status: 'completed' });
       expect(await second.evidence.get('runtime-evidence-1')).toMatchObject({ raw: { marker: 'runtime-private-evidence' } });
       expect(await second.eventStoreV2.currentSequence(result.runId)).toBeGreaterThan(0);
+    } finally {
+      await second.close();
+    }
+  });
+
+  it('drains durable Outbox facts during restart readiness before projector replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-outbox-runtime-'));
+    roots.push(root);
+    const sqlitePath = join(root, 'runtime.sqlite');
+    const context: AgentContext = {
+      runId: 'run-outbox-restart',
+      status: 'running',
+      stage: 'evidence_collection',
+      profileId: 'group-buy-market',
+      messages: [],
+      pendingToolCalls: [],
+      confirmedToolCallIds: [],
+      rejectedToolCallIds: [],
+      executedActions: [],
+      evidenceIds: [],
+      missingEvidence: [],
+      budget: { startedAt: timestamp, maxIterations: 8, iteration: 1, maxToolCalls: 16, toolCallsUsed: 0, maxDurationMs: 60_000 },
+      contextVersion: 1,
+    };
+    const pending: PendingAgentEventV2<'RUN_STARTED'> = {
+      schemaVersion: 2,
+      eventId: 'event-outbox-restart',
+      type: 'RUN_STARTED',
+      payload: { profile: 'group-buy-market', trigger: 'manual', deadline: '2026-09-11T00:01:00.000Z', versionSnapshot: {} },
+      runId: context.runId,
+      correlationId: `run:${context.runId}`,
+      timestamp,
+      visibility: 'audit',
+      durability: 'durable',
+    };
+    const first = createSqlitePersistence({ path: sqlitePath, clock });
+    try {
+      await first.transitions.commit({ expectedRevision: null, context, outboxEvents: [pending] });
+      expect(await first.eventMessages.findById(pending.eventId)).toBeNull();
+      expect(await first.outbox.listPending({ runId: context.runId, limit: 10 })).toHaveLength(1);
+    } finally {
+      first.close();
+    }
+
+    const second = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      sqlitePath,
+      clock,
+    });
+    try {
+      await second.ready;
+      expect(await second.eventStoreV2.findById(pending.eventId)).toMatchObject({ type: 'RUN_STARTED', runId: context.runId });
+      expect(await second.durableState?.outbox.listPending({ runId: context.runId, limit: 10 })).toEqual([]);
     } finally {
       await second.close();
     }

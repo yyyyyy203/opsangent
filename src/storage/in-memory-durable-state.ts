@@ -157,7 +157,6 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       assertOutboxLimit(input.limit);
       return [...this.outboxRecords.values()]
         .filter((record) => record.publishedAt === undefined && (input.runId === undefined || record.event.runId === input.runId))
-        .sort((left, right) => left.enqueuedAt.localeCompare(right.enqueuedAt) || left.event.eventId.localeCompare(right.event.eventId))
         .slice(0, input.limit)
         .map((record) => clone(record));
     });

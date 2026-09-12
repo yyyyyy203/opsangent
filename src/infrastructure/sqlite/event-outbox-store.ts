@@ -39,14 +39,14 @@ export class SqliteEventOutboxStore implements DurableEventOutbox {
           SELECT event_id, run_id, event_json, state, created_at, published_at
           FROM durable_event_outbox
           WHERE state = 'pending'
-          ORDER BY created_at, event_id
+          ORDER BY rowid ASC
           LIMIT ?
         `).all(input.limit) as OutboxRow[]
         : this.database.raw.prepare(`
           SELECT event_id, run_id, event_json, state, created_at, published_at
           FROM durable_event_outbox
           WHERE state = 'pending' AND run_id = ?
-          ORDER BY created_at, event_id
+          ORDER BY rowid ASC
           LIMIT ?
         `).all(input.runId, input.limit) as OutboxRow[];
       return rows.map((row) => parseOutboxRow(row));

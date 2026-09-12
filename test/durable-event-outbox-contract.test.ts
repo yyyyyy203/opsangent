@@ -192,6 +192,21 @@ describe.each(['memory', 'sqlite'] as const)('%s durable event Outbox', (kind) =
     }
   });
 
+  it('lists same-timestamp pending events in their enqueue order', async () => {
+    const state = await backend(kind);
+    try {
+      await state.outbox.enqueue({
+        events: [event('z-first'), event('a-second')],
+        createdAt: now,
+      });
+
+      expect((await state.outbox.listPending({ runId: 'run-1', limit: 10 }))
+        .map((record) => record.event.eventId)).toEqual(['z-first', 'a-second']);
+    } finally {
+      state.close();
+    }
+  });
+
   it('is idempotent for an identical event ID and rejects divergent reuse', async () => {
     const state = await backend(kind);
     try {
