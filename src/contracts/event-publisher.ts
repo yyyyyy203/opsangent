@@ -24,3 +24,21 @@ export interface EventFactoryV2Like {
 export interface EventPublisherV2Like {
   publish(event: PendingAgentEventV2): Promise<AgentEventEnvelopeV2>;
 }
+
+/**
+ * Post-commit delivery port for durable V2 events.
+ *
+ * Core/application code uses this narrow interface instead of depending on
+ * the concrete outbox dispatcher or an infrastructure store.
+ */
+export interface DurableEventDispatcherV2Like {
+  drainRun(runId: string): Promise<readonly AgentEventEnvelopeV2[]>;
+}
+
+/** Shared dependency shape for application components that emit V2 events. */
+export interface EventPublisherV2Dependencies {
+  factory: EventFactoryV2Like;
+  publisher: EventPublisherV2Like;
+  correlationId: (runId: string) => string;
+  dispatcher?: DurableEventDispatcherV2Like;
+}

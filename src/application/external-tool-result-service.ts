@@ -9,8 +9,8 @@ import type {
   ToolResponse,
   ToolExecutionRecord,
   ToolCall,
-  EventFactoryV2Like,
-  EventPublisherV2Like,
+  EventPublisherV2Dependencies,
+  PendingAgentEventV2,
 } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { EventFactory } from '../event/event-factory.js';
@@ -33,7 +33,7 @@ export class ExternalToolResultService {
     private readonly hooks: HookExecutor,
     private readonly events: EventSink,
     private readonly eventFactory: EventFactory,
-    private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
+    private readonly v2Events?: EventPublisherV2Dependencies,
     private readonly durableState?: DurableRunState,
   ) {}
 
@@ -102,35 +102,8 @@ export class ExternalToolResultService {
     context.stage = pending.name === 'bash' ? 'verification' : context.stage;
     context.contextVersion += 1;
     this.storeTerminalPendingResult(context, replacement);
-    if (this.durableState === undefined || execution === undefined) {
-      if (tool.kind === 'action'
-        && interrupt.payload.mode === 'execute'
-        && replacement.status === 'success') {
-        await this.checkpoints.recordExecuted(pending, replacement);
-      }
-      await this.checkpoints.save(context);
-    } else {
-      try {
-        await this.durableState.stateUnitOfWork.commitToolResult({
-          expectedRevision: this.requireRevision(stored.revision, context.runId),
-          context,
-          execution,
-          result: replacement,
-        });
-      } catch (error) {
-        throw durableStorageError(error);
-      }
-    }
-    if (this.v2Events === undefined) {
-      await this.events.publish(this.eventFactory.create(
-        'TOOL_RESULT',
-        context.runId,
-        replacement,
-        `external-${pending.id}`,
-      ));
-    }
-    if (this.v2Events !== undefined) {
-      const pendingEvent = this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
+    const pendingEvents: PendingAgentEventV2[] = this.v2Events === undefined ? [] : [
+      this.v2Events.factory.create('EXTERNAL_EXECUTION_RESOLVED', {
         runId: context.runId,
         ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
         ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
@@ -143,9 +116,8 @@ export class ExternalToolResultService {
         requestId: `external:${context.runId}:${pending.id}`,
         resultBlock: submission.response.blocks[0] ?? { type: 'text', text: '' },
         externalExecutionType: 'host_submission',
-      });
-      await this.v2Events.publisher.publish(pendingEvent);
-      await this.v2Events.publisher.publish(this.v2Events.factory.create('TOOL_RESULT', {
+      }),
+      this.v2Events.factory.create('TOOL_RESULT', {
         runId: context.runId,
         ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
         ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
@@ -154,7 +126,41 @@ export class ExternalToolResultService {
         visibility: 'audit',
         durability: 'durable',
         toolCallId: pending.id,
-      }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }));
+      }, { result: replacement, durationMs: 0, evidenceIds: replacement.response?.evidenceIds ?? [] }),
+    ];
+    if (this.durableState === undefined || execution === undefined) {
+      if (tool.kind === 'action'
+        && interrupt.payload.mode === 'execute'
+        && replacement.status === 'success') {
+        await this.checkpoints.recordExecuted(pending, replacement);
+      }
+      await this.checkpoints.save(context);
+    } else {
+      if (pendingEvents.length > 0 && this.v2Events?.dispatcher === undefined) {
+        throw new Error(`Durable V2 event dispatcher is not configured: ${context.runId}`);
+      }
+      try {
+        await this.durableState.transitions.commit({
+          expectedRevision: this.requireRevision(stored.revision, context.runId),
+          context,
+          execution: { kind: 'completed', record: execution, result: replacement },
+          outboxEvents: pendingEvents,
+        });
+        if (pendingEvents.length > 0) await this.v2Events!.dispatcher!.drainRun(context.runId);
+      } catch (error) {
+        throw durableStorageError(error);
+      }
+    }
+    if (this.v2Events === undefined) {
+      await this.events.publish(this.eventFactory.create(
+        'TOOL_RESULT',
+        context.runId,
+        replacement,
+        `external-${pending.id}`,
+      ));
+    }
+    if (this.v2Events !== undefined && this.durableState === undefined) {
+      for (const event of pendingEvents) await this.v2Events.publisher.publish(event);
     }
   }
 

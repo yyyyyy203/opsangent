@@ -14,8 +14,8 @@ import type {
   AgentEventTypeV2,
   AgentErrorCode,
   PendingAgentEventV2,
-  EventFactoryV2Like,
-  EventPublisherV2Like,
+  DurableExecutionTransition,
+  EventPublisherV2Dependencies,
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
@@ -47,7 +47,9 @@ export interface AgentHarnessDependencies {
   ids: IdGenerator;
   admission: ToolAdmission;
   durableState?: DurableRunState;
-  v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: string | ((runId: string) => string) };
+  v2Events?: Omit<EventPublisherV2Dependencies, 'correlationId'> & {
+    correlationId: string | ((runId: string) => string);
+  };
 }
 
 type RunTerminalOutcome = 'completed' | 'paused' | 'failed' | 'cancelled';
@@ -90,15 +92,19 @@ export class AgentHarness implements DiagnosisAgent {
     context.replyId ??= this.dependencies.ids.next('reply');
     const newStreamId = this.dependencies.ids.next('stream');
     context.streamId = newStreamId;
-    await this.publishV2('RUN_RESUMED', context, {
-      checkpointVersion: String(loaded.revision ?? context.contextVersion), resumeReason: 'explicit_resume', newStreamId,
-    });
     const frame: RunExecutionFrame = {
       context,
       finalText: '',
       naturalExit: false,
       ...(loaded.revision === undefined ? {} : { checkpointRevision: loaded.revision }),
     };
+    await this.publishTransitionV2(frame, 'RUN_RESUMED', {
+      checkpointVersion: loaded.revision === undefined
+        ? String(context.contextVersion)
+        : String(loaded.revision + 1),
+      resumeReason: 'explicit_resume',
+      newStreamId,
+    });
     return yield* this.forwardRunStream(this.run(frame, signal, true));
   }
 
@@ -140,14 +146,13 @@ export class AgentHarness implements DiagnosisAgent {
     });
     try {
       if (!resumed) {
-        await this.publishV2('RUN_STARTED', frame.context, {
+        await this.publishTransitionV2(frame, 'RUN_STARTED', {
           profile: frame.context.profileId,
           trigger: 'manual',
           deadline: new Date(Date.parse(frame.context.budget.startedAt) + frame.context.budget.maxDurationMs).toISOString(),
           versionSnapshot: {},
         });
         yield* this.publishStream('RUN_STARTED', frame.context, { profileId: frame.context.profileId });
-        if (this.dependencies.durableState !== undefined) await this.saveCheckpoint(frame);
       }
 
       delete frame.context.failure;
@@ -184,7 +189,7 @@ export class AgentHarness implements DiagnosisAgent {
           retryable: failure.retryable,
         }, frame.activeStepId);
       }
-      await this.publishV2('RUN_FAILED', context, {
+      const failurePayload = {
         error: {
           code: failure.code,
           message: failure.message,
@@ -193,16 +198,32 @@ export class AgentHarness implements DiagnosisAgent {
         },
         stage: context.stage,
         recoverable: failure.retryable,
-      });
+      };
+      try {
+        await this.publishTransitionV2(frame, 'RUN_FAILED', failurePayload);
+      } catch (failureCommitError) {
+        if (this.dependencies.durableState === undefined || !(failureCommitError instanceof CheckpointConflictError)) throw failureCommitError;
+        const latest = await this.dependencies.durableState.checkpoints.load(context.runId);
+        if (latest === null) throw failureCommitError;
+        frame.context = latest.context;
+        frame.context.status = signal.aborted ? 'cancelled' : 'failed';
+        frame.context.failure = failure;
+        frame.checkpointRevision = latest.revision;
+        await this.publishTransitionV2(frame, 'RUN_FAILED', {
+          ...failurePayload,
+          stage: frame.context.stage,
+        });
+      }
       rootSpan.fail(error);
-      yield* this.publishStream('RUN_FAILED', context, {
+      yield* this.publishStream('RUN_FAILED', frame.context, {
         message: failure.message,
         code: failure.code,
         retryable: failure.retryable,
         ...(failureCategory === undefined ? {} : { category: failureCategory }),
       });
       frame.naturalExit = true;
-      return this.result(context, frame.finalText);
+      if (error instanceof CheckpointConflictError) throw error;
+      return this.result(frame.context, frame.finalText);
     } finally {
       if (!frame.naturalExit && frame.terminalOutcome === undefined) {
         const context = frame.context;
@@ -211,7 +232,7 @@ export class AgentHarness implements DiagnosisAgent {
         context.failure = cancellation;
         frame.terminalOutcome = 'cancelled';
         rootSpan.fail(cancellation);
-        await this.publishV2('RUN_CANCELLED', context, {
+        await this.publishTransitionV2(frame, 'RUN_CANCELLED', {
           actor: 'stream_consumer',
           reason: 'stream_consumer_closed',
           stage: context.stage,
@@ -294,7 +315,7 @@ export class AgentHarness implements DiagnosisAgent {
           finalText: frame.finalText,
           durationMs: this.elapsed(frame.context),
         };
-        await this.publishV2('RUN_FINISHED', frame.context, finishPayload);
+        await this.publishTransitionV2(frame, 'RUN_FINISHED', finishPayload);
         frame.terminalOutcome = 'completed';
         const result = this.result(frame.context, frame.finalText);
         rootSpan.end(result);
@@ -360,8 +381,7 @@ export class AgentHarness implements DiagnosisAgent {
             : 'awaiting_confirmation';
         }
         frame.context.contextVersion += 1;
-        await this.saveCheckpoint(frame);
-        yield* this.publishAdmissionRejectionsStream(frame.context, admission.rejected, stepId);
+        yield* this.publishAdmissionRejectionsStream(frame, admission.rejected, stepId);
         const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
         if (frame.context.status === 'awaiting_confirmation') {
           const risk = interruptRisk(batch.interrupt);
@@ -382,11 +402,11 @@ export class AgentHarness implements DiagnosisAgent {
           await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', frame.context, external, stepId, batch.interrupt.toolCallId);
           if (this.dependencies.v2Events !== undefined) yield* this.publishStream('EXTERNAL_TOOL_REQUESTED', frame.context, external, stepId);
         }
-        await this.publishV2('RUN_PAUSED', frame.context, {
+        await this.publishTransitionV2(frame, 'RUN_PAUSED', {
           interruptId: batch.interrupt.hookId,
           reason: batch.interrupt.interruptType,
           expiresAt,
-          checkpointVersion: this.checkpointVersion(frame),
+          checkpointVersion: this.nextCheckpointVersion(frame),
         }, stepId);
         await this.publishV2('STEP_COMPLETED', frame.context, {
           iteration: frame.context.budget.iteration,
@@ -413,7 +433,7 @@ export class AgentHarness implements DiagnosisAgent {
         await this.publishV2('STAGE_CHANGED', frame.context, { from: previousStage, to: nextStage, reason: 'tool_batch_completed' }, stepId);
       }
       await this.saveCheckpoint(frame);
-      yield* this.publishAdmissionRejectionsStream(frame.context, admission.rejected, stepId);
+      yield* this.publishAdmissionRejectionsStream(frame, admission.rejected, stepId);
       await this.publishV2('STEP_COMPLETED', frame.context, {
         iteration: frame.context.budget.iteration,
         exitDecision: 'continue',
@@ -426,7 +446,7 @@ export class AgentHarness implements DiagnosisAgent {
   }
 
   private async *resumePendingToolCallStream(frame: RunExecutionFrame, signal: AbortSignal): AsyncGenerator<AgentEvent, boolean> {
-    const context = frame.context;
+    let context = frame.context;
     if (context.pendingToolCalls.length === 0) return false;
     if (context.pendingInterrupt?.interruptType === 'external_tool_execution') return true;
     const pending = context.pendingToolCalls[0];
@@ -440,6 +460,7 @@ export class AgentHarness implements DiagnosisAgent {
       signal,
       this.completionCallbacks(frame),
     );
+    context = frame.context;
     if (batch.interrupt !== undefined) {
       if (batch.interrupt.interruptType !== 'external_tool_execution') {
         throw new Error(`Confirmed tool call was interrupted again: ${pending.id}`);
@@ -449,7 +470,6 @@ export class AgentHarness implements DiagnosisAgent {
       context.status = 'paused';
       if (context.pendingToolBatch !== undefined) context.pendingToolBatch.state = 'awaiting_external';
       context.contextVersion += 1;
-      await this.saveCheckpoint(frame);
       const expiresAt = batch.interrupt.expiresAt ?? new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
       const external = {
         requestId: `external:${context.runId}:${batch.interrupt.toolCallId}`,
@@ -459,11 +479,11 @@ export class AgentHarness implements DiagnosisAgent {
       };
       await this.publishV2('EXTERNAL_EXECUTION_REQUESTED', context, external, stepId, batch.interrupt.toolCallId);
       if (this.dependencies.v2Events !== undefined) yield* this.publishStream('EXTERNAL_TOOL_REQUESTED', context, external, stepId);
-      await this.publishV2('RUN_PAUSED', context, {
+      await this.publishTransitionV2(frame, 'RUN_PAUSED', {
         interruptId: batch.interrupt.hookId,
         reason: 'external_tool_execution',
         expiresAt,
-        checkpointVersion: this.checkpointVersion(frame),
+        checkpointVersion: this.nextCheckpointVersion(frame),
       }, stepId);
       yield* this.publishStream('RUN_PAUSED', context, { reason: 'external_tool_execution' }, stepId);
       return true;
@@ -485,7 +505,7 @@ export class AgentHarness implements DiagnosisAgent {
     signal: AbortSignal,
   ): AsyncGenerator<AgentEvent, boolean> {
     const durable = this.dependencies.durableState;
-    const context = frame.context;
+    let context = frame.context;
     const pending = context.pendingToolBatch;
     if (durable === undefined || pending === undefined || context.pendingInterrupt !== undefined) return false;
 
@@ -500,6 +520,7 @@ export class AgentHarness implements DiagnosisAgent {
 
     for (const completed of plan.completed) {
       const committed = await this.persistCompletedOutcome(frame, undefined, completed.result, completed.execution);
+      context = frame.context;
       if (committed) yield* this.publishStream('TOOL_RESULT', context, completed.result, pending.stepId);
     }
 
@@ -511,20 +532,11 @@ export class AgentHarness implements DiagnosisAgent {
       if (!context.missingEvidence.includes(missing)) context.missingEvidence.push(missing);
       context.contextVersion += 1;
       if (wasPrepared) {
-        const saved = await durable.stateUnitOfWork.markToolUncertain({
-          expectedRevision: this.requireCheckpointRevision(frame),
-          context,
-          execution: plan.execution,
-          reasonCode: 'prepared_action_recovery',
-        });
-        frame.checkpointRevision = saved.revision;
-        await this.publishV2('EXTERNAL_EXECUTION_UNCERTAIN', context, {
+        await this.publishTransitionV2(frame, 'EXTERNAL_EXECUTION_UNCERTAIN', {
           requestId: `external:${context.runId}:${plan.call.id}`,
           reason: 'prepared_action_recovery',
           requiredVerification: 'Verify the external action state before any retry.',
-        }, pending.stepId, plan.call.id);
-      } else {
-        await this.saveCheckpoint(frame);
+        }, pending.stepId, plan.call.id, { kind: 'uncertain', record: plan.execution, reasonCode: 'prepared_action_recovery' });
       }
       yield* this.publishRecoveredPause(frame, pending.stepId, `recovery-uncertain-${plan.call.id}`, 'external_execution_uncertain');
       return true;
@@ -536,7 +548,6 @@ export class AgentHarness implements DiagnosisAgent {
       const missing = `recovery_verification:${plan.call.id}`;
       if (!context.missingEvidence.includes(missing)) context.missingEvidence.push(missing);
       context.contextVersion += 1;
-      await this.saveCheckpoint(frame);
       yield* this.publishRecoveredPause(frame, pending.stepId, `recovery-verify-${plan.call.id}`, 'recovery_verification_required');
       return true;
     }
@@ -562,7 +573,6 @@ export class AgentHarness implements DiagnosisAgent {
           ? 'awaiting_external'
           : 'awaiting_confirmation';
         context.contextVersion += 1;
-        await this.saveCheckpoint(frame);
         yield* this.publishRecoveredPause(frame, pending.stepId, batch.interrupt.hookId, batch.interrupt.interruptType);
         return true;
       }
@@ -580,11 +590,11 @@ export class AgentHarness implements DiagnosisAgent {
     reason: string,
   ): AsyncGenerator<AgentEvent, void> {
     const expiresAt = new Date(this.dependencies.clock.now().getTime() + 300_000).toISOString();
-    await this.publishV2('RUN_PAUSED', frame.context, {
+    await this.publishTransitionV2(frame, 'RUN_PAUSED', {
       interruptId,
       reason,
       expiresAt,
-      checkpointVersion: this.checkpointVersion(frame),
+      checkpointVersion: this.nextCheckpointVersion(frame),
     }, stepId);
     yield* this.publishStream('RUN_PAUSED', frame.context, { reason }, stepId);
   }
@@ -645,36 +655,34 @@ export class AgentHarness implements DiagnosisAgent {
     const durable = this.dependencies.durableState;
     if (durable === undefined) return false;
     if (execution !== undefined) {
-      const saved = await durable.stateUnitOfWork.commitToolResult({
-        expectedRevision: this.requireCheckpointRevision(frame),
-        context: frame.context,
-        execution,
-        result,
-      });
-      this.appendPendingResult(frame.context, result);
-      frame.checkpointRevision = saved.revision;
-      await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), pending.stepId, result.toolCallId);
+      await this.publishTransitionV2(
+        frame,
+        'TOOL_RESULT',
+        toolResultPayload(result),
+        pending.stepId,
+        result.toolCallId,
+        { kind: 'completed', record: execution, result },
+      );
       return true;
     }
     this.appendPendingResult(frame.context, result);
-    await this.saveCheckpoint(frame);
-    await this.publishV2('TOOL_RESULT', frame.context, toolResultPayload(result), pending.stepId, result.toolCallId);
+    await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), pending.stepId, result.toolCallId);
     return true;
   }
 
   private async *publishAdmissionRejectionsStream(
-    context: AgentContext,
+    frame: RunExecutionFrame,
     results: readonly ToolExecutionResult[],
     stepId: string,
   ): AsyncGenerator<AgentEvent, void> {
     for (const result of results) {
-      await this.publishV2('TOOL_CALL_REJECTED', context, {
+      await this.publishV2('TOOL_CALL_REJECTED', frame.context, {
         toolName: result.toolName,
         gate: gateForError(result.error?.code),
         error: eventError(result.error),
       }, stepId, result.toolCallId);
-      await this.publishV2('TOOL_RESULT', context, toolResultPayload(result), stepId, result.toolCallId);
-      yield* this.publishStream('TOOL_RESULT', context, result, stepId);
+      await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), stepId, result.toolCallId);
+      yield* this.publishStream('TOOL_RESULT', frame.context, result, stepId);
     }
   }
 
@@ -736,8 +744,10 @@ export class AgentHarness implements DiagnosisAgent {
     return frame.checkpointRevision;
   }
 
-  private checkpointVersion(frame: RunExecutionFrame): string {
-    return String(frame.checkpointRevision ?? frame.context.contextVersion);
+  private nextCheckpointVersion(frame: RunExecutionFrame): string {
+    return frame.checkpointRevision === undefined
+      ? String(frame.context.contextVersion)
+      : String(frame.checkpointRevision + 1);
   }
 
   private replaceToolResult(context: AgentContext, replacement: ToolExecutionResult): void {
@@ -893,7 +903,58 @@ export class AgentHarness implements DiagnosisAgent {
   ): Promise<void> {
     const v2 = this.dependencies.v2Events;
     if (v2 === undefined) return Promise.resolve();
-    const pending: PendingAgentEventV2<T> = v2.factory.create(type, {
+    const pending = this.createPendingV2(type, context, payload, stepId, toolCallId);
+    return v2.publisher.publish(pending).then(() => undefined);
+  }
+
+  /**
+   * Commits a state-coupled durable fact and only then dispatches its outbox
+   * row. The generator-facing V1 event is yielded by the caller after this
+   * promise resolves, so both delivery paths observe the committed state.
+   */
+  private async publishTransitionV2<T extends AgentEventTypeV2>(
+    frame: RunExecutionFrame,
+    type: T,
+    payload: AgentEventPayloadMap[T],
+    stepId?: string,
+    toolCallId?: string,
+    execution?: DurableExecutionTransition,
+  ): Promise<void> {
+    const durable = this.dependencies.durableState;
+    const v2 = this.dependencies.v2Events;
+    if (durable === undefined) {
+      if (v2 !== undefined) await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId));
+      return;
+    }
+
+    const pending = v2 === undefined
+      ? undefined
+      : this.createPendingV2(type, frame.context, payload, stepId, toolCallId);
+    const dispatcher = v2?.dispatcher;
+    if (pending !== undefined && dispatcher === undefined) {
+      throw new Error(`Durable V2 event dispatcher is not configured: ${type}`);
+    }
+    const saved = await durable.transitions.commit({
+      expectedRevision: frame.checkpointRevision ?? null,
+      context: frame.context,
+      ...(execution === undefined ? {} : { execution }),
+      outboxEvents: pending === undefined ? [] : [pending],
+    });
+    frame.context = saved.context;
+    frame.checkpointRevision = saved.revision;
+    if (pending !== undefined && dispatcher !== undefined) await dispatcher.drainRun(frame.context.runId);
+  }
+
+  private createPendingV2<T extends AgentEventTypeV2>(
+    type: T,
+    context: AgentContext,
+    payload: AgentEventPayloadMap[T],
+    stepId?: string,
+    toolCallId?: string,
+  ): PendingAgentEventV2<T> {
+    const v2 = this.dependencies.v2Events;
+    if (v2 === undefined) throw new Error(`V2 event dependencies are not configured: ${type}`);
+    return v2.factory.create(type, {
       runId: context.runId,
       ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
@@ -904,7 +965,6 @@ export class AgentHarness implements DiagnosisAgent {
       ...(stepId === undefined ? {} : { stepId }),
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
-    return v2.publisher.publish(pending).then(() => undefined);
   }
 
   private elapsed(context: AgentContext): number {

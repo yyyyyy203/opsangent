@@ -181,6 +181,15 @@ describe('durable Harness recovery', () => {
         },
       }],
     });
+    const durable = runtime.durableState;
+    if (durable === undefined) throw new Error('Expected durable state for recovery.');
+    const commitEventTypes: string[][] = [];
+    const originalCommit = durable.transitions.commit.bind(durable.transitions);
+    durable.transitions.commit = async (input) => {
+      const saved = await originalCommit(input);
+      commitEventTypes.push(input.outboxEvents.map((event) => event.type));
+      return saved;
+    };
 
     try {
       const resumed = await drain(runtime.agent.resumeStream('run-action'));
@@ -188,6 +197,8 @@ describe('durable Harness recovery', () => {
       expect(actionCalls).toBe(0);
       expect((await runtime.eventStoreV2.readRun('run-action', 0, 100)).map((event) => event.type))
         .toContain('EXTERNAL_EXECUTION_UNCERTAIN');
+      expect(commitEventTypes.some((types) => types.includes('EXTERNAL_EXECUTION_UNCERTAIN'))).toBe(true);
+      expect(commitEventTypes.some((types) => types.includes('RUN_PAUSED'))).toBe(true);
     } finally {
       await runtime.close();
     }

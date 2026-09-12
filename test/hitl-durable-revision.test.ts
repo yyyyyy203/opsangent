@@ -123,6 +123,35 @@ describe('durable HITL revision control', () => {
     }
   });
 
+  it('couples a rejected confirmation and its terminal result in one durable transition', async () => {
+    const runtime = await createPausedBashRuntime();
+    const durable = runtime.durableState;
+    if (durable === undefined) throw new Error('Expected durable state for HITL.');
+    const commitEventTypes: string[][] = [];
+    const originalCommit = durable.transitions.commit.bind(durable.transitions);
+    durable.transitions.commit = async (input) => {
+      const saved = await originalCommit(input);
+      commitEventTypes.push(input.outboxEvents.map((event) => event.type));
+      return saved;
+    };
+    try {
+      const run = await runtime.agent.reply({ runId: 'run-reject-transition', message: 'inspect', profileId: 'group-buy-market' });
+      await runtime.hitl.decide({
+        runId: run.runId,
+        toolCallId: 'bash-1',
+        confirmed: false,
+        actor: 'operator',
+        decidedAt: timestamp,
+        reason: 'do not run this command',
+      });
+
+      const resolution = commitEventTypes.find((types) => types.includes('CONFIRMATION_RESOLVED'));
+      expect(resolution).toEqual(expect.arrayContaining(['CONFIRMATION_RESOLVED', 'TOOL_RESULT']));
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('persists expiration as the terminal result without publishing a confirmation resolution', async () => {
     const runtime = await createPausedBashRuntime();
     try {
@@ -154,6 +183,15 @@ describe('durable HITL revision control', () => {
 
   it('atomically journals a submitted external result and rejects a stale duplicate submission', async () => {
     const runtime = await createPausedBashRuntime();
+    const durable = runtime.durableState;
+    if (durable === undefined) throw new Error('Expected durable state for external execution.');
+    const commitEventTypes: string[][] = [];
+    const originalCommit = durable.transitions.commit.bind(durable.transitions);
+    durable.transitions.commit = async (input) => {
+      const saved = await originalCommit(input);
+      commitEventTypes.push(input.outboxEvents.map((event) => event.type));
+      return saved;
+    };
     try {
       const run = await runtime.agent.reply({ runId: 'run-external', message: 'inspect', profileId: 'group-buy-market' });
       const awaitingConfirmation = await runtime.durableState?.checkpoints.load(run.runId);
@@ -198,6 +236,7 @@ describe('durable HITL revision control', () => {
       ]);
       expect((await runtime.eventStoreV2.readRun(run.runId, 0, 200))
         .filter((event) => event.type === 'EXTERNAL_EXECUTION_RESOLVED')).toHaveLength(1);
+      expect(commitEventTypes.some((types) => types.includes('EXTERNAL_EXECUTION_RESOLVED') && types.includes('TOOL_RESULT'))).toBe(true);
     } finally {
       await runtime.close();
     }

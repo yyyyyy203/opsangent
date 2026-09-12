@@ -1,4 +1,4 @@
-import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventFactoryV2Like, EventPublisherV2Like, ToolCall, ToolExecutionResult } from '../contracts/index.js';
+import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventPublisherV2Dependencies, PendingAgentEventV2, ToolCall, ToolExecutionResult } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { AgentMessage } from '../contracts/message.js';
 
@@ -6,7 +6,7 @@ export class HitlService {
   public constructor(
     private readonly checkpoints: CheckpointStore,
     private readonly clock: Clock,
-    private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
+    private readonly v2Events?: EventPublisherV2Dependencies,
     private readonly durableState?: DurableRunState,
   ) {}
 
@@ -32,11 +32,15 @@ export class HitlService {
       context.rejectedToolCallIds.push(decision.toolCallId);
       context.status = 'running';
       context.contextVersion += 1;
-      await this.saveCheckpoint(context, stored.revision);
-      await this.publishV2('CONFIRMATION_EXPIRED', context, {
-        confirmationId: confirmationId(context.runId, decision.toolCallId), toolCallIds: [decision.toolCallId], expiredAt,
-      });
-      await this.publishV2('TOOL_RESULT', context, { result: replacement, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
+      const events = this.v2Events === undefined ? [] : [
+        this.createPendingV2('CONFIRMATION_EXPIRED', context, {
+          confirmationId: confirmationId(context.runId, decision.toolCallId),
+          toolCallIds: [decision.toolCallId],
+          expiredAt,
+        }),
+        this.createPendingV2('TOOL_RESULT', context, { result: replacement, durationMs: 0, evidenceIds: [] }, decision.toolCallId),
+      ];
+      await this.persistTransition(context, stored.revision, events);
       return;
     }
 
@@ -69,15 +73,17 @@ export class HitlService {
     }
     context.status = 'running';
     context.contextVersion += 1;
-    await this.saveCheckpoint(context, stored.revision);
-    await this.publishV2('CONFIRMATION_RESOLVED', context, {
+    const events: PendingAgentEventV2[] = this.v2Events === undefined ? [] : [this.createPendingV2('CONFIRMATION_RESOLVED', context, {
       decision: decision.confirmed ? 'approved' : 'rejected', actor: decision.actor, toolCallIds: [decision.toolCallId], decidedAt: decision.decidedAt,
-    });
+    })];
     if (!decision.confirmed) {
       const result = context.messages.flatMap((message) => message.blocks)
         .find((block) => block.type === 'tool_result' && block.result.toolCallId === decision.toolCallId);
-      if (result?.type === 'tool_result') await this.publishV2('TOOL_RESULT', context, { result: result.result, durationMs: 0, evidenceIds: [] }, decision.toolCallId);
+      if (result?.type === 'tool_result' && this.v2Events !== undefined) {
+        events.push(this.createPendingV2('TOOL_RESULT', context, { result: result.result, durationMs: 0, evidenceIds: [] }, decision.toolCallId));
+      }
     }
+    await this.persistTransition(context, stored.revision, events);
   }
 
   private replaceInterruptedResult(
@@ -117,6 +123,31 @@ export class HitlService {
     } catch (error) {
       throw durableStorageError(error);
     }
+  }
+
+  private async persistTransition(
+    context: AgentContext,
+    revision: number | undefined,
+    events: readonly PendingAgentEventV2[],
+  ): Promise<void> {
+    if (this.durableState !== undefined) {
+      if (events.length > 0 && this.v2Events?.dispatcher === undefined) {
+        throw new Error(`Durable V2 event dispatcher is not configured: ${context.runId}`);
+      }
+      try {
+        await this.durableState.transitions.commit({
+          expectedRevision: revision ?? null,
+          context,
+          outboxEvents: events,
+        });
+        if (events.length > 0) await this.v2Events!.dispatcher!.drainRun(context.runId);
+      } catch (error) {
+        throw durableStorageError(error);
+      }
+      return;
+    }
+    await this.saveCheckpoint(context, revision);
+    for (const event of events) await this.v2Events?.publisher.publish(event);
   }
 
   private pendingCall(context: AgentContext, toolCallId: string): ToolCall {
@@ -169,7 +200,18 @@ export class HitlService {
 
   private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], toolCallId?: string): Promise<void> {
     if (this.v2Events === undefined) return Promise.resolve();
-    const pending = this.v2Events.factory.create(type, {
+    const pending = this.createPendingV2(type, context, payload, toolCallId);
+    return this.v2Events.publisher.publish(pending).then(() => undefined);
+  }
+
+  private createPendingV2<T extends keyof AgentEventPayloadMap>(
+    type: T,
+    context: AgentContext,
+    payload: AgentEventPayloadMap[T],
+    toolCallId?: string,
+  ): PendingAgentEventV2<T> {
+    if (this.v2Events === undefined) throw new Error(`V2 event dependencies are not configured: ${type}`);
+    return this.v2Events.factory.create(type, {
       runId: context.runId,
       ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
@@ -179,7 +221,6 @@ export class HitlService {
       durability: 'durable',
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
-    return this.v2Events.publisher.publish(pending).then(() => undefined);
   }
 }
 
