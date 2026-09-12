@@ -11,12 +11,14 @@ import type {
   ToolCall,
   EventPublisherV2Dependencies,
   PendingAgentEventV2,
+  HookRegistryLike,
 } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
 import type { Toolkit } from '../tool/toolkit.js';
+import { toolInputDigest } from '../tool/schema.js';
 
 export interface ExternalToolResultSubmission {
   runId: string;
@@ -35,6 +37,7 @@ export class ExternalToolResultService {
     private readonly eventFactory: EventFactory,
     private readonly v2Events?: EventPublisherV2Dependencies,
     private readonly durableState?: DurableRunState,
+    private readonly hookRegistry?: HookRegistryLike,
   ) {}
 
   public async submit(submission: ExternalToolResultSubmission): Promise<void> {
@@ -47,6 +50,10 @@ export class ExternalToolResultService {
     }
     if (interrupt.toolCallId !== submission.toolCallId) {
       throw new Error(`External result does not match pending tool call: ${submission.toolCallId}`);
+    }
+    if (this.hookRegistry !== undefined) {
+      const validation = this.hookRegistry.validate(interrupt, this.clock.now());
+      if (!validation.valid) throw new Error(`Invalid pending interrupt: ${validation.reason}`);
     }
     const pending = this.pendingCall(context, submission.toolCallId);
 
@@ -61,6 +68,14 @@ export class ExternalToolResultService {
     };
     const tool = this.toolkit.get(pending.name);
     if (tool === undefined) throw new Error(`Tool not found while ingesting external result: ${pending.name}`);
+    const expectedInputDigest = typeof interrupt.payload.inputDigest === 'string' ? interrupt.payload.inputDigest : undefined;
+    if (expectedInputDigest !== undefined && expectedInputDigest !== toolInputDigest(tool, pending)) {
+      throw new Error(`External result input digest does not match pending tool call: ${pending.id}`);
+    }
+    const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((decision) => decision.toolCallId === pending.id);
+    if (governanceDecision !== undefined && governanceDecision.inputDigest !== toolInputDigest(tool, pending)) {
+      throw new Error(`External result governance digest does not match pending tool call: ${pending.id}`);
+    }
     let execution: ToolExecutionRecord | undefined;
     try {
       execution = await this.externalExecution(context, pending, tool.kind, stored.revision);

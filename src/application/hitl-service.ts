@@ -1,6 +1,8 @@
-import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventPublisherV2Dependencies, PendingAgentEventV2, ToolCall, ToolExecutionResult } from '../contracts/index.js';
+import type { AgentContext, AgentEventPayloadMap, CheckpointStore, Clock, ConfirmationDecision, DurableRunState, EventPublisherV2Dependencies, HookRegistryLike, PendingAgentEventV2, ToolCall, ToolExecutionResult } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.js';
 import type { AgentMessage } from '../contracts/message.js';
+import type { Toolkit } from '../tool/toolkit.js';
+import { toolInputDigest } from '../tool/schema.js';
 
 export class HitlService {
   public constructor(
@@ -8,6 +10,8 @@ export class HitlService {
     private readonly clock: Clock,
     private readonly v2Events?: EventPublisherV2Dependencies,
     private readonly durableState?: DurableRunState,
+    private readonly hookRegistry?: HookRegistryLike,
+    private readonly toolkit?: Toolkit,
   ) {}
 
   public async decide(decision: ConfirmationDecision): Promise<void> {
@@ -21,7 +25,27 @@ export class HitlService {
     if (interrupt.toolCallId !== decision.toolCallId) {
       throw new Error(`Confirmation does not match pending tool call: ${decision.toolCallId}`);
     }
+    if (this.hookRegistry !== undefined) {
+      const validation = this.hookRegistry.validate(interrupt, this.clock.now());
+      // Expiration is handled below so the existing CONFIRMATION_EXPIRED
+      // terminal-result transition remains authoritative.
+      if (!validation.valid && validation.reason !== 'expired') {
+        throw new Error(`Invalid pending interrupt: ${validation.reason}`);
+      }
+    }
     const pending = this.pendingCall(context, decision.toolCallId);
+    if (this.toolkit !== undefined) {
+      const tool = this.toolkit.get(pending.name);
+      if (tool === undefined) throw new Error(`Tool not found while confirming pending call: ${pending.name}`);
+      const currentDigest = toolInputDigest(tool, pending);
+      if (typeof interrupt.payload.inputDigest === 'string' && interrupt.payload.inputDigest !== currentDigest) {
+        throw new Error(`Confirmation input digest does not match pending tool call: ${pending.id}`);
+      }
+      const governanceDecision = context.pendingToolBatch?.governance?.decisions.find((candidate) => candidate.toolCallId === pending.id);
+      if (governanceDecision !== undefined && governanceDecision.inputDigest !== currentDigest) {
+        throw new Error(`Confirmation governance digest does not match pending tool call: ${pending.id}`);
+      }
+    }
     if (interrupt.expiresAt !== undefined && this.clock.now().getTime() >= Date.parse(interrupt.expiresAt)) {
       const expiredAt = this.clock.now().toISOString();
       const replacement = this.rejectedResult(pending, expiredAt, 'Confirmation expired.');

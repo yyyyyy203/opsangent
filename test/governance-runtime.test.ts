@@ -195,6 +195,7 @@ describe('batch governance evaluation', () => {
     expect(result.status).toBe('completed');
     expect(executed).toBe(false);
     expect(toolResults?.some((block) => block.type === 'tool_result' && block.result.error?.code === 'POLICY_DENIED')).toBe(true);
+    expect((await runtime.eventStoreV2.readRun(result.runId, 0, 100)).some((event) => event.type === 'TOOL_CALL_REJECTED')).toBe(true);
   });
 
   it('routes an allowed action through the existing confirmation Hook', async () => {

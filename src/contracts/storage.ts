@@ -1,4 +1,5 @@
 import type { AgentContext } from './context.js';
+import type { GovernanceEffect } from './hooks.js';
 import type { PendingAgentEventV2 } from './event-store.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
 
@@ -80,6 +81,8 @@ export interface DurableTransitionUnitOfWork {
     context: AgentContext;
     execution?: DurableExecutionTransition;
     outboxEvents: readonly PendingAgentEventV2[];
+    /** Observer effects are committed with the same transition when supported. */
+    governanceEffects?: readonly GovernanceEffect[];
   }): Promise<StoredRunCheckpoint>;
 }
 

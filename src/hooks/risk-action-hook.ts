@@ -1,7 +1,8 @@
 import type { Clock } from '../contracts/common.js';
-import type { HookContext, HookResult, ToolHook } from './types.js';
+import { toolInputDigest } from '../tool/schema.js';
+import type { ControlHook, HookContext, HookResult } from './types.js';
 
-export class RiskActionHook implements ToolHook {
+export class RiskActionHook implements ControlHook {
   public readonly id = 'risk-action';
 
   public constructor(
@@ -33,6 +34,7 @@ export class RiskActionHook implements ToolHook {
         payload: {
           toolName: context.tool.name,
           input: context.input,
+          inputDigest: toolInputDigest(context.tool, context.toolCall),
           severity: context.risk.severity,
           findings: context.risk.findings,
         },

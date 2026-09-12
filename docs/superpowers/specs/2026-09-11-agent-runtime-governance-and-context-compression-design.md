@@ -1,6 +1,6 @@
 # Agent Runtime Governance 与上下文压缩设计
 
-> 状态：总体技术路线已确认；增量 1 已完成实现与验收（当前基线 `7f50421`），增量 2 已完成实现与验收，增量 3–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方实施状态明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
+> 状态：总体技术路线已确认；增量 1、2、3 已完成实现与验收，增量 4–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方实施状态明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
 
 ## 1. 决策与范围
 
@@ -41,7 +41,7 @@
 - `GuardInput` 的新增字段保持可选以兼容旧调用；治理执行使用字段完整的 `GovernanceGuardInput`，Guardian 结果按注册顺序收敛。
 - Tool Admission 已在 Guard 前完成工具存在性、JSON、Schema 和语义校验。
 - 治理运行时按配置注入 `ProfileResolver`、`ImpactSurfaceProvider` 和 `GovernanceEvaluator`；默认未启用时不改变旧 GuardEngine 行为。
-- 默认 Hook 只有 `EvidenceBudgetHook` 与 `RiskActionHook`；HookExecutor 按注册顺序短路。
+- 默认控制通道按 `EvidenceBudgetHook -> PolicyDenyHook -> RiskActionHook` 固定顺序短路；兼容扩展仍由 `HookExecutor` 执行，生命周期观察者通过独立执行器隔离调用。
 - HITL 和外部执行恢复由 `pendingToolBatch`、Checkpoint revision、执行日志和应用服务共同处理。
 - ToolResult、Checkpoint、执行日志和耐久 Outbox 已通过窄用途 transition UoW 保证原子提交；V2 状态耦合事实在提交后由有界 Dispatcher 发布。
 - 当前只检测重复 toolCallId 和模型纠错预算耗尽，没有按工具、参数和结果签名检测循环。
@@ -77,10 +77,22 @@
 
 以下能力仍明确属于后续增量，当前尚未实现其行为：
 
-- 增量 3：控制型/观察型 Hook 重构及其完整生命周期语义。
 - 增量 4：循环签名、持久化计数、三级策略和 `LOOP_DETECTED` 运行时行为。当前只有事件契约。
 - 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入。
 - 增量 6：L1/L2 结构裁剪、compact summarizer、Validator、回滚和完整性恢复链路。
+
+### 2.3 增量 3 实施状态
+
+增量 3 已交付以下内容：
+
+- 控制型 Hook 与观察型生命周期 Observer 分离；控制通道固定按 `EvidenceBudgetHook -> PolicyDenyHook -> RiskActionHook` 顺序执行，并在首个 interrupt/abort 后短路。
+- `PolicyDenyHook` 将确定性 deny 转换为稳定 `POLICY_DENIED` ToolResult；控制 Hook 或兼容 Hook 返回 modifiedInput 后，Pipeline 重新执行 Schema/语义校验并校验 inputDigest，变更后 fail-closed。
+- Pipeline 为未知工具、输入校验失败、控制中断、外部执行等待、成功、失败、abort、timeout 和跳过构造不含原始输入/响应正文的生命周期事实。
+- `AuditHook`、`CheckpointHook`、`DiagnosisMemoryHook` 只生成脱敏 `GovernanceEffect`；Observer 以隔离方式执行，单个失败不改变真实 ToolResult，effects 在 Harness 的 DurableTransition UoW 边界内传递。
+- `HookRegistry` 只保留静态 Hook ID 和 interrupt 类型/有效期校验；确认、外部执行和恢复在未知 Hook、ToolCall 不一致、输入摘要不一致或过期时 fail-closed，不重放外部动作。
+- 保留旧 `ToolHook`/`HookExecutor` 构造兼容和既有 V1/V2 事件契约；未引入新的公共 EventType、Loop Detection、Context Compression 或真实写动作。
+
+增量 3 的验证覆盖控制短路、输入变更拒绝、Observer 必达/失败隔离、Durable effects 传递、恢复 fail-closed、确认过期和外部执行恢复；最终门禁结果为 66 个测试文件通过、1 个环境测试跳过，357 passed、1 skipped，且 `pnpm lint`、`pnpm typecheck`、`pnpm build` 和 `git diff --check` 均通过。
 
 ## 3. 不可破坏的架构约束
 
@@ -681,4 +693,4 @@ src/bootstrap/
 - 内存与 SQLite 实现通过相同契约测试。
 - 最终重新运行 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 
-本文审阅通过后，下一步只为“增量 1：共享契约与耐久事件”编写逐文件、逐测试实施计划；其余增量分别在前序验收后规划。
+增量 3 完成后，下一步应单独编写并审阅“增量 4：Loop Detection”的逐文件、逐测试实施计划；只有增量 4 通过合同测试和全量质量门禁后，才进入 L0/L1/L2 上下文压缩实现。

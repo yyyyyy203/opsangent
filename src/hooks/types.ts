@@ -23,6 +23,13 @@ export type HookResult =
   | { type: 'interrupt'; interrupt: SerializableInterrupt }
   | { type: 'abort'; error: AgentError };
 
+/** Control hooks are allowed to short-circuit execution; observers are not. */
+export interface ControlHook {
+  readonly id: string;
+  matches(context: HookContext): boolean;
+  beforeExecute(context: HookContext): Promise<HookResult>;
+}
+
 export interface ToolHook {
   readonly id: string;
   matches(context: HookContext): boolean;

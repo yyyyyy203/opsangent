@@ -8,6 +8,7 @@ export * from './event-publisher.js';
 export * from './event-v2/index.js';
 export * from './guard.js';
 export * from './governance.js';
+export * from './hooks.js';
 export * from './hitl.js';
 export * from './memory.js';
 export * from './message.js';

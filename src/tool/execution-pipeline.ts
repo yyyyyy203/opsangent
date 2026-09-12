@@ -13,14 +13,18 @@ import type {
   AgentEventPayloadMap,
   EventFactoryV2Like,
   EventPublisherV2Like,
+  LifecycleObserverResult,
   GovernanceEvaluator,
   ToolBatchGovernanceSnapshot,
   ResolvedRisk,
+  ToolLifecycleFact,
 } from '../contracts/index.js';
-import { toAgentError } from '../contracts/errors.js';
+import { checkpointChecksum, toAgentError } from '../contracts/index.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
+import type { ControlHookExecutor } from '../hooks/control-hook-executor.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
 import type { HookContext } from '../hooks/types.js';
+import type { LifecycleObserverExecutor } from '../hooks/lifecycle-observer-executor.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { CheckpointStore } from '../contracts/storage.js';
 import type { ExecutionOutcome } from './execution-types.js';
@@ -53,6 +57,8 @@ export class ToolExecutionPipeline {
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
     private readonly executionJournal?: ToolExecutionJournal,
     private readonly governanceEvaluator?: GovernanceEvaluator,
+    private readonly controlHooks?: ControlHookExecutor,
+    private readonly lifecycleObservers?: LifecycleObserverExecutor,
   ) {}
 
   public async evaluateBatchGovernance(
@@ -91,6 +97,12 @@ export class ToolExecutionPipeline {
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] },
       };
     }
+    const observation = await this.observeLifecycle(call, context, stepId, outcome);
+    outcome = {
+      ...outcome,
+      effects: observation.effects,
+      observerFailures: observation.failedObserverIds,
+    };
     if (!this.options.deferV2ResultPublication) {
       await this.publishV2('TOOL_RESULT', context, {
         result: outcome.result,
@@ -153,7 +165,7 @@ export class ToolExecutionPipeline {
       policyVersion: risk.policyVersion ?? 'guard-v1',
     }, stepId, call.id);
     if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
-    if (risk.disposition === 'deny') {
+    if (risk.disposition === 'deny' && this.controlHooks === undefined) {
       return {
         type: 'completed',
         result: this.result(call, 'failed', startedAt, undefined, {
@@ -173,14 +185,40 @@ export class ToolExecutionPipeline {
       input: normalizedCall.input,
       risk,
     };
+    const originalInputDigest = toolInputDigest(tool, normalizedCall);
+    const control = this.controlHooks === undefined
+      ? { type: 'continue' as const, modifiedInput: hookContext.input }
+      : await this.controlHooks.runBefore(hookContext);
+    if (control.type === 'abort') {
+      const status = control.error.code === 'POLICY_DENIED' ? 'failed' : 'aborted';
+      return { type: 'completed', result: this.result(call, status, startedAt, undefined, control.error), risk };
+    }
+    if (control.type === 'interrupt') {
+      const result = this.result(call, 'interrupted', startedAt);
+      return { type: 'interrupted', result, risk, interrupt: control.interrupt };
+    }
+    const controlledInput = this.revalidateHookInput(tool, normalizedCall, control.modifiedInput ?? hookContext.input, originalInputDigest);
+    if (!controlledInput.valid) {
+      return { type: 'completed', result: this.result(call, 'failed', startedAt, undefined, controlledInput.error), risk };
+    }
+    hookContext.input = controlledInput.input;
+    hookContext.toolCall = { ...normalizedCall, input: controlledInput.input };
+
     const pre = await this.hooks.runBefore(hookContext);
     if (pre.type === 'abort') {
-      return { type: 'completed', result: this.result(call, 'aborted', startedAt, undefined, pre.error), risk };
+      const status = pre.error.code === 'POLICY_DENIED' ? 'failed' : 'aborted';
+      return { type: 'completed', result: this.result(call, status, startedAt, undefined, pre.error), risk };
     }
     if (pre.type === 'interrupt') {
       const result = this.result(call, 'interrupted', startedAt);
       return { type: 'interrupted', result, risk, interrupt: pre.interrupt };
     }
+    const legacyInput = this.revalidateHookInput(tool, normalizedCall, pre.modifiedInput ?? hookContext.input, originalInputDigest);
+    if (!legacyInput.valid) {
+      return { type: 'completed', result: this.result(call, 'failed', startedAt, undefined, legacyInput.error), risk };
+    }
+    hookContext.input = legacyInput.input;
+    hookContext.toolCall = { ...normalizedCall, input: legacyInput.input };
 
     if (tool.kind === 'action' && await this.checkpoints.hasExecuted(call)) {
       return {
@@ -210,6 +248,7 @@ export class ToolExecutionPipeline {
         payload: {
           toolName: tool.name,
           input: hookContext.input,
+          inputDigest: toolInputDigest(tool, hookContext.toolCall),
           label: tool.userFacingLabel?.(hookContext.input) ?? tool.description,
           mode: tool.kind === 'action' ? this.options.actionMode : 'execute',
           risk,
@@ -343,6 +382,82 @@ export class ToolExecutionPipeline {
     };
   }
 
+  private revalidateHookInput(
+    tool: NonNullable<ReturnType<Toolkit['get']>>,
+    originalCall: ToolCall,
+    candidate: Record<string, unknown>,
+    originalInputDigest: string,
+  ): { valid: true; input: Record<string, unknown> } | { valid: false; error: NonNullable<ToolExecutionResult['error']> } {
+    const validation = validateToolInput(tool, candidate);
+    if (!validation.valid || validation.value === undefined) {
+      return {
+        valid: false,
+        error: validation.error ?? { code: 'INVALID_INPUT', message: `Invalid input for ${tool.name}.`, retryable: false },
+      };
+    }
+    const semantics = tool.validateSemantics?.(validation.value);
+    if (semantics !== undefined && !semantics.valid) return { valid: false, error: semantics.error };
+    const input = semantics?.value ?? validation.value;
+    const digest = toolInputDigest(tool, { ...originalCall, input });
+    if (digest !== originalInputDigest) {
+      return {
+        valid: false,
+        error: {
+          code: 'POLICY_DENIED',
+          message: 'Tool input changed after risk evaluation.',
+          retryable: false,
+          details: { category: 'risk_policy', reason: 'input_changed_after_risk' },
+        },
+      };
+    }
+    return { valid: true, input };
+  }
+
+  private async observeLifecycle(
+    call: ToolCall,
+    context: AgentContext,
+    stepId: string,
+    outcome: ExecutionOutcome,
+  ): Promise<LifecycleObserverResult> {
+    if (this.lifecycleObservers === undefined) return { effects: [], failedObserverIds: [] };
+    const tool = this.toolkit.get(call.name);
+    const fact: ToolLifecycleFact = {
+      schemaVersion: 1,
+      runId: context.runId,
+      stepId,
+      toolCallId: call.id,
+      toolName: call.name,
+      toolKind: tool?.kind ?? 'unknown',
+      source: tool === undefined ? 'unknown' : toolSource(tool) as ToolLifecycleFact['source'],
+      phase: lifecyclePhase(outcome.result),
+      outcome: outcome.result.status,
+      inputDigest: safeInputDigest(tool, call),
+      risk: {
+        disposition: outcome.risk.disposition ?? (outcome.risk.requireConfirmation ? 'confirm' : 'allow'),
+        severity: outcome.risk.severity,
+        policyVersion: outcome.risk.policyVersion ?? 'legacy/v1',
+        findingCount: outcome.risk.findings.length,
+      },
+      result: {
+        status: outcome.result.status,
+        evidenceIds: [...(outcome.result.response?.evidenceIds ?? [])],
+        hasResponse: outcome.result.response !== undefined,
+        ...(outcome.result.error?.code === undefined ? {} : { errorCode: outcome.result.error.code }),
+        ...(outcome.result.error?.retryable === undefined ? {} : { retryable: outcome.result.error.retryable }),
+      },
+      startedAt: outcome.result.startedAt,
+      finishedAt: outcome.result.finishedAt ?? outcome.result.startedAt,
+      ...(outcome.type === 'interrupted' ? { interruptType: outcome.interrupt.interruptType } : {}),
+    };
+    try {
+      return await this.lifecycleObservers.observe(fact);
+    } catch {
+      // The executor is expected to isolate observer failures. Keep the
+      // pipeline fail-safe if a custom executor violates that contract.
+      return { effects: [], failedObserverIds: ['lifecycle-observer-executor'] };
+    }
+  }
+
   private async resolveRisk(
     context: AgentContext,
     stepId: string,
@@ -436,4 +551,24 @@ function toolSource(tool: Tool): string {
 
 function toolContextDeadline(context: AgentContext): number {
   return Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
+}
+
+function lifecyclePhase(result: ToolExecutionResult): ToolLifecycleFact['phase'] {
+  if (result.error?.code === 'POLICY_DENIED') return 'governance';
+  if (result.error?.code === 'TOOL_NOT_FOUND'
+    || result.error?.code === 'INVALID_INPUT'
+    || result.error?.code === 'TOOL_ARGUMENTS_SCHEMA_INVALID'
+    || result.error?.code === 'TOOL_ARGUMENTS_SEMANTIC_INVALID'
+    || result.error?.code === 'TOOL_ARGUMENTS_PARSE_FAILED') return 'admission';
+  if (result.status === 'interrupted' || result.status === 'awaiting_external') return 'governance';
+  return result.status === 'success' || result.status === 'failed' || result.status === 'timeout'
+    || result.status === 'aborted' || result.status === 'skipped' ? 'completion' : 'execution';
+}
+
+function safeInputDigest(tool: Tool | undefined, call: ToolCall): string {
+  try {
+    return tool === undefined ? checkpointChecksum(call.input) : toolInputDigest(tool, call);
+  } catch {
+    return 'unavailable';
+  }
 }

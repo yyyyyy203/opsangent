@@ -1,7 +1,7 @@
 import { systemClock, type Clock } from '../contracts/common.js';
-import type { HookContext, HookResult, ToolHook } from './types.js';
+import type { ControlHook, HookContext, HookResult } from './types.js';
 
-export class EvidenceBudgetHook implements ToolHook {
+export class EvidenceBudgetHook implements ControlHook {
   public readonly id = 'evidence-budget';
 
   public constructor(private readonly clock: Clock = systemClock) {}

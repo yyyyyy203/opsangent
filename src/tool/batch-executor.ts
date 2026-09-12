@@ -14,6 +14,8 @@ export interface BatchExecutionResult {
 }
 
 export interface BatchExecutionCallbacks {
+  /** Receives every completed or interrupted outcome before completion handling. */
+  onOutcome?: (call: ToolCall, outcome: ExecutionOutcome) => Promise<void>;
   onCompleted?: (call: ToolCall, outcome: Extract<ExecutionOutcome, { type: 'completed' }>) => Promise<void>;
 }
 
@@ -128,6 +130,7 @@ export class ToolBatchExecutor {
     } finally {
       if (!pipelineCompleted) await pipelineStream.return(undefined as never).catch(() => undefined);
     }
+    await callbacks.onOutcome?.(call, outcome);
     if (outcome.type === 'completed') await callbacks.onCompleted?.(call, outcome);
     yield* terminalEvents;
     return outcome;

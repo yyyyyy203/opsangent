@@ -13,6 +13,7 @@ import type {
   Observability,
   ProfileResolver,
   Tool,
+  ToolLifecycleObserver,
 } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
@@ -27,7 +28,14 @@ import { McpGuardian } from '../guard/mcp-guardian.js';
 import { ProfileGuardian } from '../guard/profile-guardian.js';
 import { DeterministicRiskPolicy } from '../guard/risk-policy.js';
 import { EvidenceBudgetHook } from '../hooks/evidence-budget-hook.js';
+import { AuditHook } from '../hooks/audit-hook.js';
+import { CheckpointHook } from '../hooks/checkpoint-hook.js';
+import { ControlHookExecutor } from '../hooks/control-hook-executor.js';
+import { DiagnosisMemoryHook } from '../hooks/diagnosis-memory-hook.js';
 import { HookExecutor } from '../hooks/hook-executor.js';
+import { HookRegistry } from '../hooks/hook-registry.js';
+import { LifecycleObserverExecutor } from '../hooks/lifecycle-observer-executor.js';
+import { PolicyDenyHook } from '../hooks/policy-deny-hook.js';
 import { RiskActionHook } from '../hooks/risk-action-hook.js';
 import type { ToolHook } from '../hooks/types.js';
 import { NoopObservability } from '../observability/noop-observability.js';
@@ -73,6 +81,7 @@ export interface AgentRuntimeOptions {
   tools?: Tool[];
   guardians?: Guardian[];
   hooks?: ToolHook[];
+  lifecycleObservers?: ToolLifecycleObserver[];
   checkpoints?: CheckpointStore;
   evidence?: EvidenceStore;
   evidenceRecorder?: EvidenceRecorder;
@@ -216,11 +225,23 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       clock,
     })
     : undefined;
-  const hooks = new HookExecutor([
+  const hooks = new HookExecutor(options.hooks ?? []);
+  const controlHooks = new ControlHookExecutor([
     new EvidenceBudgetHook(clock),
+    new PolicyDenyHook(),
     new RiskActionHook(clock),
-    ...(options.hooks ?? []),
   ]);
+  const lifecycleObservers = new LifecycleObserverExecutor([
+    new AuditHook(),
+    new CheckpointHook(),
+    new DiagnosisMemoryHook(),
+    ...(options.lifecycleObservers ?? []),
+  ]);
+  const hookRegistry = new HookRegistry([...new Set([
+    'risk-action',
+    'external-tool-execution',
+    ...(options.hooks ?? []).map((hook) => hook.id),
+  ])]);
   const pipeline = new ToolExecutionPipeline(
     toolkit,
     guard,
@@ -238,6 +259,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
     durableState?.executions,
     governanceEvaluator,
+    controlHooks,
+    lifecycleObservers,
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
@@ -267,6 +290,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       ? { profileResolver: options.profileResolver }
       : {}),
     ...(durableState === undefined ? {} : { durableState }),
+    hookRegistry,
     v2Events: v2EventDependencies,
   });
   return {
@@ -282,6 +306,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       clock,
       v2EventDependencies,
       durableState,
+      hookRegistry,
+      toolkit,
     ),
     externalTools: new ExternalToolResultService(
       checkpoints,
@@ -293,6 +319,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       eventFactory,
       v2EventDependencies,
       durableState,
+      hookRegistry,
     ),
     eventStoreV2,
     replayV2,
@@ -300,6 +327,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     auditProjectorV2,
     projectionFailuresV2,
     projectionCheckpointsV2,
+    hookRegistry,
     auditProjectionRunnerV2,
     langSmithProjectionRunnerV2,
     ready,
