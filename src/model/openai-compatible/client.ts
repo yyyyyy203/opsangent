@@ -128,6 +128,7 @@ function toSdkRequest(request: OpenAICompatibleRequest): ChatCompletionCreatePar
     stream: true,
     ...(request.stream_options === undefined ? {} : { stream_options: { include_usage: request.stream_options.include_usage } }),
     ...(request.tools === undefined ? {} : { tools: request.tools.map(toSdkTool) }),
+    ...(request.tool_choice === undefined ? {} : { tool_choice: request.tool_choice }),
   };
 }
 

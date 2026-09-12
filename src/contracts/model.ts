@@ -28,6 +28,8 @@ export interface ModelCallOptions {
   replyId?: string;
   streamId?: string;
   deadline?: number;
+  /** Optional provider hint used after a deterministic loop HARD intervention. */
+  toolChoice?: 'none';
 }
 
 export interface ChatModel {

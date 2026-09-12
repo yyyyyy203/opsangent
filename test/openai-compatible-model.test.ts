@@ -43,6 +43,15 @@ describe('OpenAI-compatible ChatModel', () => {
     expect(result.returnValue).toMatchObject({ text: '诊断完成', usage: { inputTokens: 10, outputTokens: 2 }, finishReason: 'stop' });
   });
 
+  it('forwards the optional hard-stop tool choice to the provider request', async () => {
+    const client = new FakeClient([{ choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] }]);
+    const model = new OpenAICompatibleChatModel(client, { model: 'test-model' });
+
+    await drainModel(model.stream([], [], callOptions({ toolChoice: 'none' })));
+
+    expect(client.requests[0]?.tool_choice).toBe('none');
+  });
+
   it('does not call the client when the absolute deadline is already expired', async () => {
     const client = new FakeClient([]);
     const model = new OpenAICompatibleChatModel(client, { model: 'test-model', clock: () => 1_000 });

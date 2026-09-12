@@ -90,6 +90,14 @@ export class PublicEventProjectorV2 {
         return sanitizeRecord({ from: event.payload.from, to: event.payload.to, reason: safeText(event.payload.reason) });
       case 'REASONING_STARTED':
         return sanitizeRecord({ stage: event.payload.stage, objective: safeText(event.payload.objective) });
+      case 'LOOP_DETECTED':
+        return sanitizeRecord({
+          level: event.payload.level,
+          repeatCount: event.payload.repeatCount,
+          toolName: event.payload.toolName,
+          action: event.payload.action,
+          stage: event.payload.stage,
+        });
       case 'MESSAGE_STARTED':
         return sanitizeRecord({ messageId: event.payload.messageId, role: event.payload.role, status: event.payload.status });
       case 'CONTENT_BLOCK_STARTED':

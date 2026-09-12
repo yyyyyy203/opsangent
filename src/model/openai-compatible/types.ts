@@ -54,6 +54,7 @@ export interface OpenAICompatibleRequest {
   stream: true;
   stream_options?: { include_usage: true };
   tools?: readonly OpenAICompatibleTool[];
+  tool_choice?: 'none';
 }
 
 export interface OpenAICompatibleChoice {

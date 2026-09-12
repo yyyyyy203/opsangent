@@ -8,8 +8,11 @@ export interface AdmittedToolBatch {
   gates: Array<{ toolCallId: string; records: AdmissionGateRecord[] }>;
 }
 
+export type LoopCallBlocker = (call: ToolCall) => boolean;
+
 export function admitToolBatch(
   candidates: Array<ToolCall | RawToolCall>, context: AgentContext, admission: ToolAdmission, clock: Clock, signal: AbortSignal,
+  loopCallBlocker?: LoopCallBlocker,
 ): AdmittedToolBatch {
   const calls: ToolCall[] = [];
   const rejected: ToolExecutionResult[] = [];
@@ -30,14 +33,29 @@ export function admitToolBatch(
       else {
         try {
           const outcome = admission.validate(candidate);
-          gates.push({ toolCallId: candidate.id, records: outcome.gates });
           if (outcome.accepted) {
-            calls.push(outcome.call);
-            admitted.push(candidate.id);
-            if (outcome.repairs.length > 0) repairs.push({ toolCallId: candidate.id, stage: 'admission', repairs: outcome.repairs });
-            continue;
+            if (loopCallBlocker?.(outcome.call) === true) {
+              error = {
+                code: 'LOOP_DETECTED',
+                message: 'The same tool call signature is blocked after repeated execution.',
+                retryable: false,
+                details: { category: 'loop_detection', reason: 'same_call_signature_blocked' },
+              };
+              gates.push({
+                toolCallId: candidate.id,
+                records: [...outcome.gates, { gate: 'semantic_validation', outcome: 'rejected', errorCode: 'LOOP_DETECTED' }],
+              });
+            } else {
+              gates.push({ toolCallId: candidate.id, records: outcome.gates });
+              calls.push(outcome.call);
+              admitted.push(candidate.id);
+              if (outcome.repairs.length > 0) repairs.push({ toolCallId: candidate.id, stage: 'admission', repairs: outcome.repairs });
+              continue;
+            }
+          } else {
+            gates.push({ toolCallId: candidate.id, records: outcome.gates });
+            error = outcome.error;
           }
-          error = outcome.error;
         } catch {
           error = { code: 'TOOL_ERROR', message: 'Tool admission policy failed.', retryable: false };
         }

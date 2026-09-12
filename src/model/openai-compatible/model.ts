@@ -28,6 +28,7 @@ export class OpenAICompatibleChatModel implements ChatModel {
     const request = formatChatRequest(messages, tools, {
       model: this.config.model,
       includeUsage: this.config.includeUsage ?? true,
+      ...(callOptions.toolChoice === undefined ? {} : { toolChoice: callOptions.toolChoice }),
     });
     const upstreamOptions: OpenAICompatibleClientRequestOptions = {
       signal: combined.signal,

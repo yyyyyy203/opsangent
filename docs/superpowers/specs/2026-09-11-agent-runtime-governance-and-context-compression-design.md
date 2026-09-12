@@ -1,6 +1,6 @@
 # Agent Runtime Governance 与上下文压缩设计
 
-> 状态：总体技术路线已确认；增量 1、2、3 已完成实现与验收，增量 4–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方实施状态明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
+> 状态：总体技术路线已确认；增量 1、2、3、4 已完成实现与验收，增量 5、6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方实施状态明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
 
 ## 1. 决策与范围
 
@@ -44,10 +44,10 @@
 - 默认控制通道按 `EvidenceBudgetHook -> PolicyDenyHook -> RiskActionHook` 固定顺序短路；兼容扩展仍由 `HookExecutor` 执行，生命周期观察者通过独立执行器隔离调用。
 - HITL 和外部执行恢复由 `pendingToolBatch`、Checkpoint revision、执行日志和应用服务共同处理。
 - ToolResult、Checkpoint、执行日志和耐久 Outbox 已通过窄用途 transition UoW 保证原子提交；V2 状态耦合事实在提交后由有界 Dispatcher 发布。
-- 当前只检测重复 toolCallId 和模型纠错预算耗尽，没有按工具、参数和结果签名检测循环。
+- 增量 1 的验收基线只检测重复 toolCallId 和模型纠错预算耗尽；增量 4 已补齐按工具、参数和脱敏终态结果签名的循环检测。
 - `RuleBasedContextCompressor` 只有规则裁剪；当前标记为 L2 的路径并不调用摘要模型。
 - `pruneToolResult()` 已存在但没有接入生产工具执行路径。
-- Event V2 已有风险、HITL、压缩、记忆和数据源事件，但没有 `LOOP_DETECTED` 事实事件。
+- Event V2 已有 `LOOP_DETECTED` 事实契约，并由增量 4 接入运行时生产路径和公共安全投影。
 - SQLite EvidenceStore 只适合有界内联证据；几十 MiB 日志必须进入 Manifest + BlobStore 数据面。
 
 本文不得被解释为这些缺失能力已经实现。
@@ -77,7 +77,6 @@
 
 以下能力仍明确属于后续增量，当前尚未实现其行为：
 
-- 增量 4：循环签名、持久化计数、三级策略和 `LOOP_DETECTED` 运行时行为。当前只有事件契约。
 - 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入。
 - 增量 6：L1/L2 结构裁剪、compact summarizer、Validator、回滚和完整性恢复链路。
 
@@ -92,7 +91,21 @@
 - `HookRegistry` 只保留静态 Hook ID 和 interrupt 类型/有效期校验；确认、外部执行和恢复在未知 Hook、ToolCall 不一致、输入摘要不一致或过期时 fail-closed，不重放外部动作。
 - 保留旧 `ToolHook`/`HookExecutor` 构造兼容和既有 V1/V2 事件契约；未引入新的公共 EventType、Loop Detection、Context Compression 或真实写动作。
 
-增量 3 的验证覆盖控制短路、输入变更拒绝、Observer 必达/失败隔离、Durable effects 传递、恢复 fail-closed、确认过期和外部执行恢复；最终门禁结果为 66 个测试文件通过、1 个环境测试跳过，357 passed、1 skipped，且 `pnpm lint`、`pnpm typecheck`、`pnpm build` 和 `git diff --check` 均通过。
+增量 3 的验证覆盖控制短路、输入变更拒绝、Observer 必达/失败隔离、Durable effects 传递、恢复 fail-closed、确认过期和外部执行恢复；该增量验收时门禁结果为 66 个测试文件通过、1 个环境测试跳过，357 passed、1 skipped，且 `pnpm lint`、`pnpm typecheck`、`pnpm build` 和 `git diff --check` 均通过。
+
+### 2.4 增量 4 实施状态
+
+增量 4 已交付以下内容：
+
+- `src/agent/loop-detection/` 提供确定性调用/结果签名、终态计数、非连续重置、可界定历史和不可变 LoopState 转换；时间戳、随机 ID、游标、原始日志和正文不会进入签名。
+- 只统计 `success`、`failed`、`timeout` 和 `already_executed` 跳过结果；Admission 拒绝、中断、外部等待、Abort 和重新规划跳过均不计数。
+- 连续 3/5/7 次分别产生 WARN/HARD/FORCE_BREAK；HARD 将规范化调用签名加入 `blockedSignatures`，Admission 在 ToolRunner 前确定性拒绝；FORCE_BREAK 保留部分上下文和 `missingEvidence`，以不可重试 `LOOP_DETECTED` 失败结束 Run。
+- WARN 只向下一次模型调用追加动态尾部提示，不写入稳定消息；HARD 在模型契约支持时透传 `toolChoice: 'none'`，本地 Admission 阻断仍是安全边界。
+- 并行工具可继续并发执行，但 LoopState、ToolResult、生命周期 effects 和 `LOOP_DETECTED` 事件按原始 ToolCall 顺序处理；混合查询/动作批次只对实际执行的查询调用建立顺序栅栏，避免等待被重新规划的动作。
+- Durable 模式把 LoopState、ToolResult、执行日志、治理 effects 和循环事件放入同一 transition/outbox；恢复时只对执行日志中尚未写入当前 pending batch 的终态结果继续计数，避免重复计数。
+- `LOOP_DETECTED` 的公共投影只暴露等级、次数、工具名、动作和阶段，不暴露内部签名摘要；V1 兼容事件契约和 AsyncGenerator 顺序保持不变。
+
+增量 4 的验证结果：定向循环/模型/投影测试 37 passed；全量测试为 67 个测试文件通过、1 个真实 Prometheus 环境测试跳过，370 passed、1 skipped；`pnpm lint`、`pnpm typecheck`、`pnpm build` 和 `git diff --check` 均通过。覆盖签名稳定性、状态过滤、3/5/7 阈值、Admission 阻断、模型提示透传、公共投影、并行顺序、混合批次、Durable 同事务和跨 Checkpoint 恢复计数。
 
 ## 3. 不可破坏的架构约束
 
@@ -671,7 +684,7 @@ src/bootstrap/
 1. **共享契约与耐久事件**：governance 状态、Codec 迁移、`LOOP_DETECTED`、DurableTransition 和 Outbox。
 2. **Profile、Impact 与 Guard**：ProfileResolver、ImpactSurfaceProvider、四个 Guardian 和 RiskPolicy。
 3. **Hooks 重构**：控制 Hook、生命周期观察者、PolicyDeny、审计、CheckpointIntent 和记忆信号。
-4. **Loop Detection**：签名、持久化计数、三级策略、Model 可选 toolChoice 与 Admission 强制拦截。
+4. **Loop Detection（已完成）**：签名、持久化计数、三级策略、Model 可选 toolChoice 与 Admission 强制拦截。
 5. **L0 与大证据边界**：实现 ToolResultCompactor，并把本方案接到 `StreamingEvidenceRecorder`/`BlobStore` 公共接口。若该数据面尚未实现，先按既有 ELK 设计形成并执行独立实施计划；本增量不在上下文压缩计划中重复设计其内部实现。
 6. **L1/L2 与完整性**：结构裁剪、compact summarizer、Validator、回滚和全链路恢复测试。
 
@@ -693,4 +706,4 @@ src/bootstrap/
 - 内存与 SQLite 实现通过相同契约测试。
 - 最终重新运行 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build`。
 
-增量 3 完成后，下一步应单独编写并审阅“增量 4：Loop Detection”的逐文件、逐测试实施计划；只有增量 4 通过合同测试和全量质量门禁后，才进入 L0/L1/L2 上下文压缩实现。
+增量 4 已通过合同测试和全量质量门禁；下一步应单独编写并审阅“增量 5：L0 与大证据边界”的逐文件、逐测试实施计划，完成后再进入 L1/L2 上下文压缩实现。

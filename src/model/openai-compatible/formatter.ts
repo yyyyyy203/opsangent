@@ -25,7 +25,7 @@ type CorrectionDetailKey = typeof CORRECTION_DETAIL_KEYS[number];
 export function formatChatRequest(
   messages: readonly AgentMessage[],
   tools: readonly Tool[],
-  options: { model: string; includeUsage: boolean },
+  options: { model: string; includeUsage: boolean; toolChoice?: 'none' },
 ): OpenAICompatibleRequest {
   if (options.model.trim().length === 0) throw protocolFailure('Model name is required.');
 
@@ -39,6 +39,7 @@ export function formatChatRequest(
     stream: true,
     ...(options.includeUsage ? { stream_options: { include_usage: true as const } } : {}),
     ...(formattedTools === undefined ? {} : { tools: formattedTools }),
+    ...(options.toolChoice === undefined ? {} : { tool_choice: options.toolChoice }),
   };
 }
 

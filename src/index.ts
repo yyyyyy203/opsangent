@@ -3,6 +3,7 @@ export * from './api/event-stream-service.js';
 export * from './api/http-server.js';
 export * from './api/sse-encoder.js';
 export * from './agent/types.js';
+export * from './agent/loop-detection/index.js';
 export * from './application/hitl-service.js';
 export * from './application/external-tool-result-service.js';
 export * from './application/create-runtime.js';

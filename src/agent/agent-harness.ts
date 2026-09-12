@@ -37,6 +37,7 @@ import { admitToolBatch } from './admit-tool-batch.js';
 import { planPendingBatchRecovery } from './run-recovery.js';
 import { toolInputDigest } from '../tool/schema.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
+import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
 
 export interface AgentHarnessDependencies {
   model: ChatModel;
@@ -70,6 +71,8 @@ interface RunExecutionFrame {
   terminalOutcome?: RunTerminalOutcome;
   naturalExit: boolean;
   lifecycleEffects: Map<string, readonly GovernanceEffect[]>;
+  loopHint?: string;
+  loopTermination?: LoopIntervention;
 }
 
 export class AgentHarness implements DiagnosisAgent {
@@ -312,7 +315,9 @@ export class AgentHarness implements DiagnosisAgent {
       }, stepId);
       yield* this.publishStream('REASONING_STARTED', frame.context, { stage: frame.context.stage }, stepId);
 
-      const response = yield* this.reasonStream(frame.context, stepId, signal);
+      const loopHint = frame.loopHint;
+      delete frame.loopHint;
+      const response = yield* this.reasonStream(frame.context, stepId, signal, loopHint);
       const candidates: Array<ToolCall | RawToolCall> = [...response.toolCalls, ...(response.rawToolCalls ?? [])];
       const seenIds = new Set(frame.context.messages.flatMap((message) => message.blocks.flatMap((block) =>
         block.type === 'tool_call' || block.type === 'raw_tool_call' ? [block.call.id] : [])));
@@ -352,7 +357,14 @@ export class AgentHarness implements DiagnosisAgent {
           yield* this.publishStream('TOOL_CALL_CREATED', frame.context, { id: call.id, name: call.name }, stepId);
         }
       }
-      const admission = admitToolBatch(candidates, frame.context, this.dependencies.admission, this.dependencies.clock, signal);
+      const admission = admitToolBatch(
+        candidates,
+        frame.context,
+        this.dependencies.admission,
+        this.dependencies.clock,
+        signal,
+        (call) => this.isLoopCallBlocked(frame.context, call),
+      );
       for (const repair of admission.repairs) {
         const repairPayload = { toolCallId: repair.toolCallId, stage: repair.stage, repairs: repair.repairs };
         if (this.dependencies.v2Events === undefined) yield* this.publishStream('TOOL_PROGRESS', frame.context, repairPayload, stepId);
@@ -386,7 +398,7 @@ export class AgentHarness implements DiagnosisAgent {
         frame.context,
         stepId,
         signal,
-        this.completionCallbacks(frame),
+        this.completionCallbacks(frame, this.loopExecutableCalls(admission.calls), stepId),
       );
       const results = [...admission.rejected, ...batch.results];
       for (const deferred of batch.deferredActions) results.push(this.deferredResult(deferred));
@@ -394,6 +406,7 @@ export class AgentHarness implements DiagnosisAgent {
       await this.publishPolicyRejections(frame, batch.results, stepId);
       const orderedResults = candidates.flatMap((candidate) => results.filter((result) => result.toolCallId === candidate.id));
       this.appendToolExchange(frame.context, response.text, candidates, orderedResults);
+      this.throwIfLoopTerminated(frame);
 
       if (batch.interrupt !== undefined) {
         frame.context.status = batch.interrupt.interruptType === 'external_tool_execution' ? 'paused' : 'awaiting_confirmation';
@@ -487,7 +500,7 @@ export class AgentHarness implements DiagnosisAgent {
       context,
       stepId,
       signal,
-      this.completionCallbacks(frame),
+      this.completionCallbacks(frame, [pending], stepId),
     );
     context = frame.context;
     if (batch.interrupt !== undefined) {
@@ -522,6 +535,7 @@ export class AgentHarness implements DiagnosisAgent {
     const result = batch.results[0];
     if (result === undefined) throw new Error(`Confirmed tool call produced no result: ${pending.id}`);
     this.replaceToolResult(context, result);
+    this.throwIfLoopTerminated(frame);
     context.pendingToolCalls = [];
     delete context.pendingInterrupt;
     context.status = 'running';
@@ -624,10 +638,15 @@ export class AgentHarness implements DiagnosisAgent {
     if (plan.type === 'storage_error') throw Object.assign(new Error(plan.error.message), plan.error);
 
     for (const completed of plan.completed) {
-      const committed = await this.persistCompletedOutcome(frame, undefined, completed.result, completed.execution);
+      const recoveredCall = pending.calls.find((call) => call.id === completed.result.toolCallId);
+      const intervention = completed.execution === undefined || recoveredCall === undefined
+        ? undefined
+        : this.recordLoopOutcome(frame, recoveredCall, completed.result, pending.stepId);
+      const committed = await this.persistCompletedOutcome(frame, recoveredCall, completed.result, completed.execution, undefined, intervention);
       context = frame.context;
       if (committed) yield* this.publishStream('TOOL_RESULT', context, completed.result, pending.stepId);
     }
+    this.throwIfLoopTerminated(frame);
 
     if (plan.type === 'uncertain') {
       const wasPrepared = plan.execution.state === 'prepared';
@@ -663,9 +682,10 @@ export class AgentHarness implements DiagnosisAgent {
         context,
         pending.stepId,
         signal,
-        this.completionCallbacks(frame),
+      this.completionCallbacks(frame, this.loopExecutableCalls(plan.calls), pending.stepId),
       );
       for (const result of batch.results) await this.persistUnjournaledResult(frame, result);
+      this.throwIfLoopTerminated(frame);
       if (batch.interrupt !== undefined) {
         context.status = batch.interrupt.interruptType === 'external_tool_execution' ? 'paused' : 'awaiting_confirmation';
         context.pendingInterrupt = batch.interrupt;
@@ -717,22 +737,96 @@ export class AgentHarness implements DiagnosisAgent {
     frame.context.contextVersion += 1;
   }
 
-  private completionCallbacks(frame: RunExecutionFrame): BatchExecutionCallbacks {
-    let tail: Promise<void> = Promise.resolve();
+  private completionCallbacks(frame: RunExecutionFrame, calls: readonly ToolCall[], stepId: string): BatchExecutionCallbacks {
+    const indexes = new Map(calls.map((call, index) => [call.id, index]));
+    const ready = calls.map(() => deferred());
+    const done = calls.map(() => deferred());
+    let failure: Error | undefined;
     return {
       onOutcome: (call, outcome) => {
         frame.lifecycleEffects.set(call.id, outcome.effects ?? []);
+        const index = indexes.get(call.id);
+        if (index === undefined) return Promise.resolve();
+        ready[index]?.resolve();
+        if (outcome.type !== 'completed') done[index]?.resolve();
         return Promise.resolve();
       },
-      onCompleted: (call, outcome) => {
-        if (this.dependencies.durableState === undefined) return Promise.resolve();
-        const completion = tail.then(async () => {
-          await this.persistCompletedOutcome(frame, call, outcome.result, outcome.execution, outcome.effects);
-        });
-        tail = completion.then(() => undefined, () => undefined);
-        return completion;
+      onCompleted: async (call, outcome) => {
+        const index = indexes.get(call.id);
+        if (index === undefined) return;
+        await ready[index]!.promise;
+        if (index > 0) await done[index - 1]!.promise;
+        if (failure !== undefined) throw failure;
+        try {
+          const intervention = this.recordLoopOutcome(frame, call, outcome.result, stepId);
+          await this.persistCompletedOutcome(frame, call, outcome.result, outcome.execution, outcome.effects, intervention);
+          if (intervention !== undefined && this.dependencies.durableState === undefined) {
+            await this.publishV2('LOOP_DETECTED', frame.context, loopEventPayload(intervention), stepId, call.id);
+          }
+        } catch (error) {
+          failure = error instanceof Error ? error : new Error(String(error));
+          throw failure;
+        } finally {
+          done[index]?.resolve();
+        }
       },
     };
+  }
+
+  private recordLoopOutcome(
+    frame: RunExecutionFrame,
+    call: ToolCall,
+    result: ToolExecutionResult,
+    stepId: string,
+  ): LoopIntervention | undefined {
+    const tool = this.dependencies.toolkit.get(call.name);
+    if (tool === undefined) return undefined;
+    const capturedAt = frame.context.governance?.profile.capturedAt ?? this.dependencies.clock.now().toISOString();
+    const governance = frame.context.governance ?? createInitialRunGovernanceState({
+      profileId: frame.context.profileId,
+      capturedAt,
+    });
+    const decision = recordLoopSample(governance.loop, {
+      stage: frame.context.stage,
+      tool,
+      call,
+      result,
+      stepId,
+      recordedAt: result.finishedAt ?? this.dependencies.clock.now().toISOString(),
+    });
+    if (!decision.counted) return undefined;
+    frame.context.governance = { ...governance, loop: decision.state };
+    if (decision.intervention !== undefined) {
+      frame.loopHint = loopHint(decision.intervention);
+      if (decision.intervention.level === 'force_break') frame.loopTermination = decision.intervention;
+    }
+    return decision.intervention;
+  }
+
+  private isLoopCallBlocked(context: AgentContext, call: ToolCall): boolean {
+    const tool = this.dependencies.toolkit.get(call.name);
+    const loop = context.governance?.loop;
+    return tool !== undefined && loop !== undefined
+      && isLoopCallBlocked(loop, createLoopCallSignature({ stage: context.stage, tool, call }));
+  }
+
+  private loopExecutableCalls(calls: readonly ToolCall[]): ToolCall[] {
+    const hasAction = calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind === 'action');
+    const hasEvidence = calls.some((call) => this.dependencies.toolkit.get(call.name)?.kind !== 'action');
+    return hasAction && hasEvidence
+      ? calls.filter((call) => this.dependencies.toolkit.get(call.name)?.kind !== 'action')
+      : [...calls];
+  }
+
+  private throwIfLoopTerminated(frame: RunExecutionFrame): void {
+    const termination = frame.loopTermination;
+    if (termination === undefined) return;
+    const missingEvidence = `loop_detection:${termination.toolName}`;
+    if (!frame.context.missingEvidence.includes(missingEvidence)) frame.context.missingEvidence.push(missingEvidence);
+    frame.context.pendingToolCalls = [];
+    delete frame.context.pendingToolBatch;
+    frame.context.contextVersion += 1;
+    throw new LoopDetectionError(termination);
   }
 
   private async persistUnjournaledResult(frame: RunExecutionFrame, result: ToolExecutionResult): Promise<void> {
@@ -749,6 +843,7 @@ export class AgentHarness implements DiagnosisAgent {
     result: ToolExecutionResult,
     execution?: ToolExecutionRecord,
     effects?: readonly GovernanceEffect[],
+    intervention?: LoopIntervention,
   ): Promise<boolean> {
     const pending = frame.context.pendingToolBatch;
     if (pending === undefined || !pending.calls.some((candidate) => candidate.id === result.toolCallId)) return false;
@@ -764,6 +859,9 @@ export class AgentHarness implements DiagnosisAgent {
     }
     const durable = this.dependencies.durableState;
     if (durable === undefined) return false;
+    const loopEvents = this.dependencies.v2Events === undefined || intervention === undefined
+      ? []
+      : [this.createPendingV2('LOOP_DETECTED', frame.context, loopEventPayload(intervention), pending.stepId, result.toolCallId)];
     if (execution !== undefined) {
       await this.publishTransitionV2(
         frame,
@@ -773,12 +871,13 @@ export class AgentHarness implements DiagnosisAgent {
         result.toolCallId,
         { kind: 'completed', record: execution, result },
         effects,
+        loopEvents,
       );
       frame.lifecycleEffects.delete(result.toolCallId);
       return true;
     }
     this.appendPendingResult(frame.context, result);
-    await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), pending.stepId, result.toolCallId, undefined, effects);
+    await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), pending.stepId, result.toolCallId, undefined, effects, loopEvents);
     frame.lifecycleEffects.delete(result.toolCallId);
     return true;
   }
@@ -890,13 +989,22 @@ export class AgentHarness implements DiagnosisAgent {
     }
   }
 
-  private async *reasonStream(context: AgentContext, stepId: string, signal: AbortSignal): AsyncGenerator<AgentEvent, ModelResponse> {
+  private async *reasonStream(context: AgentContext, stepId: string, signal: AbortSignal, loopHint?: string): AsyncGenerator<AgentEvent, ModelResponse> {
     const span = this.dependencies.observability.startSpan({
       name: 'model.reasoning', kind: 'llm', runId: context.runId, stepId,
       attributes: { stage: context.stage, iteration: context.budget.iteration },
     });
     const deadline = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
-    const stream = this.dependencies.model.stream(context.messages, this.dependencies.toolkit.list(), {
+    const messages = loopHint === undefined ? context.messages : [
+      ...context.messages,
+      {
+        id: `loop-hint:${stepId}`,
+        role: 'system' as const,
+        createdAt: this.dependencies.clock.now().toISOString(),
+        blocks: [{ type: 'text' as const, text: loopHint }],
+      },
+    ];
+    const stream = this.dependencies.model.stream(messages, this.dependencies.toolkit.list(), {
       signal,
       runId: context.runId,
       stepId,
@@ -904,6 +1012,7 @@ export class AgentHarness implements DiagnosisAgent {
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       deadline,
+      ...(context.governance?.loop.level === 'hard' ? { toolChoice: 'none' as const } : {}),
     });
     let completed = false;
     try {
@@ -1050,11 +1159,15 @@ export class AgentHarness implements DiagnosisAgent {
     toolCallId?: string,
     execution?: DurableExecutionTransition,
     governanceEffects?: readonly GovernanceEffect[],
+    additionalEvents: readonly PendingAgentEventV2[] = [],
   ): Promise<void> {
     const durable = this.dependencies.durableState;
     const v2 = this.dependencies.v2Events;
     if (durable === undefined) {
-      if (v2 !== undefined) await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId));
+      if (v2 !== undefined) {
+        await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId));
+        for (const event of additionalEvents) await v2.publisher.publish(event);
+      }
       return;
     }
 
@@ -1070,7 +1183,7 @@ export class AgentHarness implements DiagnosisAgent {
       context: frame.context,
       ...(execution === undefined ? {} : { execution }),
       ...(governanceEffects === undefined ? {} : { governanceEffects }),
-      outboxEvents: pending === undefined ? [] : [pending],
+      outboxEvents: pending === undefined ? [] : [pending, ...additionalEvents],
     });
     frame.context = saved.context;
     frame.checkpointRevision = saved.revision;
@@ -1096,7 +1209,7 @@ export class AgentHarness implements DiagnosisAgent {
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       correlationId: typeof v2.correlationId === 'function' ? v2.correlationId(context.runId) : v2.correlationId,
-      visibility: type.startsWith('RUN_') || type.startsWith('STEP_') || type === 'REASONING_STARTED' ? 'public' : 'audit',
+      visibility: type.startsWith('RUN_') || type.startsWith('STEP_') || type === 'REASONING_STARTED' || type === 'LOOP_DETECTED' ? 'public' : 'audit',
       durability: 'durable',
       ...(stepId === undefined ? {} : { stepId }),
       ...(toolCallId === undefined ? {} : { toolCallId }),
@@ -1181,4 +1294,43 @@ function hasTerminalToolResult(context: AgentContext, toolCallId: string): boole
       && block.result.status !== 'interrupted'
       && block.result.status !== 'awaiting_external'
   )));
+}
+
+class LoopDetectionError extends Error {
+  public readonly code = 'LOOP_DETECTED' as const;
+  public readonly retryable = false;
+  public readonly details: Record<string, unknown>;
+
+  public constructor(intervention: LoopIntervention) {
+    super('Repeated tool execution detected; the diagnosis stopped safely.');
+    this.name = 'LoopDetectionError';
+    this.details = {
+      category: 'loop_detection',
+      repeatCount: intervention.repeatCount,
+      toolName: intervention.toolName,
+    };
+  }
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => { resolvePromise = resolve; });
+  return { promise, resolve: () => resolvePromise?.() };
+}
+
+function loopEventPayload(intervention: LoopIntervention): AgentEventPayloadMap['LOOP_DETECTED'] {
+  return {
+    level: intervention.level,
+    repeatCount: intervention.repeatCount,
+    toolName: intervention.toolName,
+    signatureDigest: intervention.signatureDigest,
+    action: intervention.action,
+    stage: intervention.stage,
+  };
+}
+
+function loopHint(intervention: LoopIntervention): string {
+  return intervention.level === 'warn'
+    ? `检测到 ${intervention.toolName} 的重复调用，请切换证据路径或停止重复查询。`
+    : `重复调用 ${intervention.toolName} 已被治理拦截，请改用未尝试的证据路径。`;
 }

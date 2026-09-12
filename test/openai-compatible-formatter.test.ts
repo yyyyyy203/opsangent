@@ -96,6 +96,16 @@ describe('OpenAI-compatible request formatter', () => {
     expect(request).not.toHaveProperty('stream_options');
   });
 
+  it('adds tool_choice only when the caller explicitly requests a local hard stop', () => {
+    const request = formatChatRequest([], [readTool], {
+      model: 'deepseek-chat',
+      includeUsage: false,
+      toolChoice: 'none',
+    });
+
+    expect(request.tool_choice).toBe('none');
+  });
+
   it('expands every tool result into a separate safe tool message', () => {
     const first = result({
       response: {

@@ -125,4 +125,24 @@ describe('PublicEventProjectorV2', () => {
       finishReason: 'tool_calls',
     });
   });
+
+  it('projects loop interventions without exposing the internal signature digest', () => {
+    const projected = new PublicEventProjectorV2().project(event('LOOP_DETECTED', {
+      level: 'hard',
+      repeatCount: 5,
+      toolName: 'metrics.query',
+      signatureDigest: 'internal-loop-digest',
+      action: 'signature_blocked',
+      stage: 'evidence_collection',
+    }));
+
+    expect(projected?.payload).toEqual({
+      level: 'hard',
+      repeatCount: 5,
+      toolName: 'metrics.query',
+      action: 'signature_blocked',
+      stage: 'evidence_collection',
+    });
+    expect(JSON.stringify(projected)).not.toContain('internal-loop-digest');
+  });
 });
