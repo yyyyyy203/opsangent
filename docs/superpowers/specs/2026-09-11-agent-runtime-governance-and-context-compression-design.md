@@ -1,6 +1,6 @@
 # Agent Runtime Governance 与上下文压缩设计
 
-> 状态：2026-09-11 已由项目负责人确认总体技术路线，待项目负责人审阅本文后进入实施计划。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；代码和验收完成前，不得宣称这些能力已经达到生产可用。
+> 状态：总体技术路线已确认；增量 1 已完成实现与验收（提交 `250f8c6`），增量 2–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方“增量 1 实施状态”明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
 
 ## 1. 决策与范围
 
@@ -35,14 +35,14 @@
 
 ## 2. 当前实现基线
 
-本文以 `codex/event-message-v2` 分支提交 `30543ed` 为基线。当前事实如下：
+本文以 `codex/event-message-v2` 分支提交 `250f8c6` 为增量 1 验收基线。当前事实如下：
 
 - `Guardian` 只有 `inspect()`；`GuardInput` 只有 run、Tool 与 ToolCall。
 - `GuardEngine` 并行运行 Guardian、合并最高风险；默认只有 `BashGuardian`。
 - Tool Admission 已在 Guard 前完成工具存在性、JSON、Schema 和语义校验。
 - 默认 Hook 只有 `EvidenceBudgetHook` 与 `RiskActionHook`；HookExecutor 按注册顺序短路。
 - HITL 和外部执行恢复由 `pendingToolBatch`、Checkpoint revision、执行日志和应用服务共同处理。
-- ToolResult、Checkpoint 和执行日志已通过窄用途 UoW 保证原子提交；V2 终态 ToolResult 在提交后发布。
+- ToolResult、Checkpoint、执行日志和耐久 Outbox 已通过窄用途 transition UoW 保证原子提交；V2 状态耦合事实在提交后由有界 Dispatcher 发布。
 - 当前只检测重复 toolCallId 和模型纠错预算耗尽，没有按工具、参数和结果签名检测循环。
 - `RuleBasedContextCompressor` 只有规则裁剪；当前标记为 L2 的路径并不调用摘要模型。
 - `pruneToolResult()` 已存在但没有接入生产工具执行路径。
@@ -50,6 +50,24 @@
 - SQLite EvidenceStore 只适合有界内联证据；几十 MiB 日志必须进入 Manifest + BlobStore 数据面。
 
 本文不得被解释为这些缺失能力已经实现。
+
+### 2.1 增量 1 实施状态
+
+增量 1 已交付以下内容，并由合同测试、恢复测试、V1 兼容测试和全量质量门禁验证：
+
+- 治理状态、兼容 Codec 迁移、`LOOP_DETECTED` V2 事件契约，以及 durable transition / Outbox 公共端口。
+- 内存与 SQLite 的原子 Checkpoint、执行日志和 Outbox 提交；Outbox 使用稳定 `eventId`、CAS revision 和有界查询。
+- Durable Outbox Dispatcher、普通事件 Outboxed wrapper、启动 drain 和公共导出；并发 drain 与发布成功但标记失败的即时重试不会在进程内重复投影。
+- Harness 的生命周期/终态/工具结果/不确定执行事实，以及 HITL 确认和外部结果的状态耦合提交；提交成功后才发布 V2，具备 V1 映射的事件再向 V1 Generator 推送兼容事件。
+- 仍保留 AsyncGenerator V1 事件和 EventBus 兼容通道；V1 启动恢复不使用无持久游标的重复 replay。
+
+以下能力仍明确属于后续增量，当前尚未实现其行为：
+
+- 增量 2：Profile、Impact、Guardian 协调和 RiskPolicy。
+- 增量 3：控制型/观察型 Hook 重构及其完整生命周期语义。
+- 增量 4：循环签名、持久化计数、三级策略和 `LOOP_DETECTED` 运行时行为。当前只有事件契约。
+- 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入。
+- 增量 6：L1/L2 结构裁剪、compact summarizer、Validator、回滚和完整性恢复链路。
 
 ## 3. 不可破坏的架构约束
 
