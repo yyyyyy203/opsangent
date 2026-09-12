@@ -73,7 +73,7 @@
 - 治理快照在 ToolRunner 前强制执行；deny 生成稳定 `POLICY_DENIED` ToolResult，confirm 继续复用现有 HITL，旧 GuardEngine 路径保持兼容。
 - Tool source 元数据和公共 `RUN_STARTED.versionSnapshot` 白名单投影；V1 事件契约和 AsyncGenerator 行为不变。
 
-本增量的验证结果：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `git diff --check` 均通过；全量测试为 344 passed、1 skipped，跳过项为未配置真实 Prometheus 端点的环境测试。审查发现的风险策略例外、输入摘要一致性、Profile 运行时校验、影响面超时取消、Finding 深拷贝和 Guardian 子信号取消问题均已修复并补充回归测试。
+本增量的验证结果：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `git diff --check` 均通过；全量测试为 348 passed、1 skipped，跳过项为未配置真实 Prometheus 端点的环境测试。审查发现的风险策略例外、输入摘要一致性、Profile 运行时校验、影响面超时取消、Finding 深拷贝、Guardian 子信号取消、父级 Abort 传播和过期 deadline 早退问题均已修复并补充回归测试。
 
 以下能力仍明确属于后续增量，当前尚未实现其行为：
 

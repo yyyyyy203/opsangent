@@ -1,4 +1,3 @@
-import { checkpointChecksum } from '../contracts/index.js';
 import type {
   Clock,
   GovernanceEvaluator,
@@ -12,7 +11,7 @@ import type {
   GuardianCoordinator as GuardianCoordinatorPort,
 } from '../contracts/index.js';
 import { systemClock } from '../contracts/index.js';
-import { validateToolInput } from '../tool/schema.js';
+import { normalizeToolCall, toolInputDigest } from '../tool/schema.js';
 
 export interface BatchGovernanceEvaluatorOptions {
   resolveTool: (name: string) => Tool | undefined;
@@ -50,7 +49,7 @@ export class BatchGovernanceEvaluator implements GovernanceEvaluator {
       if (input.signal.aborted) throw new Error('Governance evaluation aborted.');
       const tool = this.options.resolveTool(call.name);
       if (tool === undefined) throw new Error(`Governance tool is not registered: ${call.name}`);
-      const normalizedCall = normalizeCall(tool, call);
+      const normalizedCall = normalizeToolCall(tool, call);
       const inspection = await this.options.guardianCoordinator.inspect({
         runId: input.runId,
         stepId: input.stepId,
@@ -70,7 +69,7 @@ export class BatchGovernanceEvaluator implements GovernanceEvaluator {
       });
       decisions.push({
         toolCallId: call.id,
-        inputDigest: checkpointChecksum(normalizedCall.input),
+        inputDigest: toolInputDigest(tool, call),
         decision: structuredClone(decision),
       });
     }
@@ -146,12 +145,4 @@ function normalizeImpact(impact: ImpactSurfaceAssessment, now: number): ImpactSu
     };
   }
   return structuredClone(impact);
-}
-
-function normalizeCall(tool: Tool, call: ToolCall): ToolCall {
-  const validation = validateToolInput(tool, call.input);
-  if (!validation.valid || validation.value === undefined) return call;
-  const semantics = tool.validateSemantics?.(validation.value);
-  if (semantics !== undefined && !semantics.valid) return call;
-  return { ...call, input: semantics?.value ?? validation.value };
 }

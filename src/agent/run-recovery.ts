@@ -9,7 +9,7 @@ import type {
   ToolRecoveryPolicy,
 } from '../contracts/index.js';
 import { checkpointChecksum } from '../contracts/index.js';
-import { validateToolInput } from '../tool/schema.js';
+import { toolInputDigest, validateToolInput } from '../tool/schema.js';
 import type { Toolkit } from '../tool/toolkit.js';
 
 interface CompletedRecoveryResult {
@@ -54,9 +54,10 @@ export async function planPendingBatchRecovery(
       continue;
     }
 
+    const tool = options.toolkit.get(call.name);
     const execution = await options.executions.get(call.id);
     if (execution !== null) {
-      const identityError = validateExecutionIdentity(options.context, batch.stepId, call, execution);
+      const identityError = validateExecutionIdentity(options.context, batch.stepId, call, execution, tool);
       if (identityError !== undefined) return { type: 'storage_error', error: identityError };
       if (execution.state === 'succeeded' || execution.state === 'failed') {
         if (execution.result === undefined) {
@@ -67,7 +68,6 @@ export async function planPendingBatchRecovery(
       }
       if (execution.state === 'uncertain') return { type: 'uncertain', call, execution, completed };
 
-      const tool = options.toolkit.get(call.name);
       if (tool === undefined) {
         if (execution.toolKind === 'action') return { type: 'uncertain', call, execution, completed };
         completed.push({ result: unavailableToolResult(call, options.now) });
@@ -94,7 +94,6 @@ export async function planPendingBatchRecovery(
       completed.push({ result: externallyCompleted });
       continue;
     }
-    const tool = options.toolkit.get(call.name);
     if (tool === undefined) {
       completed.push({ result: unavailableToolResult(call, options.now) });
       continue;
@@ -117,11 +116,13 @@ function validateExecutionIdentity(
   stepId: string,
   call: ToolCall,
   execution: ToolExecutionRecord,
+  tool: Tool | undefined,
 ): AgentError | undefined {
+  const inputDigest = tool === undefined ? checkpointChecksum(call.input) : toolInputDigest(tool, call);
   if (execution.runId !== context.runId
     || execution.stepId !== stepId
     || execution.toolName !== call.name
-    || execution.inputDigest !== checkpointChecksum(call.input)) {
+    || execution.inputDigest !== inputDigest) {
     return storageError(`Execution journal identity does not match pending call: ${call.id}`);
   }
   return undefined;

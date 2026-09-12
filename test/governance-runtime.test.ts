@@ -34,9 +34,9 @@ function evidenceTool(name: string, onCall?: () => void): Tool {
   };
 }
 
-function actionTool(name = 'action.drain', onCall?: () => void): Tool {
+function actionTool(name = 'action.drain', onCall?: () => void, inputSchema: Tool['inputSchema'] = z.object({})): Tool {
   return {
-    name, description: name, kind: 'action', inputSchema: z.object({}),
+    name, description: name, kind: 'action', inputSchema,
     isConcurrencySafe: () => false,
     call: () => { onCall?.(); return { blocks: [{ type: 'text', text: name }] }; },
   };
@@ -125,6 +125,37 @@ describe('batch governance evaluation', () => {
     expect(providerAborted).toBe(true);
   });
 
+  it('propagates a parent Abort from Guardian evaluation before entering the ToolRunner', async () => {
+    const controller = new AbortController();
+    let guardianStarted = false;
+    let executed = false;
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ toolCalls: [{ id: 'call-1', name: 'query-1', input: {} }] }]),
+      workspaceRoots: [], includeExternalBash: false, enableGovernance: true,
+      profileResolver: new StaticProfileResolver([profileDefinition]),
+      impactSurfaceProvider: { capture: () => Promise.resolve(availableImpact) },
+      guardians: [{
+        id: 'abort-parent',
+        inspect: () => {
+          guardianStarted = true;
+          controller.abort();
+          return Promise.resolve([]);
+        },
+      }],
+      tools: [evidenceTool('query-1', () => { executed = true; })],
+    });
+
+    try {
+      const result = await runtime.agent.reply({ message: 'inspect', profileId: profileDefinition.profileId, signal: controller.signal });
+
+      expect(guardianStarted).toBe(true);
+      expect(executed).toBe(false);
+      expect(result.status).toBe('cancelled');
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('uses one impact capture for two safe tools in one runtime batch', async () => {
     let captures = 0;
     let executed = 0;
@@ -200,7 +231,7 @@ describe('batch governance evaluation', () => {
       workspaceRoots: [], includeExternalBash: false, enableGovernance: true, actionMode: 'execute', clock: fixedClock,
       profileResolver: resolver,
        impactSurfaceProvider: { capture: () => { captures += 1; return Promise.resolve(availableImpact); } },
-      tools: [actionTool('action.drain', () => { executed += 1; })],
+      tools: [actionTool('action.drain', () => { executed += 1; }, z.object({ mode: z.string().default('safe') }))],
     });
 
     const first = await runtime.agent.reply({ message: 'inspect', profileId: profileDefinition.profileId });

@@ -24,7 +24,9 @@ export class GuardianCoordinator implements GuardianCoordinatorPort {
   }
 
   public async inspect(input: GovernanceGuardInput): Promise<GuardianInspection> {
+    throwIfAborted(input.signal);
     const settled = await Promise.allSettled(this.guardians.map((guardian) => this.inspectOne(guardian, input)));
+    throwIfAborted(input.signal);
     const findings: Finding[] = [];
     const unavailableGuardians: string[] = [];
     for (let index = 0; index < settled.length; index += 1) {
@@ -54,51 +56,64 @@ export class GuardianCoordinator implements GuardianCoordinatorPort {
       signal: AbortSignal.any([input.signal, controller.signal]),
     };
     try {
+      throwIfAborted(input.signal);
       if (guardian.matches !== undefined && !guardian.matches(guardianInput)) {
         return { id: guardian.id, unavailable: false, findings: [] };
       }
-      const findings = await this.withDeadline(guardian.inspect(guardianInput), guardianInput, controller);
+      const findings = await this.withDeadline(() => guardian.inspect(guardianInput), guardianInput, controller);
       return { id: guardian.id, unavailable: false, findings: [...findings] };
     } catch {
+      if (input.signal.aborted) throw abortError();
       return {
         id: guardian.id,
         unavailable: true,
         findings: [finding('guard.unavailable', 'HIGH', '风险检查器当前不可用。', input.tool.name, { guardianId: guardian.id })],
       };
+    } finally {
+      controller.abort();
     }
   }
 
   private async withDeadline(
-    operation: Promise<readonly Finding[]>,
+    operation: () => Promise<readonly Finding[]>,
     input: GovernanceGuardInput,
     controller: AbortController,
   ): Promise<readonly Finding[]> {
-    if (input.signal.aborted) throw new Error('Guardian inspection aborted.');
-    const remaining = Math.min(
-      this.guardianTimeoutMs,
-      input.deadline - this.clock.now().getTime(),
-    );
-    if (remaining <= 0) throw new Error('Guardian inspection deadline exceeded.');
     let timer: ReturnType<typeof setTimeout> | undefined;
     let removeAbortListener = () => {};
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new Error('Guardian inspection timed out.'));
-      }, remaining);
-    });
-    const aborted = new Promise<never>((_, reject) => {
-      const onAbort = () => reject(new Error('Guardian inspection aborted.'));
-      removeAbortListener = () => input.signal.removeEventListener('abort', onAbort);
-      if (input.signal.aborted) onAbort();
-      else input.signal.addEventListener('abort', onAbort, { once: true });
-    });
     try {
-      return await Promise.race([operation, timeout, aborted]);
+      if (input.signal.aborted) throw abortError();
+      const remaining = Math.min(
+        this.guardianTimeoutMs,
+        input.deadline - this.clock.now().getTime(),
+      );
+      if (!Number.isFinite(remaining) || remaining <= 0) throw new Error('Guardian inspection deadline exceeded.');
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error('Guardian inspection timed out.'));
+        }, remaining);
+      });
+      const aborted = new Promise<never>((_, reject) => {
+        const onAbort = () => reject(abortError());
+        removeAbortListener = () => input.signal.removeEventListener('abort', onAbort);
+        if (input.signal.aborted) onAbort();
+        else input.signal.addEventListener('abort', onAbort, { once: true });
+      });
+      const operationPromise = Promise.resolve().then(operation);
+      return await Promise.race([operationPromise, timeout, aborted]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
       removeAbortListener();
       controller.abort();
     }
   }
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (signal.aborted) throw abortError();
+}
+
+function abortError(): Error {
+  return Object.assign(new Error('Guardian inspection aborted.'), { code: 'ABORTED' as const, retryable: false });
 }

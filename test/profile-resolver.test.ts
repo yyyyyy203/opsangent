@@ -84,6 +84,16 @@ describe('StaticProfileResolver', () => {
     })])).toThrow();
   });
 
+  it('rejects duplicate Profile IDs with the stable input error shape', () => {
+    try {
+      new StaticProfileResolver([definition(), definition()]);
+    } catch (error) {
+      expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { category: 'profile_invalid' } });
+      return;
+    }
+    throw new Error('Expected duplicate Profile IDs to be rejected.');
+  });
+
   it('rejects invalid runtime Profile fields with a stable error shape', () => {
     expectInvalid(definition({ serviceLevel: 'S4' as ProfileDefinition['serviceLevel'] }));
     expectInvalid(definition({ timezone: 'Mars/Olympus' }));

@@ -94,4 +94,35 @@ describe('GuardianCoordinator', () => {
 
     expect(childAborted).toBe(true);
   });
+
+  it('propagates parent Abort instead of converting it into an unavailable Guardian', async () => {
+    const controller = new AbortController();
+    const coordinator = new GuardianCoordinator([{
+      id: 'abort-aware',
+      inspect: () => new Promise<never>((_resolve, reject) => {
+        controller.signal.addEventListener('abort', () => reject(new Error('guardian stopped')), { once: true });
+      }),
+    }]);
+    const pending = coordinator.inspect(input({ signal: controller.signal }));
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ code: 'ABORTED', retryable: false });
+  });
+
+  it('does not start a Guardian when the batch deadline has already expired', async () => {
+    const now = new Date('2026-09-12T00:00:00.000Z');
+    let inspected = false;
+    const coordinator = new GuardianCoordinator([{
+      id: 'expired',
+      inspect: () => {
+        inspected = true;
+        return Promise.resolve([]);
+      },
+    }], { clock: { now: () => now } });
+
+    const result = await coordinator.inspect(input({ deadline: now.getTime() - 1 }));
+
+    expect(inspected).toBe(false);
+    expect(result.unavailableGuardians).toEqual(['expired']);
+  });
 });

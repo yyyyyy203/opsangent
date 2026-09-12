@@ -17,7 +17,6 @@ import type {
   ToolBatchGovernanceSnapshot,
   ResolvedRisk,
 } from '../contracts/index.js';
-import { checkpointChecksum } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
 import type { GuardEngine } from '../guard/guard-engine.js';
 import type { HookExecutor } from '../hooks/hook-executor.js';
@@ -27,7 +26,7 @@ import type { CheckpointStore } from '../contracts/storage.js';
 import type { ExecutionOutcome } from './execution-types.js';
 import type { Toolkit } from './toolkit.js';
 import type { ToolRunner } from './tool-runner.js';
-import { validateToolInput } from './schema.js';
+import { toolInputDigest, validateToolInput } from './schema.js';
 import {
   legacyToolProgressFromChunk,
   legacyToolStartedPayload,
@@ -147,11 +146,13 @@ export class ToolExecutionPipeline {
     }
     const normalizedCall = { ...call, input: semantics?.value ?? validation.value ?? call.input };
     const risk = await this.resolveRisk(context, stepId, signal, tool, normalizedCall, governance);
+    if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
     await this.publishV2('RISK_EVALUATED', context, {
       findings: risk.findings.map((finding) => ({ ruleId: finding.ruleId, severity: finding.severity, description: finding.description, toolName: finding.toolName })),
       mergedRisk: risk.severity,
       policyVersion: risk.policyVersion ?? 'guard-v1',
     }, stepId, call.id);
+    if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
     if (risk.disposition === 'deny') {
       return {
         type: 'completed',
@@ -358,7 +359,7 @@ export class ToolExecutionPipeline {
     const decision = snapshot?.decisions.find((item) => item.toolCallId === call.id);
     if (snapshot === undefined || profile === undefined || snapshot.profileDigest !== profile.digest
       || snapshot.profileRevision !== profile.revision || decision === undefined
-      || decision.inputDigest !== checkpointChecksum(call.input)) {
+      || decision.inputDigest !== toolInputDigest(tool, call)) {
       return {
         severity: 'CRITICAL',
         requireConfirmation: false,
@@ -388,7 +389,7 @@ export class ToolExecutionPipeline {
       stepId,
       toolName: tool.name,
       toolKind: tool.kind,
-      inputDigest: checkpointChecksum(call.input),
+       inputDigest: toolInputDigest(tool, call),
       state: 'prepared',
       preparedAt: this.clock.now().toISOString(),
     });

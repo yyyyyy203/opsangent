@@ -18,7 +18,7 @@ export class StaticProfileResolver implements ProfileResolver {
       return [definition.profileId, cloneDefinition(definition)] as const;
     });
     if (new Set(entries.map(([profileId]) => profileId)).size !== entries.length) {
-      throw new Error('Duplicate Profile ID.');
+      throw invalidProfile('Profile IDs must be unique.');
     }
     this.definitions = new Map(entries);
   }

@@ -1,5 +1,5 @@
-import type { Tool, ToolInputSchema, ValidationResult } from '../contracts/index.js';
-import { isToolInputSchema } from '../contracts/index.js';
+import type { Tool, ToolCall, ToolInputSchema, ValidationResult } from '../contracts/index.js';
+import { checkpointChecksum, isToolInputSchema } from '../contracts/index.js';
 import { zodToJsonSchema } from 'zod-to-json-schema';
 
 export function validateToolInput(tool: Tool, input: Record<string, unknown>): ValidationResult {
@@ -15,6 +15,20 @@ export function validateToolInput(tool: Tool, input: Record<string, unknown>): V
       details: { issues: parsed.error.issues },
     },
   };
+}
+
+/** Returns the exact call shape used by both governance and execution. */
+export function normalizeToolCall(tool: Tool, call: ToolCall): ToolCall {
+  const validation = validateToolInput(tool, call.input);
+  if (!validation.valid || validation.value === undefined) return call;
+  const semantics = tool.validateSemantics?.(validation.value);
+  if (semantics !== undefined && !semantics.valid) return call;
+  return { ...call, input: semantics?.value ?? validation.value };
+}
+
+/** Digest the canonical input shape used for snapshot and journal identity. */
+export function toolInputDigest(tool: Tool, call: ToolCall): string {
+  return checkpointChecksum(normalizeToolCall(tool, call).input);
 }
 
 export function toolInputJsonSchema(tool: Tool): Record<string, unknown> {

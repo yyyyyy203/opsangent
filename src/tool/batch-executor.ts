@@ -1,11 +1,11 @@
 import type { AgentContext, AgentEvent, ToolBatchGovernanceSnapshot, ToolCall, ToolExecutionResult, Clock } from '../contracts/index.js';
-import { checkpointChecksum } from '../contracts/index.js';
 import { systemClock } from '../contracts/index.js';
 import type { ExecutionOutcome } from './execution-types.js';
 import type { SerializableInterrupt } from '../contracts/hitl.js';
 import type { ToolExecutionPipeline } from './execution-pipeline.js';
 import type { Toolkit } from './toolkit.js';
 import { mergeAsyncGenerators } from './async-generator-multiplexer.js';
+import { toolInputDigest } from './schema.js';
 
 export interface BatchExecutionResult {
   results: ToolExecutionResult[];
@@ -145,9 +145,12 @@ export class ToolBatchExecutor {
       && context.pendingToolBatch?.stepId === stepId
       && persisted.profileRevision === profile.revision
       && persisted.profileDigest === profile.digest
-      && calls.every((call) => persisted.decisions.some((decision) => (
-        decision.toolCallId === call.id && decision.inputDigest === checkpointChecksum(call.input)
-      )))) {
+      && calls.every((call) => {
+        const tool = this.toolkit.get(call.name);
+        return tool !== undefined && persisted.decisions.some((decision) => (
+          decision.toolCallId === call.id && decision.inputDigest === toolInputDigest(tool, call)
+        ));
+      })) {
       return persisted;
     }
     return this.pipeline.evaluateBatchGovernance(calls, context, stepId, signal);
