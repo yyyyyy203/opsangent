@@ -54,6 +54,8 @@ describe('DeterministicRiskPolicy', () => {
 
   it('allows evidence with unavailable impact but denies S1 action and confirms S3 action', () => {
     expect(evaluate({ impact: unavailable })).toMatchObject({ disposition: 'allow' });
+    expect(evaluate({ tool: tool('evidence', { requireUserConfirm: true }), impact: unavailable }))
+      .toMatchObject({ disposition: 'confirm', requireConfirmation: true });
     expect(evaluate({ tool: tool('action'), impact: unavailable })).toMatchObject({ disposition: 'deny' });
     expect(evaluate({ tool: tool('action', { name: 'action.drain' }), impact: unavailable, profile: profile('S3') })).toMatchObject({ disposition: 'confirm' });
   });
@@ -61,5 +63,12 @@ describe('DeterministicRiskPolicy', () => {
   it('treats unavailable Profile/Bash guardians as fail-closed', () => {
     expect(evaluate({ tool: tool('action'), unavailableGuardians: ['profile-policy'] })).toMatchObject({ disposition: 'deny' });
     expect(evaluate({ unavailableGuardians: ['bash-policy'] })).toMatchObject({ disposition: 'confirm' });
+  });
+
+  it('returns an independent copy of findings and nested metadata', () => {
+    const original = finding('risk.medium', 'MEDIUM', 'limited', 'query', { nested: { value: 'original' } });
+    const decision = evaluate({ findings: [original] });
+    expect(decision.findings[0]).not.toBe(original);
+    expect(decision.findings[0]?.metadata).not.toBe(original.metadata);
   });
 });

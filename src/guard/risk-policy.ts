@@ -23,7 +23,7 @@ export class DeterministicRiskPolicy implements RiskPolicy {
   public constructor(private readonly version = 'risk/v2') {}
 
   public evaluate(input: RiskPolicyInput): RiskDecision {
-    const findings = [...input.findings];
+    const findings: Finding[] = structuredClone([...input.findings]);
     const severity = maxSeverity(findings.map((item) => item.severity));
     const impactUnavailable = input.impact.status === 'unavailable' || input.impact.status === 'stale';
     const unavailable = new Set(input.unavailableGuardians);
@@ -33,6 +33,7 @@ export class DeterministicRiskPolicy implements RiskPolicy {
     const unlistedAction = isAction && !input.profile.allowedActions.includes(input.tool.name);
     const isBash = input.tool.name === 'bash' || input.tool.name.endsWith('.bash');
     const evidenceImpactException = isEvidence
+      && input.tool.requireUserConfirm !== true
       && impactUnavailable
       && findings.every((item) => item.ruleId === 'impact.unavailable' || item.ruleId === 'impact.stale' || severityRank[item.severity] <= severityRank.MEDIUM);
 

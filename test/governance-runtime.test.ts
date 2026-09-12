@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { z } from 'zod';
 import type { ImpactSurfaceAssessment, Tool } from '../src/contracts/index.js';
+import { checkpointChecksum } from '../src/contracts/index.js';
 import { StaticProfileResolver } from '../src/profiles/profile-resolver.js';
 import type { ProfileDefinition } from '../src/profiles/profile-types.js';
 import { BatchGovernanceEvaluator } from '../src/guard/governance-evaluator.js';
@@ -56,7 +57,7 @@ describe('batch governance evaluation', () => {
     const evaluator = new BatchGovernanceEvaluator(
       {
         resolveTool: (name) => tools.find((tool) => tool.name === name),
-        impactSurfaceProvider: { capture: async () => { captures += 1; return availableImpact; } },
+        impactSurfaceProvider: { capture: () => { captures += 1; return Promise.resolve(availableImpact); } },
         guardianCoordinator: new GuardianCoordinator([]),
         riskPolicy: new DeterministicRiskPolicy(),
         clock: { now: () => new Date('2026-09-12T00:00:00.000Z') },
@@ -78,6 +79,52 @@ describe('batch governance evaluation', () => {
     expect(snapshot.decisions.every((item) => item.inputDigest.length > 0)).toBe(true);
   });
 
+  it('digests the same schema-normalized input that the execution pipeline uses', async () => {
+    const tool: Tool = {
+      name: 'query-with-default', description: 'query', kind: 'evidence',
+      inputSchema: z.object({ timeoutMs: z.number().default(30) }),
+      call: () => ({ blocks: [{ type: 'text', text: 'ok' }] }),
+    };
+    const evaluator = new BatchGovernanceEvaluator({
+      resolveTool: () => tool,
+      impactSurfaceProvider: { capture: () => Promise.resolve(availableImpact) },
+      guardianCoordinator: new GuardianCoordinator([]),
+      riskPolicy: new DeterministicRiskPolicy(),
+      clock: fixedClock,
+    });
+    const profile = await profileSnapshot();
+    const snapshot = await evaluator.evaluateBatch({
+      runId: 'run-1', stepId: 'step-1', profile,
+      calls: [{ id: 'call-1', name: tool.name, input: {} }],
+      signal: new AbortController().signal, deadline: Date.now() + 1_000,
+    });
+
+    expect(snapshot.decisions[0]?.inputDigest).toBe(checkpointChecksum({ timeoutMs: 30 }));
+  });
+
+  it('converts a hung impact provider into an unavailable snapshot at the deadline', async () => {
+    let providerAborted = false;
+    const evaluator = new BatchGovernanceEvaluator({
+      resolveTool: () => evidenceTool('query-1'),
+      impactSurfaceProvider: {
+        capture: ({ signal }) => new Promise<ImpactSurfaceAssessment>((_resolve, reject) => {
+          signal.addEventListener('abort', () => { providerAborted = true; reject(new Error('provider aborted')); }, { once: true });
+        }),
+      },
+      guardianCoordinator: new GuardianCoordinator([]),
+      riskPolicy: new DeterministicRiskPolicy(),
+    });
+    const profile = await profileSnapshot();
+    const snapshot = await evaluator.evaluateBatch({
+      runId: 'run-1', stepId: 'step-1', profile,
+      calls: [{ id: 'call-1', name: 'query-1', input: {} }],
+      signal: new AbortController().signal, deadline: Date.now() + 30,
+    });
+
+    expect(snapshot.impact).toEqual({ status: 'unavailable', reasonCode: 'impact_deadline_exceeded', evidenceIds: [] });
+    expect(providerAborted).toBe(true);
+  });
+
   it('uses one impact capture for two safe tools in one runtime batch', async () => {
     let captures = 0;
     let executed = 0;
@@ -88,7 +135,7 @@ describe('batch governance evaluation', () => {
       workspaceRoots: [], includeExternalBash: false, enableGovernance: true,
       clock: fixedClock,
       profileResolver: new StaticProfileResolver([profileDefinition]),
-      impactSurfaceProvider: { capture: async () => { captures += 1; return availableImpact; } },
+       impactSurfaceProvider: { capture: () => { captures += 1; return Promise.resolve(availableImpact); } },
       tools: [evidenceTool('query-1', () => { executed += 1; }), evidenceTool('query-2', () => { executed += 1; })],
     });
 
@@ -106,7 +153,7 @@ describe('batch governance evaluation', () => {
       workspaceRoots: [], includeExternalBash: false, enableGovernance: true, actionMode: 'execute',
       clock: fixedClock,
       profileResolver: new StaticProfileResolver([profileDefinition]),
-      impactSurfaceProvider: { capture: async () => availableImpact },
+       impactSurfaceProvider: { capture: () => Promise.resolve(availableImpact) },
       tools: [actionTool('action.unknown', () => { executed = true; })],
     });
 
@@ -125,7 +172,7 @@ describe('batch governance evaluation', () => {
       workspaceRoots: [], includeExternalBash: false, enableGovernance: true,
       clock: fixedClock,
       profileResolver: new StaticProfileResolver([profileDefinition]),
-      impactSurfaceProvider: { capture: async () => availableImpact },
+       impactSurfaceProvider: { capture: () => Promise.resolve(availableImpact) },
       tools: [actionTool()],
     });
 
@@ -152,7 +199,7 @@ describe('batch governance evaluation', () => {
       ]),
       workspaceRoots: [], includeExternalBash: false, enableGovernance: true, actionMode: 'execute', clock: fixedClock,
       profileResolver: resolver,
-      impactSurfaceProvider: { capture: async () => { captures += 1; return availableImpact; } },
+       impactSurfaceProvider: { capture: () => { captures += 1; return Promise.resolve(availableImpact); } },
       tools: [actionTool('action.drain', () => { executed += 1; })],
     });
 
@@ -160,11 +207,10 @@ describe('batch governance evaluation', () => {
     expect(first.status).toBe('awaiting_confirmation');
     expect(resolutions).toBe(1);
     const started = (await runtime.eventStoreV2.readRun(first.runId, 0, 20)).find((event) => event.type === 'RUN_STARTED');
-    expect(started?.type === 'RUN_STARTED' ? started.payload.versionSnapshot : undefined).toEqual({
-      profileRevision: 'profile/v1',
-      profileDigest: expect.stringMatching(/^sha256:v1:[a-f0-9]{64}$/),
-      policyVersion: 'risk/v2',
-    });
+    if (started?.type !== 'RUN_STARTED') throw new Error('RUN_STARTED event was not persisted.');
+    expect(started.payload.versionSnapshot.profileRevision).toBe('profile/v1');
+    expect(started.payload.versionSnapshot.profileDigest).toMatch(/^sha256:v1:[a-f0-9]{64}$/);
+    expect(started.payload.versionSnapshot.policyVersion).toBe('risk/v2');
 
     await runtime.hitl.decide({
       runId: first.runId, toolCallId: 'action-1', confirmed: true, actor: 'tester',

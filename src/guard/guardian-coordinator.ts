@@ -48,11 +48,16 @@ export class GuardianCoordinator implements GuardianCoordinatorPort {
     guardian: Guardian,
     input: GovernanceGuardInput,
   ): Promise<{ id: string; unavailable: boolean; findings: Finding[] }> {
+    const controller = new AbortController();
+    const guardianInput: GovernanceGuardInput = {
+      ...input,
+      signal: AbortSignal.any([input.signal, controller.signal]),
+    };
     try {
-      if (guardian.matches !== undefined && !guardian.matches(input)) {
+      if (guardian.matches !== undefined && !guardian.matches(guardianInput)) {
         return { id: guardian.id, unavailable: false, findings: [] };
       }
-      const findings = await this.withDeadline(guardian.inspect(input), input);
+      const findings = await this.withDeadline(guardian.inspect(guardianInput), guardianInput, controller);
       return { id: guardian.id, unavailable: false, findings: [...findings] };
     } catch {
       return {
@@ -66,6 +71,7 @@ export class GuardianCoordinator implements GuardianCoordinatorPort {
   private async withDeadline(
     operation: Promise<readonly Finding[]>,
     input: GovernanceGuardInput,
+    controller: AbortController,
   ): Promise<readonly Finding[]> {
     if (input.signal.aborted) throw new Error('Guardian inspection aborted.');
     const remaining = Math.min(
@@ -74,13 +80,25 @@ export class GuardianCoordinator implements GuardianCoordinatorPort {
     );
     if (remaining <= 0) throw new Error('Guardian inspection deadline exceeded.');
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let removeAbortListener = () => {};
     const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error('Guardian inspection timed out.')), remaining);
+      timer = setTimeout(() => {
+        controller.abort();
+        reject(new Error('Guardian inspection timed out.'));
+      }, remaining);
+    });
+    const aborted = new Promise<never>((_, reject) => {
+      const onAbort = () => reject(new Error('Guardian inspection aborted.'));
+      removeAbortListener = () => input.signal.removeEventListener('abort', onAbort);
+      if (input.signal.aborted) onAbort();
+      else input.signal.addEventListener('abort', onAbort, { once: true });
     });
     try {
-      return await Promise.race([operation, timeout]);
+      return await Promise.race([operation, timeout, aborted]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      removeAbortListener();
+      controller.abort();
     }
   }
 }

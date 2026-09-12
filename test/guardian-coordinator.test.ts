@@ -36,9 +36,9 @@ function input(overrides: Partial<GovernanceGuardInput> = {}): GovernanceGuardIn
 describe('GuardianCoordinator', () => {
   it('treats a missing matches method as a matching legacy Guardian', async () => {
     let inspected = false;
-    const coordinator = new GuardianCoordinator([{ id: 'legacy', inspect: async () => {
+    const coordinator = new GuardianCoordinator([{ id: 'legacy', inspect: () => {
       inspected = true;
-      return [];
+      return Promise.resolve([]);
     } }]);
 
     const result = await coordinator.inspect(input());
@@ -60,8 +60,8 @@ describe('GuardianCoordinator', () => {
 
   it('isolates a rejected Guardian and emits a safe unavailable finding', async () => {
     const coordinator = new GuardianCoordinator([
-      { id: 'broken', inspect: async () => { throw new Error('secret internal detail'); } },
-      { id: 'healthy', inspect: async () => [finding('healthy.rule', 'LOW', 'ok', 'query')] },
+      { id: 'broken', inspect: () => Promise.reject(new Error('secret internal detail')) },
+      { id: 'healthy', inspect: () => Promise.resolve([finding('healthy.rule', 'LOW', 'ok', 'query')]) },
     ]);
 
     const result = await coordinator.inspect(input());
@@ -78,5 +78,20 @@ describe('GuardianCoordinator', () => {
 
     expect(result.unavailableGuardians).toEqual(['hung']);
     expect(result.findings[0]).toMatchObject({ ruleId: 'guard.unavailable', toolName: 'query' });
+  });
+
+  it('cancels the child Guardian signal after a timeout', async () => {
+    let childAborted = false;
+    const coordinator = new GuardianCoordinator([{
+      id: 'hung',
+      inspect: (candidate) => new Promise(() => {
+        const signal = (candidate as GovernanceGuardInput).signal;
+        signal.addEventListener('abort', () => { childAborted = true; }, { once: true });
+      }),
+    }], { guardianTimeoutMs: 5 });
+
+    await coordinator.inspect(input({ deadline: Date.now() + 100 }));
+
+    expect(childAborted).toBe(true);
   });
 });

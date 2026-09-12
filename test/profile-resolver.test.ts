@@ -51,7 +51,7 @@ describe('StaticProfileResolver', () => {
       signal: new AbortController().signal,
     });
 
-    expect(() => (first.allowedActions as string[]).push('action.fake')).toThrow();
+    expect(() => first.allowedActions.push('action.fake')).toThrow();
     const second = await resolver.resolve({
       profileId: 'group-buy-market',
       capturedAt: '2026-09-12T00:01:00.000Z',
@@ -84,6 +84,21 @@ describe('StaticProfileResolver', () => {
     })])).toThrow();
   });
 
+  it('rejects invalid runtime Profile fields with a stable error shape', () => {
+    expectInvalid(definition({ serviceLevel: 'S4' as ProfileDefinition['serviceLevel'] }));
+    expectInvalid(definition({ timezone: 'Mars/Olympus' }));
+    expectInvalid(definition({ changeFreezePeriods: [{
+      id: 'freeze-1', startsAt: '2026-09-12', endsAt: '2026-09-13T00:00:00.000Z',
+    }] }));
+  });
+
+  it('orders freeze periods by instant and rejects overlaps across timezone offsets', () => {
+    expectInvalid(definition({ changeFreezePeriods: [
+      { id: 'freeze-a', startsAt: '2026-09-12T00:30:00+01:00', endsAt: '2026-09-12T01:00:00+01:00' },
+      { id: 'freeze-b', startsAt: '2026-09-11T23:45:00Z', endsAt: '2026-09-12T00:15:00Z' },
+    ] }));
+  });
+
   it('propagates an already aborted signal before resolving', async () => {
     const resolver = new StaticProfileResolver([definition()]);
 
@@ -94,3 +109,13 @@ describe('StaticProfileResolver', () => {
     })).rejects.toMatchObject({ code: 'ABORTED' });
   });
 });
+
+function expectInvalid(value: ProfileDefinition): void {
+  try {
+    new StaticProfileResolver([value]);
+  } catch (error) {
+    expect(error).toMatchObject({ code: 'INVALID_INPUT', details: { category: 'profile_invalid' } });
+    return;
+  }
+  throw new Error('Expected invalid Profile definition to be rejected.');
+}
