@@ -20,6 +20,8 @@ export interface DurableOutboxDispatcherOptions {
  */
 export class DurableOutboxDispatcher {
   private readonly batchSize: number;
+  private drainTail: Promise<void> = Promise.resolve();
+  private readonly publishedBeforeMarkFailure = new Map<string, AgentEventEnvelopeV2>();
 
   public constructor(private readonly options: DurableOutboxDispatcherOptions) {
     this.batchSize = options.batchSize ?? 100;
@@ -31,6 +33,10 @@ export class DurableOutboxDispatcher {
   /** Drains one Run in bounded storage reads and returns its stored events. */
   public async drainRun(runId: string): Promise<readonly AgentEventEnvelopeV2[]> {
     assertRunId(runId);
+    return this.scheduleDrain(() => this.drainRunOnce(runId));
+  }
+
+  private async drainRunOnce(runId: string): Promise<readonly AgentEventEnvelopeV2[]> {
     const dispatched: AgentEventEnvelopeV2[] = [];
     while (true) {
       const records = await this.options.outbox.listPending({ runId, limit: this.batchSize });
@@ -41,6 +47,10 @@ export class DurableOutboxDispatcher {
 
   /** Drains every Run without requesting an unbounded pending-row result. */
   public async drainAll(): Promise<number> {
+    return this.scheduleDrain(() => this.drainAllOnce());
+  }
+
+  private async drainAllOnce(): Promise<number> {
     let count = 0;
     while (true) {
       const records = await this.options.outbox.listPending({ limit: this.batchSize });
@@ -49,14 +59,35 @@ export class DurableOutboxDispatcher {
     }
   }
 
+  /**
+   * A process may have several callers (tool transitions, recovery, startup)
+   * asking to drain at the same time. Serialize those reads so one pending
+   * record cannot be delivered twice by concurrent drain loops.
+   */
+  private scheduleDrain<T>(operation: () => Promise<T>): Promise<T> {
+    const current = this.drainTail.then(operation, operation);
+    this.drainTail = current.then(() => undefined, () => undefined);
+    return current;
+  }
+
   private async dispatch(records: Awaited<ReturnType<DurableEventOutbox['listPending']>>): Promise<AgentEventEnvelopeV2[]> {
     const dispatched: AgentEventEnvelopeV2[] = [];
     for (const record of records) {
-      const event = await this.options.publisher.publish(record.event);
-      await this.options.outbox.markPublished({
-        eventId: record.event.eventId,
-        publishedAt: this.options.clock.now().toISOString(),
-      });
+      const event = this.publishedBeforeMarkFailure.get(record.event.eventId)
+        ?? await this.options.publisher.publish(record.event);
+      try {
+        await this.options.outbox.markPublished({
+          eventId: record.event.eventId,
+          publishedAt: this.options.clock.now().toISOString(),
+        });
+        this.publishedBeforeMarkFailure.delete(record.event.eventId);
+      } catch (error) {
+        // The raw publish already succeeded. Keep the envelope so an
+        // immediate retry only completes the Outbox mark and does not rerun
+        // projectors (notably the in-process V1 bridge).
+        this.publishedBeforeMarkFailure.set(record.event.eventId, event);
+        throw error;
+      }
       dispatched.push(event);
     }
     return dispatched;

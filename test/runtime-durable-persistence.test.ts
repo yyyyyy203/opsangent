@@ -108,4 +108,60 @@ describe('runtime durable persistence', () => {
       await second.close();
     }
   });
+
+  it('does not emit a drained V1 lifecycle event twice during restart readiness', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-outbox-v1-runtime-'));
+    roots.push(root);
+    const sqlitePath = join(root, 'runtime.sqlite');
+    const context: AgentContext = {
+      runId: 'run-outbox-v1-restart',
+      status: 'running',
+      stage: 'evidence_collection',
+      profileId: 'group-buy-market',
+      messages: [],
+      pendingToolCalls: [],
+      confirmedToolCallIds: [],
+      rejectedToolCallIds: [],
+      executedActions: [],
+      evidenceIds: [],
+      missingEvidence: [],
+      budget: { startedAt: timestamp, maxIterations: 8, iteration: 1, maxToolCalls: 16, toolCallsUsed: 0, maxDurationMs: 60_000 },
+      contextVersion: 1,
+    };
+    const pending: PendingAgentEventV2<'RUN_STARTED'> = {
+      schemaVersion: 2,
+      eventId: 'event-outbox-v1-restart',
+      type: 'RUN_STARTED',
+      payload: { profile: 'group-buy-market', trigger: 'manual', deadline: '2026-09-11T00:01:00.000Z', versionSnapshot: {} },
+      runId: context.runId,
+      correlationId: `run:${context.runId}`,
+      timestamp,
+      visibility: 'audit',
+      durability: 'durable',
+    };
+    const first = createSqlitePersistence({ path: sqlitePath, clock });
+    try {
+      await first.transitions.commit({ expectedRevision: null, context, outboxEvents: [pending] });
+    } finally {
+      first.close();
+    }
+
+    const second = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      sqlitePath,
+      clock,
+    });
+    const projected: string[] = [];
+    second.events.subscribe((event) => {
+      if (event.runId === context.runId && event.type === 'RUN_STARTED') projected.push(event.type);
+    });
+    try {
+      await second.ready;
+      expect(projected).toEqual(['RUN_STARTED']);
+    } finally {
+      await second.close();
+    }
+  });
 });

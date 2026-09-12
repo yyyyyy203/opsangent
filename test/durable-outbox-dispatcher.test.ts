@@ -140,9 +140,37 @@ describe('DurableOutboxDispatcher', () => {
     expect(await events.readRun('run-1', 0, 10)).toHaveLength(1);
   });
 
+  it('serializes concurrent durable wrapper drains without duplicating projector delivery', async () => {
+    const { durable, events, rawPublisher } = fixture();
+    let deliveries = 0;
+    rawPublisher.subscribe({
+      name: 'delivery-counter',
+      project: () => { deliveries += 1; },
+    });
+    const dispatcher = new DurableOutboxDispatcher({ outbox: durable.outbox, publisher: rawPublisher, clock, batchSize: 2 });
+    const publisher = new OutboxedEventPublisher({
+      outbox: durable.outbox,
+      dispatcher,
+      publisher: rawPublisher,
+      eventStore: events,
+      clock,
+    });
+    const pending = durableEvent();
+
+    await Promise.all([publisher.publish(pending), publisher.publish(pending)]);
+
+    expect(deliveries).toBe(1);
+    expect(await events.readRun('run-1', 0, 10)).toHaveLength(1);
+  });
+
   it('reuses an event ID after mark-published fails and never creates a second EventStore row', async () => {
     const { durable, events, rawPublisher } = fixture();
     const event = durableEvent();
+    let deliveries = 0;
+    rawPublisher.subscribe({
+      name: 'mark-retry-delivery-counter',
+      project: () => { deliveries += 1; },
+    });
     let failMarkPublished = true;
     const outbox: DurableEventOutbox = {
       enqueue: (input) => durable.outbox.enqueue(input),
@@ -165,5 +193,6 @@ describe('DurableOutboxDispatcher', () => {
     await expect(dispatcher.drainRun('run-1')).resolves.toMatchObject([{ eventId: event.eventId, sequence: 1 }]);
     expect(await events.readRun('run-1', 0, 10)).toHaveLength(1);
     expect(await durable.outbox.listPending({ runId: 'run-1', limit: 10 })).toEqual([]);
+    expect(deliveries).toBe(1);
   });
 });

@@ -105,6 +105,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       eventStore: eventStoreV2,
       clock,
     });
+  const v2EventDependencies = {
+    factory: eventFactoryV2,
+    publisher: publishingV2,
+    correlationId: (runId: string) => `run:${runId}`,
+    ...(durableOutboxDispatcher === undefined ? {} : { dispatcher: durableOutboxDispatcher }),
+  };
   const v1ProjectorV2 = new V1CompatibilityProjector();
   eventPublisherV2.subscribe({
     name: 'v1-event-bus',
@@ -123,7 +129,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
   const ready = Promise.resolve().then(async () => {
     await durableOutboxDispatcher?.drainAll();
-    return eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler', 'v1-event-bus'] });
+    // The V1 bridge is live-delivery only and has no durable projection
+    // cursor. Replaying it after draining the Outbox would duplicate events.
+    return eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler'] });
   });
   const evidenceRecorder = options.evidenceRecorder ?? new DefaultEvidenceRecorder({
     evidence,
@@ -210,7 +218,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ids,
     admission: new ToolAdmission(toolkit),
     ...(durableState === undefined ? {} : { durableState }),
-    v2Events: { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId: string) => `run:${runId}` },
+    v2Events: v2EventDependencies,
   });
   return {
     agent,
@@ -223,7 +231,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     hitl: new HitlService(
       checkpoints,
       clock,
-      { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
+      v2EventDependencies,
       durableState,
     ),
     externalTools: new ExternalToolResultService(
@@ -234,7 +242,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       hooks,
       events,
       eventFactory,
-      { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
+      v2EventDependencies,
       durableState,
     ),
     eventStoreV2,

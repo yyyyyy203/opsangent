@@ -38,10 +38,8 @@ export class OutboxedEventPublisher implements EventPublisherV2Like {
     // The only normal path without a pending record is a caller retry after a
     // prior successful mark-published. Read its persisted envelope directly;
     // re-publishing would unnecessarily re-run projectors.
-    if (record.publishedAt !== undefined) {
-      const existing = await this.options.eventStore.findById(event.eventId);
-      if (existing !== null) return existing;
-    }
+    const existing = await this.options.eventStore.findById(event.eventId);
+    if (existing !== null) return existing;
     throw new Error(`Outbox dispatcher did not publish event: ${event.eventId}`);
   }
 }

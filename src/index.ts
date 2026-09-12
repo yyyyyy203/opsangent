@@ -13,6 +13,8 @@ export * from './event/event-bus.js';
 export * from './event/event-factory.js';
 export * from './event/v2/event-factory.js';
 export * from './event/v2/event-publisher.js';
+export * from './event/v2/durable-outbox-dispatcher.js';
+export * from './event/v2/outboxed-event-publisher.js';
 export * from './event/v2/in-memory-event-store.js';
 export * from './event/v2/projection-runner.js';
 export * from './event/v2/replay-buffer.js';
