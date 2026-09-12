@@ -100,12 +100,30 @@ export class ToolBatchExecutor {
     callbacks: BatchExecutionCallbacks,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     let outcome: ExecutionOutcome;
+    const terminalEvents: AgentEvent[] = [];
+    const pipelineStream = this.pipeline.executeStream(call, context, stepId, signal);
+    let pipelineCompleted = false;
     try {
-      outcome = yield* this.pipeline.executeStream(call, context, stepId, signal);
+      while (true) {
+        const item = await pipelineStream.next();
+        if (item.done) {
+          pipelineCompleted = true;
+          outcome = item.value;
+          break;
+        }
+        // A durable Harness transition is committed by onCompleted below.
+        // Hold the terminal V1 item until that callback has finished so a
+        // consumer cannot observe TOOL_RESULT before its state is durable.
+        if (item.value.type === 'TOOL_RESULT') terminalEvents.push(item.value);
+        else yield item.value;
+      }
     } catch {
       outcome = this.failure(call, signal);
+    } finally {
+      if (!pipelineCompleted) await pipelineStream.return(undefined as never).catch(() => undefined);
     }
     if (outcome.type === 'completed') await callbacks.onCompleted?.(call, outcome);
+    yield* terminalEvents;
     return outcome;
   }
 

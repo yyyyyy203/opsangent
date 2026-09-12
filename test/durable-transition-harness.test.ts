@@ -5,24 +5,13 @@ import type { AgentEvent, Tool } from '../src/contracts/index.js';
 import type { DiagnosisRunResult } from '../src/agent/types.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
-async function collect(
-  stream: AsyncGenerator<AgentEvent, DiagnosisRunResult>,
-): Promise<{ events: AgentEvent[]; result: DiagnosisRunResult }> {
-  const events: AgentEvent[] = [];
-  while (true) {
-    const item = await stream.next();
-    if (item.done) return { events, result: item.value };
-    events.push(item.value);
-  }
-}
-
 function evidenceTool(): Tool {
   return {
     name: 'metrics.query',
     description: 'query metrics',
     kind: 'evidence',
     inputSchema: z.object({ service: z.string() }),
-    isConcurrencySafe: () => true,
+    isConcurrencySafe: () => false,
     call: () => Promise.resolve({ blocks: [{ type: 'text' as const, text: 'metric evidence' }] }),
   };
 }
@@ -43,6 +32,7 @@ describe('durable transition integration in the Harness', () => {
 
     const commitEventTypes: string[][] = [];
     let toolResultTransitionFinished = false;
+    let toolResultYieldedBeforeTransition = false;
     const originalCommit = durable.transitions.commit.bind(durable.transitions);
     durable.transitions.commit = async (input) => {
       const saved = await originalCommit(input);
@@ -53,17 +43,31 @@ describe('durable transition integration in the Harness', () => {
     };
 
     try {
-      const collected = await collect(runtime.agent.replyStream({
+      const stream = runtime.agent.replyStream({
         runId: 'run-transition-harness',
         message: 'inspect',
         profileId: 'group-buy-market',
-      }));
+      });
+      const events: AgentEvent[] = [];
+      let result: DiagnosisRunResult | undefined;
+      while (true) {
+        const item = await stream.next();
+        if (item.done) {
+          result = item.value;
+          break;
+        }
+        events.push(item.value);
+        if (item.value.type === 'TOOL_RESULT' && !toolResultTransitionFinished) {
+          toolResultYieldedBeforeTransition = true;
+        }
+      }
 
-      expect(collected.result.status).toBe('completed');
+      expect(result?.status).toBe('completed');
       expect(commitEventTypes.some((types) => types.includes('RUN_STARTED'))).toBe(true);
       expect(commitEventTypes.some((types) => types.includes('RUN_FINISHED'))).toBe(true);
       expect(commitEventTypes.some((types) => types.includes('TOOL_RESULT'))).toBe(true);
-      expect(collected.events.some((event) => event.type === 'TOOL_RESULT')).toBe(true);
+      expect(events.some((event) => event.type === 'TOOL_RESULT')).toBe(true);
+      expect(toolResultYieldedBeforeTransition).toBe(false);
       expect(toolResultTransitionFinished).toBe(true);
     } finally {
       await runtime.close();
