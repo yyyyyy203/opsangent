@@ -40,6 +40,7 @@ export async function bindReadonlyMcpTools(
   return manifests.map((manifest) => {
     const tool: Tool = {
       name: manifest.localName, description: manifest.description, kind: 'evidence', inputSchema: manifest.inputSchema,
+      source: 'mcp',
       isConcurrencySafe: () => manifest.concurrencySafe,
       call: (input, callOptions) => invoke(connection, manifest.localName, manifest.remoteName, tool, input, callOptions, options.executor, now, options.onEvent),
     };

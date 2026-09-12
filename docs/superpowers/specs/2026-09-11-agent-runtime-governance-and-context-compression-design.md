@@ -1,6 +1,6 @@
 # Agent Runtime Governance 与上下文压缩设计
 
-> 状态：总体技术路线已确认；增量 1 已完成实现与验收（提交 `250f8c6`），增量 2–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方“增量 1 实施状态”明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
+> 状态：总体技术路线已确认；增量 1 已完成实现与验收（当前基线 `7f50421`），增量 2 已完成实现与验收，增量 3–6 待后续独立计划实施。本文定义 Guard、Hooks、Loop Detection 与 Context Compression 的共同架构边界；除下方实施状态明确列出的内容外，代码和验收完成前，不得宣称这些能力已经达到生产可用。
 
 ## 1. 决策与范围
 
@@ -35,11 +35,12 @@
 
 ## 2. 当前实现基线
 
-本文以 `codex/event-message-v2` 分支提交 `250f8c6` 为增量 1 验收基线。当前事实如下：
+本文以 `codex/event-message-v2` 分支提交 `7f50421` 为增量 1 验收基线。当前事实如下：
 
-- `Guardian` 只有 `inspect()`；`GuardInput` 只有 run、Tool 与 ToolCall。
-- `GuardEngine` 并行运行 Guardian、合并最高风险；默认只有 `BashGuardian`。
+- 兼容路径仍保留 `GuardEngine` 和 `BashGuardian`；治理路径新增带 Profile/Impact 上下文的 `GuardianCoordinator`、四类 Guardian 和纯 `RiskPolicy`。
+- `GuardInput` 的新增字段保持可选以兼容旧调用；治理执行使用字段完整的 `GovernanceGuardInput`，Guardian 结果按注册顺序收敛。
 - Tool Admission 已在 Guard 前完成工具存在性、JSON、Schema 和语义校验。
+- 治理运行时按配置注入 `ProfileResolver`、`ImpactSurfaceProvider` 和 `GovernanceEvaluator`；默认未启用时不改变旧 GuardEngine 行为。
 - 默认 Hook 只有 `EvidenceBudgetHook` 与 `RiskActionHook`；HookExecutor 按注册顺序短路。
 - HITL 和外部执行恢复由 `pendingToolBatch`、Checkpoint revision、执行日志和应用服务共同处理。
 - ToolResult、Checkpoint、执行日志和耐久 Outbox 已通过窄用途 transition UoW 保证原子提交；V2 状态耦合事实在提交后由有界 Dispatcher 发布。
@@ -61,9 +62,21 @@
 - Harness 的生命周期/终态/工具结果/不确定执行事实，以及 HITL 确认和外部结果的状态耦合提交；提交成功后才发布 V2，具备 V1 映射的事件再向 V1 Generator 推送兼容事件。
 - 仍保留 AsyncGenerator V1 事件和 EventBus 兼容通道；V1 启动恢复不使用无持久游标的重复 replay。
 
+### 2.2 增量 2 实施状态
+
+增量 2 已交付以下内容：
+
+- `ProfileResolver` 与版本化、深冻结、带算法版本前缀的 Profile 快照；新 Run 在第一次模型调用前解析，恢复 Run 复用 Checkpoint 快照。
+- `ImpactSurfaceProvider` 与明确的 available/unavailable/stale 结果；一个可执行 Tool 批次只采集一次影响面，并把快照绑定到 `toolCallId + inputDigest`。
+- `GuardianCoordinator` 使用有界并行、注册顺序收敛 Finding，并将 Guardian 异常/超时转换为不泄漏异常文本的 `guard.unavailable` Finding。
+- Bash、MCP、Profile、ImpactSurface 四类确定性 Guardian，以及 `deny > confirm > allow` 的纯 `RiskPolicy`。
+- 治理快照在 ToolRunner 前强制执行；deny 生成稳定 `POLICY_DENIED` ToolResult，confirm 继续复用现有 HITL，旧 GuardEngine 路径保持兼容。
+- Tool source 元数据和公共 `RUN_STARTED.versionSnapshot` 白名单投影；V1 事件契约和 AsyncGenerator 行为不变。
+
+本增量的验证结果：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `git diff --check` 均通过；全量测试为 338 passed、1 skipped，跳过项为未配置真实 Prometheus 端点的环境测试。
+
 以下能力仍明确属于后续增量，当前尚未实现其行为：
 
-- 增量 2：Profile、Impact、Guardian 协调和 RiskPolicy。
 - 增量 3：控制型/观察型 Hook 重构及其完整生命周期语义。
 - 增量 4：循环签名、持久化计数、三级策略和 `LOOP_DETECTED` 运行时行为。当前只有事件契约。
 - 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入。

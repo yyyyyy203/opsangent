@@ -12,6 +12,7 @@ export function adaptSkillTool(skill: SkillDescriptor): Tool {
     name: `skill.${skill.name}`,
     description: skill.description,
     kind: 'utility',
+    source: 'skill',
     inputSchema: skill.inputSchema,
     ...(skill.execute === undefined ? {} : {
       call: (input, options) => skill.execute?.(input, options.signal) as ToolCallReturn,

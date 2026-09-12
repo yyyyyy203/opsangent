@@ -1,11 +1,31 @@
 import { AgentHarness } from '../agent/agent-harness.js';
-import type { ChatModel, CheckpointStore, Clock, DurableRunState, EventStore, EvidenceStore, Guardian, IdGenerator, MessageStore, Observability, Tool } from '../contracts/index.js';
+import type {
+  ChatModel,
+  CheckpointStore,
+  Clock,
+  DurableRunState,
+  EventStore,
+  EvidenceStore,
+  Guardian,
+  IdGenerator,
+  ImpactSurfaceProvider,
+  MessageStore,
+  Observability,
+  ProfileResolver,
+  Tool,
+} from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
 import { EventBus } from '../event/event-bus.js';
 import { EventFactory } from '../event/event-factory.js';
 import { BashGuardian } from '../guard/bash-guardian.js';
 import { GuardEngine } from '../guard/guard-engine.js';
+import { BatchGovernanceEvaluator } from '../guard/governance-evaluator.js';
+import { GuardianCoordinator } from '../guard/guardian-coordinator.js';
+import { ImpactSurfaceGuardian } from '../guard/impact-surface-guardian.js';
+import { McpGuardian } from '../guard/mcp-guardian.js';
+import { ProfileGuardian } from '../guard/profile-guardian.js';
+import { DeterministicRiskPolicy } from '../guard/risk-policy.js';
 import { EvidenceBudgetHook } from '../hooks/evidence-budget-hook.js';
 import { HookExecutor } from '../hooks/hook-executor.js';
 import { RiskActionHook } from '../hooks/risk-action-hook.js';
@@ -43,6 +63,7 @@ import { V2ModelAttemptObserver } from '../model/v2-attempt-observer.js';
 import { MessageAssemblerV2 } from '../event/v2/message-assembler.js';
 import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/v2/projection-runner.js';
 import { createSqlitePersistence } from '../infrastructure/sqlite/persistence-bundle.js';
+import { UnavailableImpactSurfaceProvider } from '../profiles/unavailable-impact-surface-provider.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -63,6 +84,12 @@ export interface AgentRuntimeOptions {
   modelProvider?: string;
   modelName?: string;
   modelRetry?: RetryingChatModelOptions;
+  /** Resolve the immutable Profile snapshot used by governance-enabled Runs. */
+  profileResolver?: ProfileResolver;
+  /** Capture the live impact surface once per admitted Tool batch. */
+  impactSurfaceProvider?: ImpactSurfaceProvider;
+  /** Opt into Profile/Impact/Guardian/RiskPolicy evaluation for new Runs. */
+  enableGovernance?: boolean;
   /** Use a durable V2 event/message store. Defaults to the in-memory store for tests. */
   eventMessageStore?: EventMessageStore;
   /** SQLite path for the complete Event, Checkpoint, Evidence and execution persistence bundle. */
@@ -72,6 +99,9 @@ export interface AgentRuntimeOptions {
 export function createAgentRuntime(options: AgentRuntimeOptions) {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
+  if (options.enableGovernance === true && options.profileResolver === undefined) {
+    throw new Error('profileResolver is required when governance is enabled.');
+  }
   if (options.sqlitePath !== undefined && (options.checkpoints !== undefined || options.eventMessageStore !== undefined)) {
     throw new Error('sqlitePath cannot be combined with partial persistence injection');
   }
@@ -171,6 +201,21 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     new BashGuardian(options.workspaceRoots),
     ...(options.guardians ?? []),
   ]);
+  const governanceEvaluator = options.enableGovernance === true
+    ? new BatchGovernanceEvaluator({
+      resolveTool: (name) => toolkit.get(name),
+      impactSurfaceProvider: options.impactSurfaceProvider ?? new UnavailableImpactSurfaceProvider(),
+      guardianCoordinator: new GuardianCoordinator([
+        new BashGuardian(options.workspaceRoots),
+        new McpGuardian(),
+        new ProfileGuardian(clock),
+        new ImpactSurfaceGuardian(),
+        ...(options.guardians ?? []),
+      ], { clock }),
+      riskPolicy: new DeterministicRiskPolicy(),
+      clock,
+    })
+    : undefined;
   const hooks = new HookExecutor([
     new EvidenceBudgetHook(clock),
     new RiskActionHook(clock),
@@ -192,6 +237,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     },
     { factory: eventFactoryV2, publisher: publishingV2, correlationId: (runId) => `run:${runId}` },
     durableState?.executions,
+    governanceEvaluator,
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
@@ -217,6 +263,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     admission: new ToolAdmission(toolkit),
+    ...(options.enableGovernance === true && options.profileResolver !== undefined
+      ? { profileResolver: options.profileResolver }
+      : {}),
     ...(durableState === undefined ? {} : { durableState }),
     v2Events: v2EventDependencies,
   });

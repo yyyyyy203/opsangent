@@ -1,4 +1,5 @@
-import type { AgentContext, AgentEvent, ToolCall, ToolExecutionResult, Clock } from '../contracts/index.js';
+import type { AgentContext, AgentEvent, ToolBatchGovernanceSnapshot, ToolCall, ToolExecutionResult, Clock } from '../contracts/index.js';
+import { checkpointChecksum } from '../contracts/index.js';
 import { systemClock } from '../contracts/index.js';
 import type { ExecutionOutcome } from './execution-types.js';
 import type { SerializableInterrupt } from '../contracts/hitl.js';
@@ -60,6 +61,10 @@ export class ToolBatchExecutor {
     signal: AbortSignal,
     callbacks: BatchExecutionCallbacks,
   ): AsyncGenerator<AgentEvent, BatchExecutionResult> {
+    const governance = await this.batchGovernance(calls, context, stepId, signal);
+    if (governance !== undefined && context.pendingToolBatch !== undefined) {
+      context.pendingToolBatch.governance = structuredClone(governance);
+    }
     const isSafe = (call: ToolCall): boolean => {
       const tool = this.toolkit.get(call.name);
       if (tool?.kind === 'action') return false;
@@ -68,11 +73,11 @@ export class ToolBatchExecutor {
     };
     const safe = calls.filter(isSafe);
     const unsafe = calls.filter((call) => !isSafe(call));
-    const safeStreams = safe.map((call) => this.executeOneStream(call, context, stepId, signal, callbacks));
+    const safeStreams = safe.map((call) => this.executeOneStream(call, context, stepId, signal, callbacks, governance));
     const outcomes: ExecutionOutcome[] = yield* mergeAsyncGenerators(safeStreams);
 
     for (const call of unsafe) {
-      const outcome = yield* this.executeOneStream(call, context, stepId, signal, callbacks);
+      const outcome = yield* this.executeOneStream(call, context, stepId, signal, callbacks, governance);
       outcomes.push(outcome);
       if (outcome.type === 'interrupted') {
         const completed = new Set(outcomes.map((item) => item.result.toolCallId));
@@ -98,10 +103,11 @@ export class ToolBatchExecutor {
     stepId: string,
     signal: AbortSignal,
     callbacks: BatchExecutionCallbacks,
+    governance?: ToolBatchGovernanceSnapshot,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     let outcome: ExecutionOutcome;
     const terminalEvents: AgentEvent[] = [];
-    const pipelineStream = this.pipeline.executeStream(call, context, stepId, signal);
+    const pipelineStream = this.pipeline.executeStream(call, context, stepId, signal, governance);
     let pipelineCompleted = false;
     try {
       while (true) {
@@ -125,6 +131,26 @@ export class ToolBatchExecutor {
     if (outcome.type === 'completed') await callbacks.onCompleted?.(call, outcome);
     yield* terminalEvents;
     return outcome;
+  }
+
+  private async batchGovernance(
+    calls: readonly ToolCall[],
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): Promise<ToolBatchGovernanceSnapshot | undefined> {
+    const persisted = context.pendingToolBatch?.governance;
+    const profile = context.governance?.profile;
+    if (persisted !== undefined && profile !== undefined
+      && context.pendingToolBatch?.stepId === stepId
+      && persisted.profileRevision === profile.revision
+      && persisted.profileDigest === profile.digest
+      && calls.every((call) => persisted.decisions.some((decision) => (
+        decision.toolCallId === call.id && decision.inputDigest === checkpointChecksum(call.input)
+      )))) {
+      return persisted;
+    }
+    return this.pipeline.evaluateBatchGovernance(calls, context, stepId, signal);
   }
 
   private ordered(calls: ToolCall[], outcomes: ExecutionOutcome[]): ToolExecutionResult[] {

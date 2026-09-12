@@ -53,7 +53,12 @@ export class PublicEventProjectorV2 {
   private publicPayload(event: AgentEventEnvelopeV2): JsonObject | null {
     switch (event.type) {
       case 'RUN_STARTED':
-        return sanitizeRecord({ profile: event.payload.profile, trigger: event.payload.trigger, deadline: event.payload.deadline, versionSnapshot: {} });
+        return sanitizeRecord({
+          profile: event.payload.profile,
+          trigger: event.payload.trigger,
+          deadline: event.payload.deadline,
+          versionSnapshot: publicVersionSnapshot(event.payload.versionSnapshot),
+        });
       case 'RUN_RESUMED':
         return sanitizeRecord({ checkpointVersion: event.payload.checkpointVersion, resumeReason: safeText(event.payload.resumeReason), newStreamId: event.payload.newStreamId });
       case 'RUN_PAUSED':
@@ -202,6 +207,15 @@ function safeText(value: string): string {
 function pickNumbers(value: JsonObject): JsonObject {
   const output: JsonObject = {};
   for (const [key, item] of Object.entries(value)) if (typeof item === 'number' && Number.isFinite(item)) output[key] = item;
+  return output;
+}
+
+function publicVersionSnapshot(value: Record<string, JsonValue>): JsonObject {
+  const output: JsonObject = {};
+  for (const key of ['profileRevision', 'profileDigest', 'policyVersion']) {
+    const candidate = value[key];
+    if (typeof candidate === 'string') output[key] = safeText(candidate);
+  }
   return output;
 }
 

@@ -16,6 +16,7 @@ import type {
   PendingAgentEventV2,
   DurableExecutionTransition,
   EventPublisherV2Dependencies,
+  ProfileResolver,
   ToolCall,
   RawToolCall,
   ToolExecutionResult,
@@ -46,6 +47,8 @@ export interface AgentHarnessDependencies {
   clock: Clock;
   ids: IdGenerator;
   admission: ToolAdmission;
+  /** Resolves exactly one immutable Profile snapshot for a fresh Run. */
+  profileResolver?: ProfileResolver;
   durableState?: DurableRunState;
   v2Events?: Omit<EventPublisherV2Dependencies, 'correlationId'> & {
     correlationId: string | ((runId: string) => string);
@@ -146,11 +149,24 @@ export class AgentHarness implements DiagnosisAgent {
     });
     try {
       if (!resumed) {
+        if (this.dependencies.profileResolver !== undefined) {
+          const capturedAt = frame.context.governance?.profile.capturedAt ?? this.dependencies.clock.now().toISOString();
+          const profile = await this.dependencies.profileResolver.resolve({
+            profileId: frame.context.profileId,
+            capturedAt,
+            signal,
+          });
+          const governance = frame.context.governance ?? createInitialRunGovernanceState({
+            profileId: frame.context.profileId,
+            capturedAt,
+          });
+          frame.context.governance = { ...governance, profile };
+        }
         await this.publishTransitionV2(frame, 'RUN_STARTED', {
           profile: frame.context.profileId,
           trigger: 'manual',
           deadline: new Date(Date.parse(frame.context.budget.startedAt) + frame.context.budget.maxDurationMs).toISOString(),
-          versionSnapshot: {},
+          versionSnapshot: governanceVersionSnapshot(frame.context),
         });
         yield* this.publishStream('RUN_STARTED', frame.context, { profileId: frame.context.profileId });
       }
@@ -1016,4 +1032,14 @@ function asDurableAgentError(error: unknown): unknown {
     };
   }
   return error;
+}
+
+function governanceVersionSnapshot(context: AgentContext): Record<string, string> {
+  const profile = context.governance?.profile;
+  if (profile === undefined) return {};
+  return {
+    profileRevision: profile.revision,
+    profileDigest: profile.digest,
+    policyVersion: profile.policyVersion,
+  };
 }

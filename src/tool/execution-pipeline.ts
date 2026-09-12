@@ -9,9 +9,13 @@ import type {
   ToolExecutionResult,
   ToolExecutionJournal,
   ToolExecutionRecord,
+  Tool,
   AgentEventPayloadMap,
   EventFactoryV2Like,
   EventPublisherV2Like,
+  GovernanceEvaluator,
+  ToolBatchGovernanceSnapshot,
+  ResolvedRisk,
 } from '../contracts/index.js';
 import { checkpointChecksum } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
@@ -49,18 +53,37 @@ export class ToolExecutionPipeline {
     private readonly options: ExecutionPipelineOptions,
     private readonly v2Events?: { factory: EventFactoryV2Like; publisher: EventPublisherV2Like; correlationId: (runId: string) => string },
     private readonly executionJournal?: ToolExecutionJournal,
+    private readonly governanceEvaluator?: GovernanceEvaluator,
   ) {}
+
+  public async evaluateBatchGovernance(
+    calls: readonly ToolCall[],
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+  ): Promise<ToolBatchGovernanceSnapshot | undefined> {
+    if (this.governanceEvaluator === undefined || context.governance === undefined) return undefined;
+    return this.governanceEvaluator.evaluateBatch({
+      runId: context.runId,
+      stepId,
+      profile: context.governance.profile,
+      calls,
+      signal,
+      deadline: toolContextDeadline(context),
+    });
+  }
 
   public async *executeStream(
     call: ToolCall,
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    governance?: ToolBatchGovernanceSnapshot,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     let outcome: ExecutionOutcome;
     try {
       if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
-      outcome = yield* this.executeValidatedStream(call, context, stepId, signal);
+      outcome = yield* this.executeValidatedStream(call, context, stepId, signal, governance);
     } catch (error) {
       const agentError = toAgentError(error);
       outcome = {
@@ -98,6 +121,7 @@ export class ToolExecutionPipeline {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    governance?: ToolBatchGovernanceSnapshot,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     const startedAt = this.clock.now().toISOString();
     const tool = this.toolkit.get(call.name);
@@ -122,12 +146,24 @@ export class ToolExecutionPipeline {
         risk: { severity: 'SAFE', requireConfirmation: false, findings: [] } };
     }
     const normalizedCall = { ...call, input: semantics?.value ?? validation.value ?? call.input };
-    const risk = await this.guard.inspect({ runId: context.runId, tool, toolCall: normalizedCall });
+    const risk = await this.resolveRisk(context, stepId, signal, tool, normalizedCall, governance);
     await this.publishV2('RISK_EVALUATED', context, {
       findings: risk.findings.map((finding) => ({ ruleId: finding.ruleId, severity: finding.severity, description: finding.description, toolName: finding.toolName })),
       mergedRisk: risk.severity,
-      policyVersion: 'guard-v1',
+      policyVersion: risk.policyVersion ?? 'guard-v1',
     }, stepId, call.id);
+    if (risk.disposition === 'deny') {
+      return {
+        type: 'completed',
+        result: this.result(call, 'failed', startedAt, undefined, {
+          code: 'POLICY_DENIED',
+          message: 'Tool call denied by policy.',
+          retryable: false,
+          details: { category: 'risk_policy' },
+        }),
+        risk,
+      };
+    }
     const hookContext: HookContext = {
       context,
       stepId,
@@ -199,14 +235,14 @@ export class ToolExecutionPipeline {
     };
     await this.publishV2('TOOL_STARTED', context, {
       toolName: tool.name,
-      source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
+      source: toolSource(tool),
       attempt: 1,
       deadline: new Date(toolContextDeadline(context)).toISOString(),
     }, stepId, call.id);
     yield* this.emitLegacy(context, 'TOOL_STARTED', legacyToolStartedPayload({
       toolCallId: call.id,
       toolName: tool.name,
-      source: tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin',
+      source: toolSource(tool),
       attempt: 1,
       deadline: new Date(toolContextDeadline(context)).toISOString(),
     }), stepId);
@@ -306,6 +342,39 @@ export class ToolExecutionPipeline {
     };
   }
 
+  private async resolveRisk(
+    context: AgentContext,
+    stepId: string,
+    signal: AbortSignal,
+    tool: NonNullable<ReturnType<Toolkit['get']>>,
+    call: ToolCall,
+    governance?: ToolBatchGovernanceSnapshot,
+  ): Promise<ResolvedRisk> {
+    if (this.governanceEvaluator === undefined) {
+      return this.guard.inspect({ runId: context.runId, tool, toolCall: call });
+    }
+    const snapshot = governance ?? await this.evaluateBatchGovernance([call], context, stepId, signal);
+    const profile = context.governance?.profile;
+    const decision = snapshot?.decisions.find((item) => item.toolCallId === call.id);
+    if (snapshot === undefined || profile === undefined || snapshot.profileDigest !== profile.digest
+      || snapshot.profileRevision !== profile.revision || decision === undefined
+      || decision.inputDigest !== checkpointChecksum(call.input)) {
+      return {
+        severity: 'CRITICAL',
+        requireConfirmation: false,
+        disposition: 'deny',
+        policyVersion: 'risk/v2',
+        findings: [{
+          ruleId: 'governance.snapshot-invalid',
+          severity: 'CRITICAL',
+          description: '治理快照与当前工具调用不一致。',
+          toolName: tool.name,
+        }],
+      };
+    }
+    return decision.decision;
+  }
+
   private prepareExecution(
     tool: NonNullable<ReturnType<Toolkit['get']>>,
     call: ToolCall,
@@ -357,6 +426,11 @@ function durationOf(result: ToolExecutionResult): number {
   const start = Date.parse(result.startedAt);
   const end = result.finishedAt === undefined ? start : Date.parse(result.finishedAt);
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : 0;
+}
+
+function toolSource(tool: Tool): string {
+  return tool.source
+    ?? (tool.name.startsWith('mcp.') ? 'mcp' : tool.name.startsWith('subagent.') ? 'subagent' : 'builtin');
 }
 
 function toolContextDeadline(context: AgentContext): number {

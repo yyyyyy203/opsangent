@@ -19,6 +19,7 @@ export function adaptMcpTool(
     name: `mcp.${descriptor.name}`,
     description: descriptor.description ?? `MCP tool ${descriptor.name}`,
     kind: 'evidence',
+    source: 'mcp',
     inputSchema: { jsonSchema: descriptor.inputSchema, validate },
     ...(executor === undefined ? {} : {
       call: (input, options) => executor.call(descriptor.name, input, options.signal),

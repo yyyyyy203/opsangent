@@ -98,6 +98,20 @@ describe('PublicEventProjectorV2', () => {
     });
   });
 
+  it('exposes only the allowlisted governance version snapshot', () => {
+    const projected = new PublicEventProjectorV2().project(event('RUN_STARTED', {
+      profile: 'group-buy-market', trigger: 'manual', deadline: '2026-09-07T11:00:00.000Z',
+      versionSnapshot: {
+        profileRevision: 'profile/v1', profileDigest: 'sha256:v1:abc', policyVersion: 'risk/v2',
+        internalEndpoint: 'http://10.0.0.8:9090', secret: 'do-not-expose',
+      },
+    }));
+    expect(projected?.payload).toEqual({
+      profile: 'group-buy-market', trigger: 'manual', deadline: '2026-09-07T11:00:00.000Z',
+      versionSnapshot: { profileRevision: 'profile/v1', profileDigest: 'sha256:v1:abc', policyVersion: 'risk/v2' },
+    });
+  });
+
   it('preserves the safe finish reason on completed public messages', () => {
     const projected = new PublicEventProjectorV2().project(event('MESSAGE_COMPLETED', {
       messageId: 'message-1',

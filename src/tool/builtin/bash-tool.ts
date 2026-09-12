@@ -17,6 +17,7 @@ export function createExternalBashTool(): Tool {
     name: 'bash',
     description: 'Run a shell command in a host-controlled sandbox.',
     kind: 'utility',
+    source: 'builtin',
     inputSchema: bashInputSchema,
     requireUserConfirm: true,
     trustedWhenInWorkspace: false,

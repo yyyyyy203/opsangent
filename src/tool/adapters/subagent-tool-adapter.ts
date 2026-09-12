@@ -20,6 +20,7 @@ export function adaptSubagentTool(subagent: SubagentDescriptor): Tool {
     name: `subagent.${subagent.name}`,
     description: subagent.description,
     kind: 'utility',
+    source: 'subagent',
     inputSchema: subagent.inputSchema,
     ...(subagent.invoke === undefined ? {} : { call: (input, options) => invokeWithLifecycle(subagent, input, options) }),
     userFacingLabel: () => `委派子 Agent：${subagent.name}`,

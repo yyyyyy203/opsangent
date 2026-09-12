@@ -1,6 +1,6 @@
 import type { Finding } from './guard.js';
 import { checkpointChecksum } from './stable-json.js';
-import type { RiskSeverity } from './tool.js';
+import type { RiskSeverity, Tool, ToolCall } from './tool.js';
 
 export interface ChangeFreezePeriod {
   id: string;
@@ -32,6 +32,25 @@ export interface ResolvedProfileSnapshot {
   policyVersion: string;
   capturedAt: string;
   source: 'legacy_checkpoint' | 'resolved';
+}
+
+/** Resolves one immutable Profile snapshot at the beginning of a Run. */
+export interface ProfileResolver {
+  resolve(input: {
+    profileId: string;
+    capturedAt: string;
+    signal: AbortSignal;
+  }): Promise<ResolvedProfileSnapshot>;
+}
+
+/** Captures the current impact surface independently from Guardian policy. */
+export interface ImpactSurfaceProvider {
+  capture(input: {
+    profile: ResolvedProfileSnapshot;
+    calls: readonly ToolCall[];
+    signal: AbortSignal;
+    deadline: number;
+  }): Promise<ImpactSurfaceAssessment>;
 }
 
 export type ImpactSurfaceAssessment =
@@ -111,6 +130,25 @@ export interface RunGovernanceState {
 const LEGACY_IMPACT_POLICY: ImpactPolicy = {
   unavailable: { S0: 'deny', S1: 'deny', S2: 'confirm', S3: 'confirm' },
 };
+
+export interface RiskPolicyInput {
+  tool: Tool;
+  profile: ResolvedProfileSnapshot;
+  impact: ImpactSurfaceAssessment;
+  findings: readonly Finding[];
+  unavailableGuardians: readonly string[];
+}
+
+export interface GovernanceEvaluator {
+  evaluateBatch(input: {
+    runId: string;
+    stepId: string;
+    profile: ResolvedProfileSnapshot;
+    calls: readonly ToolCall[];
+    signal: AbortSignal;
+    deadline: number;
+  }): Promise<ToolBatchGovernanceSnapshot>;
+}
 
 /** Creates the conservative state used for a new Run or a pre-governance checkpoint migration. */
 export function createInitialRunGovernanceState(input: {
