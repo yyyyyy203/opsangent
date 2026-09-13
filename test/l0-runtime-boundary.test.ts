@@ -12,6 +12,7 @@ import type {
   Tool,
 } from '../src/contracts/index.js';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
+import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js';
 import { DefaultToolResultCompactor } from '../src/context-compressor/tool-result-compactor.js';
 import { DefaultStreamingEvidenceRecorder } from '../src/application/streaming-evidence-recorder.js';
 
@@ -106,6 +107,54 @@ describe('L0 runtime boundary', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+
+  it('builds runtime-owned evidence tools through an injected factory before registration is frozen', () => {
+    const blobStore = {} as EvidenceBlobStore;
+    const manifests = {} as EvidenceManifestStore;
+    const tool: Tool = {
+      name: 'logs.capture',
+      description: 'capture logs',
+      kind: 'evidence',
+      inputSchema: z.object({}),
+      call: () => ({ blocks: [{ type: 'json', value: { ok: true } }] }),
+    };
+    let receivedRecorder: unknown;
+    const runtime = createAgentRuntime({
+      model: idleModel(),
+      workspaceRoots: [],
+      l0: { blobStore, manifests },
+      toolFactories: [({ streamingEvidenceRecorder }) => {
+        receivedRecorder = streamingEvidenceRecorder;
+        return [tool];
+      }],
+    });
+
+    expect(receivedRecorder).toBeInstanceOf(DefaultStreamingEvidenceRecorder);
+    expect(runtime.toolkit.get('logs.capture')).toBe(tool);
+  });
+
+  it('applies the readonly allowlist to tools produced by a factory', () => {
+    const tool: Tool = {
+      name: 'logs.search_evidence',
+      description: 'search logs',
+      kind: 'evidence',
+      inputSchema: z.object({}),
+      call: () => ({ blocks: [{ type: 'json', value: { ok: true } }] }),
+    };
+    const runtime = createInspectionRuntime({
+      model: idleModel(),
+      workspaceRoots: [],
+      allowedToolNames: [tool.name],
+      toolFactories: [() => [tool]],
+    });
+    expect(runtime.toolkit.get(tool.name)).toBeDefined();
+    expect(() => createInspectionRuntime({
+      model: idleModel(),
+      workspaceRoots: [],
+      allowedToolNames: [],
+      toolFactories: [() => [tool]],
+    })).toThrow(/not permitted/);
   });
 });
 

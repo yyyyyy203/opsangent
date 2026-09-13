@@ -101,7 +101,7 @@ Run: `pnpm vitest run test/durable-contracts.test.ts`
 
 Expected: all new contract tests pass.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/contracts src/storage/durable-codec.ts test/durable-contracts.test.ts
@@ -474,7 +474,7 @@ git commit -m "feat: stream large evidence into blob storage"
 - Consumes Task 8 page and capture contracts.
 - Produces injected page-client adapter plus `logs.capture`, `logs.search_evidence`, `logs.aggregate_evidence` and `logs.read_evidence_slice` Tool factories. No real Elastic endpoint or credentials are added.
 
-- [ ] **Step 1: Write failing bounded-page and Tool tests**
+- [x] **Step 1: Write failing bounded-page and Tool tests**
 
 ```ts
 it('rejects a source page above 512 KiB before it reaches the recorder', async () => {
@@ -489,17 +489,17 @@ it('returns evidence references and bounded redacted samples without exposing st
 });
 ```
 
-- [ ] **Step 2: Run RED verification**
+- [x] **Step 2: Run RED verification**
 
 Run: `pnpm vitest run test/paged-evidence-source.test.ts test/log-evidence-tools.test.ts`
 
 Expected: failure because no ELK page port or log Tool factories exist.
 
-- [ ] **Step 3: Implement injected bounded adapter and Tools**
+- [x] **Step 3: Implement injected bounded adapter and Tools**
 
 Define a source client independent of MCP SDK; its concrete MCP adapter uses opaque cursor/PIT inputs and converts each response to a page under 512 KiB. Log Tools only access evidence IDs owned by the current Run/Profile, return samples through opaque cursors, and never expose filesystem paths, query DSL or credentials. Mark capture `recoveryPolicy: 'verify_before_retry'` and read-only analysis Tools `replay_safe`.
 
-- [ ] **Step 4: Run GREEN verification**
+- [x] **Step 4: Run GREEN verification**
 
 Run: `pnpm vitest run test/paged-evidence-source.test.ts test/log-evidence-tools.test.ts test/mcp-http.test.ts`
 

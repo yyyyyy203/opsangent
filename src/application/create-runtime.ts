@@ -82,10 +82,22 @@ import { DefaultStreamingEvidenceRecorder } from './streaming-evidence-recorder.
 
 type EventMessageStore = EventStore & MessageStore;
 
+/** Ports exposed to late-bound Tool factories without importing infrastructure into the Harness. */
+export interface RuntimeToolPorts {
+  evidenceBlobs?: EvidenceBlobStore;
+  evidenceManifests?: EvidenceManifestStore;
+  streamingEvidenceRecorder?: StreamingEvidenceRecorder;
+  toolResultCompactor: ToolResultCompactor;
+}
+
+export type RuntimeToolFactory = (ports: RuntimeToolPorts) => readonly Tool[];
+
 export interface AgentRuntimeOptions {
   model: ChatModel;
   workspaceRoots: string[];
   tools?: Tool[];
+  /** Build tools after optional runtime-owned ports exist and before the Toolkit is frozen. */
+  toolFactories?: readonly RuntimeToolFactory[];
   guardians?: Guardian[];
   hooks?: ToolHook[];
   lifecycleObservers?: ToolLifecycleObserver[];
@@ -218,6 +230,18 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     evidence,
     events: { factory: eventFactoryV2, publisher: publishingV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
   });
+  let factoryTools: Tool[] = [];
+  try {
+    factoryTools = (options.toolFactories ?? []).flatMap((factory) => [...factory({
+      ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
+      ...(evidenceManifests === undefined ? {} : { evidenceManifests }),
+      ...(streamingEvidenceRecorder === undefined ? {} : { streamingEvidenceRecorder }),
+      toolResultCompactor,
+    })]);
+  } catch (error) {
+    persistence?.close();
+    throw error;
+  }
   const model = options.modelRetry === undefined
     ? options.model
     : new RetryingChatModel(options.model, {
@@ -248,6 +272,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const toolkit = new Toolkit();
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
   for (const tool of options.tools ?? []) toolkit.register(tool);
+  for (const tool of factoryTools) toolkit.register(tool);
   const guard = new GuardEngine([
     new BashGuardian(options.workspaceRoots),
     ...(options.guardians ?? []),

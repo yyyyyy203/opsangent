@@ -16,4 +16,5 @@ export * from './message-v2/index.js';
 export * from './model.js';
 export * from './observability.js';
 export * from './storage.js';
+export * from './log-evidence.js';
 export * from './tool.js';
