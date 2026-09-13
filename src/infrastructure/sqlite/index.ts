@@ -6,3 +6,4 @@ export * from './projection-store.js';
 export * from './migrations.js';
 export * from './persistence-bundle.js';
 export * from './sqlite-evidence-store.js';
+export * from './blob-manifest-store.js';

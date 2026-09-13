@@ -1,9 +1,11 @@
-import { systemClock, type Clock } from '../../contracts/common.js';
+import { systemClock, type Clock, type IdGenerator } from '../../contracts/common.js';
 import type { EventStore, MessageStore } from '../../contracts/event-store.js';
 import type {
   AgentStateUnitOfWork,
   DurableEventOutbox,
   DurableTransitionUnitOfWork,
+  EvidenceBlobStore,
+  EvidenceManifestStore,
   EvidenceQueryStore,
   EvidenceStore,
   ToolExecutionJournal,
@@ -17,6 +19,8 @@ import { SqliteEventOutboxStore } from './event-outbox-store.js';
 import { SqliteEventMessageStore } from './event-message-store.js';
 import { SqliteProjectionCheckpointStore, SqliteProjectionFailureSink } from './projection-store.js';
 import { SqliteEvidenceStore } from './sqlite-evidence-store.js';
+import { SqliteEvidenceManifestStore } from './blob-manifest-store.js';
+import { LocalEvidenceBlobStore } from '../blob/local-evidence-blob-store.js';
 
 export interface SqlitePersistenceLimits {
   maxEvidenceRawBytes?: number;
@@ -26,6 +30,8 @@ export interface CreateSqlitePersistenceOptions {
   path: string;
   clock?: Clock;
   limits?: SqlitePersistenceLimits;
+  evidenceBlobRootPath?: string;
+  ids?: IdGenerator;
 }
 
 /** Single ownership boundary for all SQLite-backed Agent state. */
@@ -36,6 +42,8 @@ export interface SqlitePersistenceBundle {
   transitions: DurableTransitionUnitOfWork;
   outbox: DurableEventOutbox;
   evidence: EvidenceStore & EvidenceQueryStore;
+  evidenceManifests: EvidenceManifestStore;
+  evidenceBlobs?: EvidenceBlobStore;
   eventMessages: EventStore & MessageStore;
   projectionCheckpoints: ProjectionCheckpointStoreV2;
   projectionFailures: ProjectionFailureSinkV2;
@@ -52,6 +60,14 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
     const evidence = new SqliteEvidenceStore(database, {
       ...(options.limits?.maxEvidenceRawBytes === undefined ? {} : { maxRawBytes: options.limits.maxEvidenceRawBytes }),
     });
+    const evidenceManifests = new SqliteEvidenceManifestStore(database);
+    const evidenceBlobs = options.evidenceBlobRootPath === undefined
+      ? undefined
+      : new LocalEvidenceBlobStore({
+        rootPath: options.evidenceBlobRootPath,
+        ...(options.clock === undefined ? {} : { clock }),
+        ...(options.ids === undefined ? {} : { ids: options.ids }),
+      });
     let closed = false;
     return {
       checkpoints: durable,
@@ -60,6 +76,8 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       transitions: durable,
       outbox,
       evidence,
+      evidenceManifests,
+      ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
       eventMessages,
       projectionCheckpoints: new SqliteProjectionCheckpointStore(database),
       projectionFailures: new SqliteProjectionFailureSink(database, () => clock.now().toISOString()),

@@ -73,3 +73,4 @@ export * from './infrastructure/simulator/index.js';
 export * from './profiles/index.js';
 export * from './infrastructure/prometheus/index.js';
 export * from './infrastructure/sqlite/index.js';
+export * from './infrastructure/blob/index.js';
