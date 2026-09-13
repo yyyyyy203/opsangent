@@ -219,6 +219,9 @@ export interface BeginEvidenceBlobInput {
   source: StreamingEvidenceSource;
   chunkIndex: number;
   chunkTargetBytes: number;
+  recordCount?: number;
+  firstCapturedAt?: string;
+  lastCapturedAt?: string;
 }
 
 export interface EvidenceBlobWriter {
