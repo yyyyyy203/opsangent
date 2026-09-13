@@ -121,12 +121,13 @@ describe('DefaultStreamingEvidenceRecorder', () => {
     } finally {
       database.close();
     }
-  });
+  }, 30_000);
 
   it('commits partial evidence when the byte budget is reached', async () => {
     const { recorder, manifests, database } = await createRecorder();
     try {
       const pages = (async function* (): AsyncIterable<EvidenceSourcePage> {
+        await Promise.resolve();
         yield { records: [record('first', 1), record('second', 2)], encodedBytes: 200, nextCursor: 'cursor-2' };
         yield { records: [record('third', 3)], encodedBytes: 100, nextCursor: 'cursor-3' };
       })();

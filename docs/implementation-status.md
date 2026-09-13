@@ -2,6 +2,14 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：L0 大证据边界与可替换 Runtime 组装
+
+2026-09-13：按 [L0 大证据实施计划](./superpowers/plans/2026-09-13-l0-large-evidence.md) 完成第一版大日志/Trace 边界。新增独立的 `EvidenceBlobStore`、`EvidenceManifestStore`、`StreamingEvidenceRecorder` 和 `ToolResultCompactor` 端口；本地实现使用注入的绝对 Blob 根目录、gzip NDJSON 分块、SQLite Manifest 控制面、pending/committed/partial/failed 可见性和分块 SHA-256。单页、chunk、capture、摘要和样本均有界；达到字节/记录/时长预算时提交 partial，Abort 或存储/协议失败不返回 evidence reference。
+
+模型视图通过可替换的 `CompactingChatModel` 和 OpenAI-compatible Formatter 双重收口：有 evidence reference 的超大 ToolResult 只保留有界摘要与引用，没有已提交证据引用则返回结构化 `BUDGET_EXCEEDED(tool_result_too_large)`。完整结果仍保留在 AgentContext，模型视图不修改持久化状态；`EVIDENCE_COLLECTED` 仅在 Manifest 可见后发布且按 evidenceId 幂等。Public SSE、Audit 和 LangSmith 投影均不携带原始 ToolResponse、storage key 或完整证据内容；LangSmith 只接收工具状态、耗时、错误码和 evidenceId。Runtime 支持注入 L0 ports，也支持 SQLite 配置显式的 `evidenceBlobRootPath`，未显式配置时不创建文件 Blob。
+
+本轮新增 64MiB 分块捕获、partial/Abort、红线脱敏、事件发布顺序、Compactor、模型边界和 Runtime 组装测试；当前已通过相关 lint、typecheck 和聚焦测试。ELK 实际分页 MCP/Source Adapter、对象存储、删除/保留任务、L1/L2 全量压缩和生产后端验收仍不在本增量范围。
+
 ## 最新增量：OpenAI-compatible 模型适配器
 
 2026-09-10：按 [OpenAI-compatible 模型适配设计](./superpowers/specs/2026-09-06-openai-compatible-model-design.md) 完成生产边界的首版实现。适配链路为 `OpenAICompatibleChatModel -> EventedChatModel -> AgentHarness`：官方 `openai@6.49.0` 负责 HTTP/SSE framing，项目内 Formatter 负责稳定消息和工具 Schema，Assembler 负责文本、交错 tool-call、usage、finish reason 和协议完整性，原始 arguments 原样交给四道工具闸门。

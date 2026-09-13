@@ -43,7 +43,7 @@ export class RuleBasedContextCompressor implements ContextCompressor {
     return Promise.resolve({ context, decision: { level: 'none', reason: 'below_thresholds' } });
   }
 
-  public async pruneToolResult(result: ToolExecutionResult): Promise<ToolExecutionResult> {
-    return this.toolResultCompactor.compact(result).result;
+  public pruneToolResult(result: ToolExecutionResult): Promise<ToolExecutionResult> {
+    return Promise.resolve(this.toolResultCompactor.compact(result).result);
   }
 }

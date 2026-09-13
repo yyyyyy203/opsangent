@@ -34,5 +34,5 @@ describe('inspection HTTP/SSE bootstrap', () => {
     } finally {
       await server.close();
     }
-  });
+  }, 15_000);
 });

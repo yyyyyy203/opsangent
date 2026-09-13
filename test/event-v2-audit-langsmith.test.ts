@@ -137,4 +137,37 @@ describe('LangSmithEventProjectorV2', () => {
     }))).resolves.toBeUndefined();
     await expect(broken.flush()).resolves.toBeUndefined();
   });
+
+  it('does not export raw tool result evidence to LangSmith', async () => {
+    const observability = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observability);
+    await projector.project(event('TOOL_STARTED', {
+      toolName: 'logs_subagent', source: 'subagent', attempt: 1,
+    }, { toolCallId: 'tool-1', attemptId: 'tool-attempt-1' }));
+    await projector.project(event('TOOL_RESULT', {
+      result: {
+        toolCallId: 'tool-1', toolName: 'logs_subagent', status: 'success',
+        startedAt: '2026-09-07T10:00:00.000Z', finishedAt: '2026-09-07T10:00:01.000Z',
+        response: {
+          blocks: [{ type: 'text', text: 'raw log line secret-token' }, { type: 'json', value: { traceId: 'raw-trace' } }],
+          metadata: { rawEvidence: 'should-not-leave-control-plane' },
+        },
+      },
+      durationMs: 1000,
+      evidenceIds: ['evidence-1'],
+    }, { toolCallId: 'tool-1', attemptId: 'tool-attempt-1' }));
+
+    expect(observability.handles[0]?.output).toEqual({
+      toolCallId: 'tool-1',
+      toolName: 'logs_subagent',
+      status: 'success',
+      durationMs: 1000,
+      evidenceIds: ['evidence-1'],
+      startedAt: '2026-09-07T10:00:00.000Z',
+      finishedAt: '2026-09-07T10:00:01.000Z',
+    });
+    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('raw log line');
+    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('raw-trace');
+    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('rawEvidence');
+  });
 });

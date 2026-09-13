@@ -6,6 +6,9 @@ import type {
   DurableRunState,
   EventStore,
   EvidenceStore,
+  EvidenceBlobStore,
+  EvidenceManifestStore,
+  StreamingEvidenceRecorder,
   Guardian,
   IdGenerator,
   ImpactSurfaceProvider,
@@ -17,6 +20,8 @@ import type {
 } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
+import { DefaultToolResultCompactor } from '../context-compressor/tool-result-compactor.js';
+import type { ToolResultCompactor } from '../context-compressor/types.js';
 import { EventBus } from '../event/event-bus.js';
 import { EventFactory } from '../event/event-factory.js';
 import { BashGuardian } from '../guard/bash-guardian.js';
@@ -64,6 +69,7 @@ import { AuditProjectorV2 } from '../event/projectors/audit-projector.js';
 import { LangSmithEventProjectorV2 } from '../event/projectors/langsmith-projector.js';
 import { EventStreamService } from '../api/event-stream-service.js';
 import { EventedChatModel } from '../model/evented-model.js';
+import { CompactingChatModel } from '../model/compacting-model.js';
 import { RetryingChatModel, type RetryingChatModelOptions } from '../model/retrying-model.js';
 import { ObservabilityModelAttemptObserver } from '../observability/model-attempt-observer.js';
 import { CompositeModelAttemptObserver } from '../model/model-attempt-observer.js';
@@ -72,6 +78,7 @@ import { MessageAssemblerV2 } from '../event/v2/message-assembler.js';
 import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/v2/projection-runner.js';
 import { createSqlitePersistence } from '../infrastructure/sqlite/persistence-bundle.js';
 import { UnavailableImpactSurfaceProvider } from '../profiles/unavailable-impact-surface-provider.js';
+import { DefaultStreamingEvidenceRecorder } from './streaming-evidence-recorder.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -103,6 +110,15 @@ export interface AgentRuntimeOptions {
   eventMessageStore?: EventMessageStore;
   /** SQLite path for the complete Event, Checkpoint, Evidence and execution persistence bundle. */
   sqlitePath?: string;
+  /** Explicit absolute Blob root used only when SQLite-backed L0 Blob storage is desired. */
+  evidenceBlobRootPath?: string;
+  /** Optional L0 data-plane and model-view ports. */
+  l0?: {
+    blobStore?: EvidenceBlobStore;
+    manifests?: EvidenceManifestStore;
+    streamingEvidenceRecorder?: StreamingEvidenceRecorder;
+    toolResultCompactor?: ToolResultCompactor;
+  };
 }
 
 export function createAgentRuntime(options: AgentRuntimeOptions) {
@@ -114,7 +130,12 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   if (options.sqlitePath !== undefined && (options.checkpoints !== undefined || options.eventMessageStore !== undefined)) {
     throw new Error('sqlitePath cannot be combined with partial persistence injection');
   }
-  const persistence = options.sqlitePath === undefined ? undefined : createSqlitePersistence({ path: options.sqlitePath, clock });
+  const persistence = options.sqlitePath === undefined ? undefined : createSqlitePersistence({
+    path: options.sqlitePath,
+    clock,
+    ids,
+    ...(options.evidenceBlobRootPath === undefined ? {} : { evidenceBlobRootPath: options.evidenceBlobRootPath }),
+  });
   const inMemoryDurable = persistence === undefined && options.checkpoints === undefined
     ? new InMemoryDurableState(clock)
     : undefined;
@@ -172,6 +193,27 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     // cursor. Replaying it after draining the Outbox would duplicate events.
     return eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler'] });
   });
+  const evidenceBlobs = options.l0?.blobStore ?? persistence?.evidenceBlobs;
+  const evidenceManifests = options.l0?.manifests ?? persistence?.evidenceManifests;
+  const toolResultCompactor = options.l0?.toolResultCompactor ?? new DefaultToolResultCompactor();
+  const l0DataPlaneRequested = options.evidenceBlobRootPath !== undefined
+    || options.l0?.blobStore !== undefined
+    || options.l0?.manifests !== undefined;
+  if (l0DataPlaneRequested && options.l0?.streamingEvidenceRecorder === undefined
+    && (evidenceBlobs === undefined || evidenceManifests === undefined)) {
+    persistence?.close();
+    throw new Error('L0 Blob storage requires both blobStore and manifests ports.');
+  }
+  const streamingEvidenceRecorder = options.l0?.streamingEvidenceRecorder
+    ?? (evidenceBlobs === undefined || evidenceManifests === undefined
+      ? undefined
+      : new DefaultStreamingEvidenceRecorder({
+        blobStore: evidenceBlobs,
+        manifests: evidenceManifests,
+        clock,
+        ids,
+        events: { factory: eventFactoryV2, publisher: publishingV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
+      }));
   const evidenceRecorder = options.evidenceRecorder ?? new DefaultEvidenceRecorder({
     evidence,
     events: { factory: eventFactoryV2, publisher: publishingV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
@@ -264,7 +306,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
   const agent = new AgentHarness({
-    model: new EventedChatModel(model, publishingV2, eventFactoryV2, {
+    model: new EventedChatModel(new CompactingChatModel(model, toolResultCompactor), publishingV2, eventFactoryV2, {
       provider: options.modelProvider ?? 'configured',
       model: options.modelName ?? 'configured',
       purpose: 'inspection',
@@ -279,6 +321,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       maxMessagesBeforeL1: 40,
       maxSerializedBytesBeforeL2: 256_000,
       keepRecentMessages: 16,
+      toolResultCompactor,
     }),
     events,
     eventFactory,
@@ -300,6 +343,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     checkpoints,
     durableState,
     evidence,
+    evidenceBlobs,
+    evidenceManifests,
+    streamingEvidenceRecorder,
+    toolResultCompactor,
     evidenceRecorder,
     hitl: new HitlService(
       checkpoints,

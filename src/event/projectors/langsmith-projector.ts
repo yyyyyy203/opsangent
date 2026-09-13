@@ -1,4 +1,4 @@
-import type { AgentEventEnvelopeV2, Observability, SpanHandle, SpanStart } from '../../contracts/index.js';
+import type { AgentEventEnvelopeV2, Observability, SpanHandle, SpanStart, ToolResultPayload } from '../../contracts/index.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
 import type { EventProjectorV2 } from '../v2/event-publisher.js';
 
@@ -29,7 +29,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
           this.start({ name: `tool.${event.payload.toolName}`, kind: 'tool', runId: event.runId, ...identityFields(event), spanKey: key, parentSpanKey: runKey(event.runId), event, attributes: { source: event.payload.source, attempt: event.payload.attempt } });
           break;
         }
-        case 'TOOL_RESULT': this.end(this.toolKeys.get(`${event.runId}:${event.toolCallId ?? event.payload.result.toolCallId}`) ?? '', event.payload); break;
+        case 'TOOL_RESULT': this.end(this.toolKeys.get(`${event.runId}:${event.toolCallId ?? event.payload.result.toolCallId}`) ?? '', toolResultOutput(event.payload)); break;
         case 'TOOL_FAILED': this.fail(event.toolCallId === undefined ? '' : this.toolKeys.get(`${event.runId}:${event.toolCallId}`) ?? '', event.payload.error); break;
         case 'SUBAGENT_STARTED': this.start({ name: `subagent.${event.payload.subagentType}`, kind: 'chain', runId: event.payload.childRunId, ...identityFields(event), spanKey: runKey(event.payload.childRunId), parentSpanKey: runKey(event.payload.parentRunId), event, attributes: { budget: event.payload.budget, toolCallId: event.toolCallId } }); break;
         case 'SUBAGENT_COMPLETED': this.end(runKey(event.payload.childRunId), event.payload); break;
@@ -85,5 +85,26 @@ function modelOutput(payload: Extract<AgentEventEnvelopeV2, { type: 'MODEL_CALL_
     ...(payload.ttftMs === undefined ? {} : { ttftMs: payload.ttftMs }),
     durationMs: payload.durationMs,
     ...(payload.finishReason === undefined ? {} : { finishReason: payload.finishReason }),
+  };
+}
+
+/**
+ * LangSmith receives operational metadata only. The complete ToolResult remains
+ * in the durable control plane and must never be copied into an observability
+ * exporter, because its response may contain raw logs, traces, or credentials.
+ */
+function toolResultOutput(payload: ToolResultPayload): Record<string, unknown> {
+  const result = payload.result;
+  return {
+    toolCallId: result.toolCallId,
+    toolName: result.toolName,
+    status: result.status,
+    durationMs: payload.durationMs,
+    evidenceIds: payload.evidenceIds,
+    ...(result.startedAt === undefined ? {} : { startedAt: result.startedAt }),
+    ...(result.finishedAt === undefined ? {} : { finishedAt: result.finishedAt }),
+    ...(result.error === undefined ? {} : {
+      error: { code: result.error.code, retryable: result.error.retryable },
+    }),
   };
 }

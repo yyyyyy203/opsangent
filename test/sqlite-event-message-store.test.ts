@@ -29,7 +29,7 @@ describe('SqliteEventMessageStore', () => {
     const database = SqliteDatabase.open(path);
     const store = new SqliteEventMessageStore(database);
     expect(database.raw.pragma('journal_mode', { simple: true })).toBe('wal');
-    expect(database.raw.pragma('user_version', { simple: true })).toBe(3);
+    expect(database.raw.pragma('user_version', { simple: true })).toBe(4);
     const draft = new EventFactoryV2(clock, ids()).create('RUN_CANCELLED', {
       runId: 'run-1', correlationId: 'corr-1', visibility: 'audit', durability: 'durable',
     }, { actor: 'user-1', reason: 'stop', stage: 'triage' });
@@ -39,7 +39,7 @@ describe('SqliteEventMessageStore', () => {
     const reopened = SqliteDatabase.open(path);
     const recovered = new SqliteEventMessageStore(reopened);
     expect(await recovered.readRun('run-1', 0, 10)).toEqual([saved]);
-    expect(reopened.raw.pragma('user_version', { simple: true })).toBe(3);
+    expect(reopened.raw.pragma('user_version', { simple: true })).toBe(4);
     reopened.close();
   });
 

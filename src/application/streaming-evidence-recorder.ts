@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { randomIdGenerator, systemClock, type Clock, type IdGenerator } from '../contracts/common.js';
-import { canonicalJson, assertEvidenceCaptureBudget } from '../contracts/index.js';
+import { canonicalJson, assertEvidenceCaptureBudget, type JsonValue } from '../contracts/index.js';
 import type { EvidenceRecorderEventChannel } from './evidence-recorder.js';
 import type {
   CommitEvidenceManifestInput,
@@ -18,7 +18,6 @@ import type {
 
 const DEFAULT_PAGE_BYTES = 512 * 1024;
 const DEFAULT_CHUNK_BYTES = 4 * 1024 * 1024;
-const DEFAULT_SUMMARY_BYTES = 16 * 1024;
 const DEFAULT_SAMPLE_BYTES = 2 * 1024;
 const DEFAULT_REDACTION_POLICY = 'redaction/v1';
 const MAX_TOP_VALUES = 20;
@@ -408,8 +407,8 @@ function defaultRedactor(record: NormalizedLogRecord): NormalizedLogRecord {
   };
 }
 
-function redactFields(fields: Record<string, import('../contracts/common.js').JsonValue>): Record<string, import('../contracts/common.js').JsonValue> {
-  const output: Record<string, import('../contracts/common.js').JsonValue> = {};
+function redactFields(fields: Record<string, JsonValue>): Record<string, JsonValue> {
+  const output: Record<string, JsonValue> = {};
   for (const [key, value] of Object.entries(fields)) {
     if (/authorization|cookie|password|passwd|secret|token|api[-_]?key/i.test(key)) {
       output[key] = '[REDACTED]';
@@ -420,11 +419,11 @@ function redactFields(fields: Record<string, import('../contracts/common.js').Js
   return output;
 }
 
-function redactValue(value: import('../contracts/common.js').JsonValue): import('../contracts/common.js').JsonValue {
+function redactValue(value: JsonValue): JsonValue {
   if (typeof value === 'string') return redactText(value);
   if (Array.isArray(value)) return value.map(redactValue);
   if (value !== null && typeof value === 'object') {
-    const output: Record<string, import('../contracts/common.js').JsonValue> = {};
+    const output: Record<string, JsonValue> = {};
     for (const [key, item] of Object.entries(value)) {
       output[key] = /authorization|cookie|password|passwd|secret|token|api[-_]?key/i.test(key)
         ? '[REDACTED]'

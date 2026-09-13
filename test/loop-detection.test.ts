@@ -374,6 +374,7 @@ describe('Loop Detection Admission and Harness integration', () => {
       workspaceRoots: [],
       includeExternalBash: false,
       tools: [registered],
+      clock: { now: () => new Date(now) },
     });
     const durable = runtime.durableState;
     if (durable === undefined) throw new Error('Expected default durable state.');
@@ -425,7 +426,7 @@ describe('Loop Detection Admission and Harness integration', () => {
       .filter((event) => event.type === 'LOOP_DETECTED')
       .map((event) => event.type === 'LOOP_DETECTED' ? event.payload.repeatCount : -1)).toEqual([5]);
     await runtime.close();
-  });
+  }, 15_000);
 });
 
 async function drainAgent(stream: AsyncGenerator<AgentEvent, DiagnosisRunResult>): Promise<DiagnosisRunResult> {

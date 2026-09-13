@@ -9,6 +9,7 @@ export interface GeneratedLogPageOptions {
 }
 
 export async function* generatedLogPages(options: GeneratedLogPageOptions): AsyncIterable<EvidenceSourcePage> {
+  await Promise.resolve();
   if (!Number.isSafeInteger(options.totalBytes) || options.totalBytes <= 0) throw new RangeError('totalBytes must be positive');
   const pageBytes = options.pageBytes ?? 512 * 1024;
   if (!Number.isSafeInteger(pageBytes) || pageBytes <= 0) throw new RangeError('pageBytes must be positive');

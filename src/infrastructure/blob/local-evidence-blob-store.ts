@@ -94,16 +94,18 @@ class LocalEvidenceBlobWriter implements EvidenceBlobWriter {
 
   public constructor(private readonly options: LocalEvidenceBlobWriterOptions) {}
 
-  public async write(chunk: Uint8Array, options?: { signal?: AbortSignal }): Promise<void> {
-    this.assertOpen();
-    if (options?.signal?.aborted === true) throw new Error('Blob write aborted');
-    const piece = Buffer.from(chunk);
-    if (piece.length === 0) return;
-    if (this.sourceBytes + piece.length > this.options.input.chunkTargetBytes) {
-      throw new RangeError('Blob chunk exceeds the configured target size');
-    }
-    this.pieces.push(piece);
-    this.sourceBytes += piece.length;
+  public write(chunk: Uint8Array, options?: { signal?: AbortSignal }): Promise<void> {
+    return Promise.resolve().then(() => {
+      this.assertOpen();
+      if (options?.signal?.aborted === true) throw new Error('Blob write aborted');
+      const piece = Buffer.from(chunk);
+      if (piece.length === 0) return;
+      if (this.sourceBytes + piece.length > this.options.input.chunkTargetBytes) {
+        throw new RangeError('Blob chunk exceeds the configured target size');
+      }
+      this.pieces.push(piece);
+      this.sourceBytes += piece.length;
+    });
   }
 
   public async commit(): Promise<EvidenceBlobDescriptor> {
