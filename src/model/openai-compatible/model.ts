@@ -4,6 +4,7 @@ import { OpenAIStreamAssembler } from './assembler.js';
 import { classifyOpenAICompatibleError } from './error-classifier.js';
 import type { OpenAICompatibleClient, OpenAICompatibleClientRequestOptions } from './client.js';
 import { formatChatRequest } from './formatter.js';
+import type { ToolResultCompactor } from '../../context-compressor/types.js';
 import type { OpenAICompatibleStreamChunk } from './types.js';
 
 export interface OpenAICompatibleChatModelOptions {
@@ -12,6 +13,7 @@ export interface OpenAICompatibleChatModelOptions {
   clock?: () => number;
   transientForbiddenCodes?: readonly string[];
   quotaCodes?: readonly string[];
+  toolResultCompactor?: ToolResultCompactor;
 }
 
 export class OpenAICompatibleChatModel implements ChatModel {
@@ -29,6 +31,7 @@ export class OpenAICompatibleChatModel implements ChatModel {
       model: this.config.model,
       includeUsage: this.config.includeUsage ?? true,
       ...(callOptions.toolChoice === undefined ? {} : { toolChoice: callOptions.toolChoice }),
+      ...(this.config.toolResultCompactor === undefined ? {} : { toolResultCompactor: this.config.toolResultCompactor }),
     });
     const upstreamOptions: OpenAICompatibleClientRequestOptions = {
       signal: combined.signal,

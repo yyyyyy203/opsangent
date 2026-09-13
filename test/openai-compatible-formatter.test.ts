@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentMessage, Tool, ToolExecutionResult } from '../src/contracts/index.js';
 import { formatChatRequest, renderToolResultForModel } from '../src/model/openai-compatible/formatter.js';
+import { DefaultToolResultCompactor } from '../src/context-compressor/tool-result-compactor.js';
 
 function message(role: AgentMessage['role'], blocks: AgentMessage['blocks'], id = `${role}-1`): AgentMessage {
   return { id, role, blocks, createdAt: '2026-09-09T00:00:00.000Z' };
@@ -155,6 +156,28 @@ describe('OpenAI-compatible request formatter', () => {
         metadata: { secret: 'no' },
       },
     }))).toBe('{"status":"success"}');
+  });
+
+  it('compacts oversized evidence-backed results at the model boundary', () => {
+    const huge = result({
+      response: {
+        blocks: [
+          { type: 'text', text: 'raw-log-marker-' + 'x'.repeat(20_000) },
+          { type: 'evidence_ref', evidenceId: 'evidence-1' },
+        ],
+        evidenceIds: ['evidence-1'],
+      },
+    });
+    const compactor = new DefaultToolResultCompactor({ maxBytes: 1024 });
+    const content = renderToolResultForModel(huge, compactor);
+    const request = formatChatRequest([
+      message('tool', [{ type: 'tool_result', result: huge }]),
+    ], [], { model: 'test', includeUsage: false, toolResultCompactor: compactor });
+
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(1024);
+    expect(content).not.toContain('raw-log-marker');
+    expect(content).toContain('evidence-1');
+    expect(request.messages[0]?.content).toBe(content);
   });
 
   it('rejects unrepresentable messages before a request is sent', () => {

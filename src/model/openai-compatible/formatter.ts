@@ -9,6 +9,8 @@ import type {
   OpenAICompatibleToolCall,
   OpenAICompatibleToolMessage,
 } from './types.js';
+import { DefaultToolResultCompactor } from '../../context-compressor/tool-result-compactor.js';
+import type { ToolResultCompactor } from '../../context-compressor/types.js';
 
 const CORRECTION_DETAIL_KEYS = [
   'gate',
@@ -21,16 +23,17 @@ const CORRECTION_DETAIL_KEYS = [
 ] as const;
 
 type CorrectionDetailKey = typeof CORRECTION_DETAIL_KEYS[number];
+const DEFAULT_TOOL_RESULT_COMPACTOR = new DefaultToolResultCompactor();
 
 export function formatChatRequest(
   messages: readonly AgentMessage[],
   tools: readonly Tool[],
-  options: { model: string; includeUsage: boolean; toolChoice?: 'none' },
+  options: { model: string; includeUsage: boolean; toolChoice?: 'none'; toolResultCompactor?: ToolResultCompactor },
 ): OpenAICompatibleRequest {
   if (options.model.trim().length === 0) throw protocolFailure('Model name is required.');
 
   const formattedMessages: OpenAICompatibleMessage[] = [];
-  for (const message of messages) formattedMessages.push(...formatMessage(message));
+  for (const message of messages) formattedMessages.push(...formatMessage(message, options.toolResultCompactor ?? DEFAULT_TOOL_RESULT_COMPACTOR));
 
   const formattedTools = tools.length === 0 ? undefined : tools.map(formatTool);
   return {
@@ -43,15 +46,19 @@ export function formatChatRequest(
   };
 }
 
-export function renderToolResultForModel(result: ToolExecutionResult): string {
-  const projected: Record<string, unknown> = { status: result.status };
-  const blocks = result.response?.blocks.map(projectToolResponseBlock).filter((block): block is Record<string, unknown> => block !== undefined);
+export function renderToolResultForModel(
+  result: ToolExecutionResult,
+  compactor: ToolResultCompactor = DEFAULT_TOOL_RESULT_COMPACTOR,
+): string {
+  const modelResult = compactor.compact(result).result;
+  const projected: Record<string, unknown> = { status: modelResult.status };
+  const blocks = modelResult.response?.blocks.map(projectToolResponseBlock).filter((block): block is Record<string, unknown> => block !== undefined);
   if (blocks !== undefined && blocks.length > 0) projected.blocks = blocks;
-  if (result.error !== undefined) projected.error = projectError(result.error);
+  if (modelResult.error !== undefined) projected.error = projectError(modelResult.error);
   return stableJson(projected);
 }
 
-function formatMessage(message: AgentMessage): OpenAICompatibleMessage[] {
+function formatMessage(message: AgentMessage, compactor: ToolResultCompactor): OpenAICompatibleMessage[] {
   switch (message.role) {
     case 'system':
       return [formatTextualMessage('system', message.blocks)];
@@ -60,7 +67,7 @@ function formatMessage(message: AgentMessage): OpenAICompatibleMessage[] {
     case 'assistant':
       return [formatAssistantMessage(message.blocks)];
     case 'tool':
-      return formatToolMessages(message.blocks);
+      return formatToolMessages(message.blocks, compactor);
     default:
       return assertNever(message.role);
   }
@@ -110,14 +117,14 @@ function formatAssistantMessage(blocks: readonly MessageBlock[]): OpenAICompatib
   };
 }
 
-function formatToolMessages(blocks: readonly MessageBlock[]): OpenAICompatibleToolMessage[] {
+function formatToolMessages(blocks: readonly MessageBlock[], compactor: ToolResultCompactor): OpenAICompatibleToolMessage[] {
   const messages: OpenAICompatibleToolMessage[] = [];
   for (const block of blocks) {
     if (block.type !== 'tool_result') throw protocolFailure('Tool messages can contain only tool result blocks.');
     messages.push({
       role: 'tool',
       tool_call_id: requireIdentity(block.result.toolCallId, 'tool call id'),
-      content: renderToolResultForModel(block.result),
+      content: renderToolResultForModel(block.result, compactor),
     });
   }
   if (messages.length === 0) throw protocolFailure('Tool messages must contain a tool result.');

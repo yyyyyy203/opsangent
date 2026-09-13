@@ -8,6 +8,7 @@ export * from './application/hitl-service.js';
 export * from './application/external-tool-result-service.js';
 export * from './application/create-runtime.js';
 export * from './context-compressor/rule-based-compressor.js';
+export * from './context-compressor/tool-result-compactor.js';
 export * from './context-compressor/types.js';
 export * from './contracts/index.js';
 export * from './event/event-bus.js';

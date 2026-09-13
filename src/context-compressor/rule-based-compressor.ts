@@ -1,14 +1,20 @@
 import type { AgentContext, ToolExecutionResult } from '../contracts/index.js';
-import type { CompressionResult, ContextCompressor } from './types.js';
+import { DefaultToolResultCompactor } from './tool-result-compactor.js';
+import type { CompressionResult, ContextCompressor, ToolResultCompactor } from './types.js';
 
 export interface RuleBasedCompressorOptions {
   maxMessagesBeforeL1: number;
   maxSerializedBytesBeforeL2: number;
   keepRecentMessages: number;
+  toolResultCompactor?: ToolResultCompactor;
 }
 
 export class RuleBasedContextCompressor implements ContextCompressor {
-  public constructor(private readonly options: RuleBasedCompressorOptions) {}
+  private readonly toolResultCompactor: ToolResultCompactor;
+
+  public constructor(private readonly options: RuleBasedCompressorOptions) {
+    this.toolResultCompactor = options.toolResultCompactor ?? new DefaultToolResultCompactor();
+  }
 
   public compress(context: AgentContext): Promise<CompressionResult> {
     const serializedBytes = Buffer.byteLength(JSON.stringify(context.messages), 'utf8');
@@ -37,23 +43,7 @@ export class RuleBasedContextCompressor implements ContextCompressor {
     return Promise.resolve({ context, decision: { level: 'none', reason: 'below_thresholds' } });
   }
 
-  public pruneToolResult(result: ToolExecutionResult): Promise<ToolExecutionResult> {
-    const text = JSON.stringify(result.response);
-    if (text.length <= 4_000) return Promise.resolve(result);
-    return Promise.resolve({
-      ...result,
-      response: {
-        blocks: [{
-          type: 'json',
-          value: {
-            pruned: true,
-            originalBytes: Buffer.byteLength(text, 'utf8'),
-            evidenceIds: result.response?.evidenceIds ?? [],
-          },
-        }],
-        ...(result.response?.evidenceIds === undefined ? {} : { evidenceIds: result.response.evidenceIds }),
-        ...(result.response?.metadata === undefined ? {} : { metadata: result.response.metadata }),
-      },
-    });
+  public async pruneToolResult(result: ToolExecutionResult): Promise<ToolExecutionResult> {
+    return this.toolResultCompactor.compact(result).result;
   }
 }
