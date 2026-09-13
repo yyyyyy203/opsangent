@@ -14,3 +14,21 @@ export interface ContextCompressor {
   compress(context: AgentContext): Promise<CompressionResult>;
   pruneToolResult(result: ToolExecutionResult): Promise<ToolExecutionResult>;
 }
+
+export interface ToolResultCompactionDecision {
+  level: 'none' | 'L0';
+  originalBytes: number;
+  modelBytes: number;
+}
+
+export interface ToolResultCompaction {
+  result: ToolExecutionResult;
+  decision: ToolResultCompactionDecision;
+}
+
+export interface ToolResultCompactor {
+  compact(
+    result: ToolExecutionResult,
+    options?: { maxBytes?: number },
+  ): ToolResultCompaction;
+}
