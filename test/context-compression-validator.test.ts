@@ -117,7 +117,7 @@ describe('DefaultCompressionValidator', () => {
     const before = baseContext([callMessage('call-old'), resultMessage('call-old')], { evidenceIds: ['evidence-1'] });
     const candidate = baseContext([summaryMessage(['call-old'], ['evidence-1'])], { evidenceIds: ['evidence-1'], contextVersion: 2 });
     const store: EvidenceManifestStore = {
-      getVisible: async () => visibleManifest('run-1', 'evidence-1'),
+      getVisible: () => Promise.resolve(visibleManifest('run-1', 'evidence-1')),
     } as unknown as EvidenceManifestStore;
 
     const result = await validator(store).validate({
@@ -135,7 +135,7 @@ describe('DefaultCompressionValidator', () => {
     const before = baseContext([callMessage('call-old'), resultMessage('call-old')], { evidenceIds: ['evidence-1'] });
     const candidate = baseContext([summaryMessage(['call-old'], ['evidence-1'])], { evidenceIds: ['evidence-1'], contextVersion: 2 });
     const store: EvidenceManifestStore = {
-      getVisible: async () => visibleManifest('run-2', 'evidence-1'),
+      getVisible: () => Promise.resolve(visibleManifest('run-2', 'evidence-1')),
     } as unknown as EvidenceManifestStore;
 
     const result = await validator(store).validate({

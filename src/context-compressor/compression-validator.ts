@@ -53,7 +53,7 @@ export class DefaultCompressionValidator implements CompressionValidator {
       }
     }
 
-    for (const [callId, messageIds] of candidateCalls) {
+    for (const [callId] of candidateCalls) {
       if (candidateResults.has(callId) || pendingCalls.has(callId)) continue;
       const originalResult = findResultMessage(input.before.messages, callId);
       if (originalResult !== undefined && sourceIds.has(originalResult.id)) {

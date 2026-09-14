@@ -42,6 +42,7 @@ class RecordingSummaryModel implements ChatModel {
     tools: Tool[],
     options: ModelCallOptions,
   ): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+    await Promise.resolve();
     this.calls.push({ messages, tools, options });
     const response = this.responses[this.index];
     this.index += 1;
