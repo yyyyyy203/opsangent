@@ -380,6 +380,13 @@ child 初始消息由固定 Renderer 生成，包含调查问题、服务、时�
 profileId 和已有 evidenceId 引用，不拼接完整日志原文。字段稳定排序，
 动态内容放在固定前缀之后。
 
+child 的每一次 ToolCall 都必须经过与 parent 相同的
+ToolAdmission -> ToolBatchExecutor -> ToolExecutionPipeline 顺序，包含
+存在性、JSON、Schema、语义四道闸门、Guard、Hooks、幂等和结果边界。Runner
+不得直接调用 Tool.call 来绕过这些步骤。source_report 也通过同一 Pipeline
+执行，只是它不访问外部数据，且只负责把严格 Schema 的候选报告交给
+Collector。
+
 source_report 成功且引用有效时，按 Manifest 和来源完整性确定为 complete
 或 partial。capture partial 必须保留证据引用并记录预算/分页缺口。没有
 可用证据时只能返回 unavailable。报告缺失、Schema 错误或引用越权时，
@@ -470,9 +477,15 @@ Blob key、文件路径、密钥、Cookie、Authorization header、完整 ToolRe
 或 child Message。
 
 LangSmith 父 Tool Span 命名为 tool.logs_subagent，child Span 命名为
-subagent.logs，child 的 parentSpanKey 指向父 Tool Span。attempt 作为同一
-child Run 的属性或嵌套 attempt 记录。观测失败不能阻止本地结果、Checkpoint
-或证据提交。
+subagent.logs，child 的 parentSpanKey 优先指向同一 parentRunId 和
+toolCallId 对应的父 Tool Span。实现通过 Projector 已有的 toolKeys 映射
+解析 tool:<parentRunId>:<toolCallId>:<toolAttemptId>；如果历史事件缺少
+toolCallId 或对应 TOOL_STARTED 尚未到达，兼容回退为 run:<parentRunId>，
+不能因为远程 span 关系缺失而阻塞本地执行。SourceSubagentAdapter 发布
+生命周期事件时必须把 ToolCallOptions.toolCallId 写入事件信封。
+
+attempt 作为同一 child Run 的属性或嵌套 attempt 记录。观测失败不能阻止
+本地结果、Checkpoint 或证据提交。
 
 ## 12. Checkpoint、幂等和进程恢复
 
