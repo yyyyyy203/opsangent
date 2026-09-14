@@ -10,6 +10,8 @@
 
 **Spec:** docs/superpowers/specs/2026-09-11-agent-runtime-governance-and-context-compression-design.md
 
+**Execution status:** Completed on 2026-09-15. Tasks 1–7 are implemented and verified; Task 8 full gates passed with the documented real-Prometheus environment test skipped because no endpoint was configured.
+
 ## Global Constraints
 
 - AgentHarness remains the only authoritative loop; compressors, validators, and summarizers never execute Tools or publish events.
@@ -23,7 +25,7 @@
 
 ---
 
-### Task 1: Add versioned compression contracts and state helpers
+### Task 1: Add versioned compression contracts and state helpers ✅ Completed
 
 **Files:**
 - Create: src/contracts/context-compression.ts
@@ -87,7 +89,7 @@ git add src/contracts/context-compression.ts src/contracts/index.ts src/contract
 git commit -m "feat: define context compression contracts"
 ~~~
 
-### Task 2: Implement deterministic L1 candidate building
+### Task 2: Implement deterministic L1 candidate building ✅ Completed
 
 **Files:**
 - Create: src/context-compressor/l1-structure-pruner.ts
@@ -148,7 +150,7 @@ git add src/context-compressor/l1-structure-pruner.ts src/context-compressor/rul
 git commit -m "feat: add deterministic l1 context pruning"
 ~~~
 
-### Task 3: Implement evidence-aware CompressionValidator and repair
+### Task 3: Implement evidence-aware CompressionValidator and repair ✅ Completed
 
 **Files:**
 - Create: src/context-compressor/compression-validator.ts
@@ -204,7 +206,7 @@ git add src/context-compressor/compression-validator.ts src/context-compressor/t
 git commit -m "feat: validate and repair compressed context"
 ~~~
 
-### Task 4: Implement strict compact-model L2 summarization
+### Task 4: Implement strict compact-model L2 summarization ✅ Completed
 
 **Files:**
 - Create: src/context-compressor/history-summarizer.ts
@@ -267,7 +269,7 @@ git add src/context-compressor/history-summarizer.ts test/history-summarizer.tes
 git commit -m "feat: add bounded structured history summarizer"
 ~~~
 
-### Task 5: Compose layered L1/L2 compression with rollback
+### Task 5: Compose layered L1/L2 compression with rollback ✅ Completed
 
 **Files:**
 - Modify: src/context-compressor/rule-based-compressor.ts
@@ -322,7 +324,7 @@ git add src/context-compressor/rule-based-compressor.ts src/context-compressor/t
 git commit -m "feat: compose validated l1 and l2 compression"
 ~~~
 
-### Task 6: Integrate compression lifecycle events and checkpoint state
+### Task 6: Integrate compression lifecycle events and checkpoint state ✅ Completed
 
 **Files:**
 - Modify: src/agent/agent-harness.ts
@@ -380,7 +382,7 @@ git add src/agent/agent-harness.ts src/application/create-runtime.ts src/contrac
 git commit -m "feat: integrate durable compression lifecycle"
 ~~~
 
-### Task 7: Add restart, recovery, and public-data safety acceptance tests
+### Task 7: Add restart, recovery, and public-data safety acceptance tests ✅ Completed
 
 **Files:**
 - Create: test/context-compression-recovery.test.ts
@@ -425,7 +427,7 @@ git add test/context-compression-recovery.test.ts test/event-v2-audit-langsmith.
 git commit -m "test: verify recoverable context compression"
 ~~~
 
-### Task 8: Run the complete quality gate and audit the Spec
+### Task 8: Run the complete quality gate and audit the Spec ✅ Completed
 
 **Files:**
 - Modify only files required by failing quality gates or documentation accuracy.
