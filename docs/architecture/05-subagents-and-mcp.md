@@ -1,5 +1,7 @@
 # 数据源 Subagent 与 MCP
 
+本主题的首个可实施切片见 [来源 Subagent 设计规格](../superpowers/specs/2026-09-14-source-subagent-design.md)。
+
 ## 分工
 
 | 对外 Tool | 内部取证范围 | 返回重点 |
