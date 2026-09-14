@@ -1,6 +1,7 @@
 export * from './common.js';
 export * from './stable-json.js';
 export * from './context.js';
+export * from './context-compression.js';
 export * from './errors.js';
 export * from './event.js';
 export * from './event-store.js';
