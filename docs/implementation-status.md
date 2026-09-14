@@ -2,13 +2,19 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：持久化证据重启恢复验收
+
+2026-09-14：完成 Task 10 基础验收。使用 SQLite Event/Message/Checkpoint/Manifest、注入式日志分页源和本地 gzip NDJSON BlobStore，验证指标 Run 关闭后重新打开仍可读取 Checkpoint 和原始证据；日志证据的 Manifest、Blob 分块和有界读取也可在重启后恢复，使用稳定密钥的 opaque cursor 可以继续读取下一页。公共事件流只返回投影后的安全字段，不包含原始证据标记、Blob storage key 或路径。
+
+本轮修复了本地 BlobStore 将 `captureKey` 误当作路径段校验的问题。幂等键可以包含 `:` 等合法身份字符，但真正参与文件路径的 `manifestId` 和 `evidenceId` 仍必须经过安全路径段校验。新增 `test/durable-evidence-acceptance.test.ts`，覆盖两类证据的落盘、重启、回查和公共投影边界。当前完成的是本地/注入式持久化基础，不等同于已连接真实 ELK、生产对象存储、KMS 或部署环境。
+
 ## 最新增量：有界 ELK 分页、日志证据 Reader 与受控 Tools
 
 2026-09-13：按 [ELK 大证据设计](./superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md) 完成第一版可替换日志取证边界。新增 `ElkPageClient`/`PagedEvidenceSource`，使用结构化服务与时间窗口查询，按页计算 UTF-8 大小并限制 512 KiB；支持 opaque cursor、PIT/source snapshot 透传、重复游标/快照漂移/页数上限检测。`McpElkPageClient` 只在基础设施层接触 MCP ToolResponse，`ResilientElkPageClient` 复用既有按页重试、尝试预算和 CircuitBreaker。
 
 新增 `LocalEvidenceReader`，从已提交或 partial 的 gzip NDJSON Manifest 分块读取，使用绑定 evidenceId/manifestId 的 opaque cursor；扫描、解压和聚合均有上限，跨 Run、pending/failed 或损坏证据会拒绝。新增 `logs.capture`、`logs.search_evidence`、`logs.aggregate_evidence`、`logs.read_evidence_slice` 四个 evidence Tool：capture 通过 `StreamingEvidenceRecorder` 落盘并返回有界摘要与 `evidence_ref`，二次读取只能按当前 Run 的 evidenceId，模型边界只允许安全字段和有限样本，绝不返回 storage key、路径、DSL 或凭据。
 
-Runtime 新增不依赖基础设施的 `toolFactories` 注入点，工厂在 L0 ports 就绪且 Toolkit 冻结前创建工具；只读 Inspection Runtime 对工厂产物执行同一 allowlist、action、Bash 和本地 call 校验。新增分页、PIT、重试熔断、Reader、工具归属和输出边界测试；Task 9 聚焦测试 17 项通过。真实 ELK endpoint、认证配置、生产 Blob 后端、Logs Subagent 和端到端恢复验收仍待后续 Task 10+。
+Runtime 新增不依赖基础设施的 `toolFactories` 注入点，工厂在 L0 ports 就绪且 Toolkit 冻结前创建工具；只读 Inspection Runtime 对工厂产物执行同一 allowlist、action、Bash 和本地 call 校验。新增分页、PIT、重试熔断、Reader、工具归属和输出边界测试；Task 9 聚焦测试 17 项通过。Task 10 已补充本地 SQLite Manifest/Blob 的端到端重启验收；真实 ELK endpoint、认证配置、生产 Blob 后端和 Logs Subagent 仍待后续接入。
 
 ## 最新增量：L0 大证据边界与可替换 Runtime 组装
 
@@ -16,7 +22,7 @@ Runtime 新增不依赖基础设施的 `toolFactories` 注入点，工厂在 L0 
 
 模型视图通过可替换的 `CompactingChatModel` 和 OpenAI-compatible Formatter 双重收口：有 evidence reference 的超大 ToolResult 只保留有界摘要与引用，没有已提交证据引用则返回结构化 `BUDGET_EXCEEDED(tool_result_too_large)`。完整结果仍保留在 AgentContext，模型视图不修改持久化状态；`EVIDENCE_COLLECTED` 仅在 Manifest 可见后发布且按 evidenceId 幂等。Public SSE、Audit 和 LangSmith 投影均不携带原始 ToolResponse、storage key 或完整证据内容；LangSmith 只接收工具状态、耗时、错误码和 evidenceId。Runtime 支持注入 L0 ports，也支持 SQLite 配置显式的 `evidenceBlobRootPath`，未显式配置时不创建文件 Blob。
 
-本轮新增 64MiB 分块捕获、partial/Abort、红线脱敏、事件发布顺序、Compactor、模型边界和 Runtime 组装测试；当前已通过相关 lint、typecheck 和聚焦测试。对象存储、删除/保留任务、L1/L2 全量压缩和生产后端验收仍不在本增量范围；ELK 本地/注入式分页与 Reader 已在后续增量实现。
+本轮新增 64MiB 分块捕获、partial/Abort、红线脱敏、事件发布顺序、Compactor、模型边界和 Runtime 组装测试；当前已通过相关 lint、typecheck 和聚焦测试。对象存储、删除/保留任务、L1/L2 全量压缩和生产后端验收仍不在本增量范围；ELK 本地/注入式分页与 Reader 以及本地重启验收已在后续增量实现。
 
 ## 最新增量：OpenAI-compatible 模型适配器
 

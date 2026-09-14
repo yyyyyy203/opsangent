@@ -166,8 +166,8 @@ class LocalEvidenceBlobWriter implements EvidenceBlobWriter {
 }
 
 function validateBeginInput(input: BeginEvidenceBlobInput): void {
-  if (!safeSegment(input.manifestId) || !safeSegment(input.evidenceId) || !safeSegment(input.captureKey)) {
-    throw new Error('Blob identity contains an invalid path segment');
+  if (!safeSegment(input.manifestId) || !safeSegment(input.evidenceId) || input.captureKey.length === 0) {
+    throw new Error('Blob identity contains an invalid path identity');
   }
   if (!Number.isSafeInteger(input.chunkIndex) || input.chunkIndex < 0) throw new RangeError('chunkIndex must be a non-negative safe integer');
   if (!Number.isSafeInteger(input.chunkTargetBytes) || input.chunkTargetBytes <= 0) throw new RangeError('chunkTargetBytes must be positive');

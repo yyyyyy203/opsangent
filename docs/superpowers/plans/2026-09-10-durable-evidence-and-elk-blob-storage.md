@@ -505,7 +505,7 @@ Run: `pnpm vitest run test/paged-evidence-source.test.ts test/log-evidence-tools
 
 Expected: page size, duplicate/looping cursor, capture, aggregation, access scope and redaction tests pass while existing MCP size protection remains unchanged.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/infrastructure/elk src/bootstrap test/paged-evidence-source.test.ts test/log-evidence-tools.test.ts
@@ -523,7 +523,7 @@ git commit -m "feat: add bounded log evidence tools"
 - Consumes all prior tasks.
 - Produces a tested restart/partial-evidence closure and accurate implemented-vs-design documentation.
 
-- [ ] **Step 1: Write failing acceptance tests**
+- [x] **Step 1: Write failing acceptance tests**
 
 ```ts
 it('persists a metrics run, reopens it, and resolves evidence without raw data in public projections', async () => {
@@ -539,17 +539,17 @@ it('persists a metrics run, reopens it, and resolves evidence without raw data i
 });
 ```
 
-- [ ] **Step 2: Run RED verification**
+- [x] **Step 2: Run RED verification**
 
 Run: `pnpm vitest run test/durable-evidence-acceptance.test.ts`
 
 Expected: failure until all persistence, recorder and bundle wiring are complete.
 
-- [ ] **Step 3: Implement only integration glue required by the acceptance test**
+- [x] **Step 3: Implement only integration glue required by the acceptance test**
 
 Do not add a real ELK URL, credentials, automatic blob cleanup, production encryption or automatic write actions. Update status documents to distinguish the implemented local Blob/paged-source foundation from still-unimplemented real ELK and production Blob deployments.
 
-- [ ] **Step 4: Run focused and full verification**
+- [x] **Step 4: Run focused and full verification**
 
 Run:
 
@@ -563,7 +563,7 @@ pnpm build
 
 Expected: focused acceptance passes; full suite has no failures; real Prometheus remains explicitly skipped unless `AGENTOPS_REAL_PROMETHEUS=1` is configured.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add test/durable-evidence-acceptance.test.ts docs
