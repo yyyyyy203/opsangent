@@ -42,6 +42,12 @@ const contextSummary = z.object({
   pendingActionIds: z.array(z.string()),
   executedActionIds: z.array(z.string()),
   unresolvedRisks: z.array(z.string()),
+  sourceMessageIds: z.array(z.string().min(1)).optional(),
+  keyToolCalls: z.array(z.string().min(1)).optional(),
+  evidenceIds: z.array(z.string().min(1)).optional(),
+  confirmationIds: z.array(z.string().min(1)).optional(),
+  riskRuleIds: z.array(z.string().min(1)).optional(),
+  summaryVersion: z.number().int().nonnegative().optional(),
 }).strict();
 const messageBlock = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string() }).strict(),

@@ -20,8 +20,10 @@ import type {
 } from '../contracts/index.js';
 import { randomIdGenerator, systemClock } from '../contracts/index.js';
 import { RuleBasedContextCompressor } from '../context-compressor/rule-based-compressor.js';
+import { ModelHistorySummarizer } from '../context-compressor/history-summarizer.js';
 import { DefaultToolResultCompactor } from '../context-compressor/tool-result-compactor.js';
-import type { ToolResultCompactor } from '../context-compressor/types.js';
+import type { CompressionValidator, ContextCompressor, ToolResultCompactor } from '../context-compressor/types.js';
+import type { RuleBasedCompressorOptions } from '../context-compressor/rule-based-compressor.js';
 import { EventBus } from '../event/event-bus.js';
 import { EventFactory } from '../event/event-factory.js';
 import { BashGuardian } from '../guard/bash-guardian.js';
@@ -94,6 +96,8 @@ export type RuntimeToolFactory = (ports: RuntimeToolPorts) => readonly Tool[];
 
 export interface AgentRuntimeOptions {
   model: ChatModel;
+  /** Optional independent model used only for structured L2 history summaries. */
+  compactModel?: ChatModel;
   workspaceRoots: string[];
   tools?: Tool[];
   /** Build tools after optional runtime-owned ports exist and before the Toolkit is frozen. */
@@ -112,6 +116,12 @@ export interface AgentRuntimeOptions {
   modelProvider?: string;
   modelName?: string;
   modelRetry?: RetryingChatModelOptions;
+  /** Replace the default compression orchestrator in tests or host-specific composition. */
+  compressor?: ContextCompressor;
+  /** Optional validator injection for the default layered compressor. */
+  compressionValidator?: CompressionValidator;
+  /** Narrow tuning/port overrides for the default layered compressor. */
+  compression?: Partial<RuleBasedCompressorOptions>;
   /** Resolve the immutable Profile snapshot used by governance-enabled Runs. */
   profileResolver?: ProfileResolver;
   /** Capture the live impact surface once per admitted Tool batch. */
@@ -330,6 +340,25 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     lifecycleObservers,
   );
   const batchExecutor = new ToolBatchExecutor(toolkit, pipeline, clock);
+  const historySummarizer = options.compactModel === undefined
+    ? undefined
+    : new ModelHistorySummarizer({ model: options.compactModel, clock });
+  const compression = options.compression ?? {};
+  const configuredSummarizer = compression.summarizer ?? historySummarizer;
+  const configuredValidator = compression.validator ?? options.compressionValidator;
+  const configuredEvidenceManifests = compression.evidenceManifests ?? evidenceManifests;
+  const defaultCompressorOptions: RuleBasedCompressorOptions = {
+    maxMessagesBeforeL1: compression.maxMessagesBeforeL1 ?? 40,
+    maxSerializedBytesBeforeL2: compression.maxSerializedBytesBeforeL2 ?? 256_000,
+    keepRecentMessages: compression.keepRecentMessages ?? 16,
+    toolResultCompactor: compression.toolResultCompactor ?? toolResultCompactor,
+    evidence: compression.evidence ?? evidence,
+    ...(compression.now === undefined ? { now: () => clock.now() } : { now: compression.now }),
+    ...(configuredSummarizer === undefined ? {} : { summarizer: configuredSummarizer }),
+    ...(configuredValidator === undefined ? {} : { validator: configuredValidator }),
+    ...(configuredEvidenceManifests === undefined ? {} : { evidenceManifests: configuredEvidenceManifests }),
+  };
+  const defaultCompressor = new RuleBasedContextCompressor(defaultCompressorOptions);
   const agent = new AgentHarness({
     model: new EventedChatModel(new CompactingChatModel(model, toolResultCompactor), publishingV2, eventFactoryV2, {
       provider: options.modelProvider ?? 'configured',
@@ -342,12 +371,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     toolkit,
     batchExecutor,
     checkpoints,
-    compressor: new RuleBasedContextCompressor({
-      maxMessagesBeforeL1: 40,
-      maxSerializedBytesBeforeL2: 256_000,
-      keepRecentMessages: 16,
-      toolResultCompactor,
-    }),
+    compressor: options.compressor ?? defaultCompressor,
     events,
     eventFactory,
     observability,

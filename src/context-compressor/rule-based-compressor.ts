@@ -63,6 +63,9 @@ export class RuleBasedContextCompressor implements ContextCompressor {
     if (!messageThresholdReached && !byteThresholdReached) {
       return { context, decision: { level: 'none', reason: 'below_thresholds' } };
     }
+    if (!hasNewMessagesSinceLastCompression(context)) {
+      return { context, decision: { level: 'none', reason: 'same_history_already_compressed' } };
+    }
 
     const candidate = this.l1Pruner.prune({
       context,
@@ -150,6 +153,7 @@ export class RuleBasedContextCompressor implements ContextCompressor {
           },
         };
       } catch (error) {
+        if (effectiveOptions.signal.aborted || compressionFailureCode(error) === 'aborted') throw error;
         return {
           context: validatedL1Context,
           decision: { level: 'L1', reason: 'l2_summary_failed' },
@@ -302,4 +306,22 @@ function safeCompressionErrorCode(error: unknown): string {
     if (typeof code === 'string' && code.length > 0) return code.toLowerCase();
   }
   return 'compression_summary_failed';
+}
+
+function compressionFailureCode(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code.toLowerCase() : undefined;
+}
+
+function hasNewMessagesSinceLastCompression(context: AgentContext): boolean {
+  const state = context.governance?.compression;
+  if (state === undefined || state.lastLevel === 'none' || state.sourceMessageIds.length === 0) return true;
+  const knownIds = new Set([...state.sourceMessageIds, ...state.protectedMessageIds]);
+  for (const message of context.messages) {
+    if (message.blocks.some((block) => block.type === 'context_summary')) {
+      knownIds.add(message.id);
+    }
+  }
+  return context.messages.some((message) => !knownIds.has(message.id));
 }

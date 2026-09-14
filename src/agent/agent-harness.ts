@@ -26,7 +26,7 @@ import type {
   RiskSeverity,
 } from '../contracts/index.js';
 import { CheckpointConflictError, checkpointChecksum, createInitialRunGovernanceState, toAgentError } from '../contracts/index.js';
-import type { ContextCompressor } from '../context-compressor/types.js';
+import type { CompressionResult, ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
 import type { EventFactory } from '../event/event-factory.js';
 import type { BatchExecutionCallbacks, ToolBatchExecutor } from '../tool/batch-executor.js';
@@ -285,19 +285,27 @@ export class AgentHarness implements DiagnosisAgent {
       }
 
       const before = Buffer.byteLength(JSON.stringify(context.messages), 'utf8');
-      const compressed = await this.dependencies.compressor.compress(context);
-      frame.context = compressed.context;
-      if (compressed.decision.level !== 'none') {
-        const compressionPayload = {
-          level: compressed.decision.level,
-          before,
-          after: Buffer.byteLength(JSON.stringify(frame.context.messages), 'utf8'),
-          offloadedEvidenceIds: [],
-          savedTokens: 0,
+      const deadline = Date.parse(context.budget.startedAt) + context.budget.maxDurationMs;
+      let compressed: CompressionResult;
+      try {
+        compressed = await this.dependencies.compressor.compress(context, {
+          signal,
+          deadline,
+          now: () => this.dependencies.clock.now(),
+        });
+      } catch (error) {
+        if (signal.aborted) throw error;
+        compressed = {
+          context,
+          decision: { level: 'none', reason: 'compression_failed' },
+          validation: {
+            valid: false,
+            status: 'failed',
+            reasonCode: compressionFailureReason(error),
+          },
         };
-        await this.publishV2('CONTEXT_COMPRESSED', frame.context, compressionPayload);
-        yield* this.publishStream('CONTEXT_COMPRESSED', frame.context, compressionPayload);
       }
+      yield* this.publishCompressionOutcome(frame, compressed, before);
 
       frame.context.budget.iteration += 1;
       const stepId = this.dependencies.ids.next('step');
@@ -958,6 +966,60 @@ export class AgentHarness implements DiagnosisAgent {
     frame.checkpointRevision = saved.revision;
   }
 
+  private async *publishCompressionOutcome(
+    frame: RunExecutionFrame,
+    compressed: CompressionResult,
+    before: number,
+  ): AsyncGenerator<AgentEvent, void> {
+    const validation = compressed.validation;
+    const shouldPublish = compressed.decision.level !== 'none' || validation !== undefined;
+    if (!shouldPublish) return;
+
+    const attemptedLevel = compressionAttemptLevel(compressed);
+    const reason = compressionReason(compressed);
+    await this.publishTransitionV2(frame, 'CONTEXT_COMPRESSION_STARTED', {
+      level: attemptedLevel,
+      reason,
+      beforeSize: before,
+    });
+
+    if (validation?.valid === false) {
+      await this.publishTransitionV2(frame, 'CONTEXT_COMPRESSION_FAILED', {
+        level: attemptedLevel,
+        error: compressionErrorPayload(validation.reasonCode),
+        fallbackPolicy: 'retain_previous',
+      });
+      return;
+    }
+
+    frame.context = compressed.context;
+    if (validation?.status === 'summary_fallback') {
+      await this.publishTransitionV2(frame, 'CONTEXT_COMPRESSION_FAILED', {
+        level: 'L2',
+        error: compressionErrorPayload(validation.reasonCode),
+        fallbackPolicy: 'defer',
+      });
+    }
+    if (validation?.status === 'repaired' && validation.repairType !== undefined) {
+      await this.publishTransitionV2(frame, 'CONTEXT_INTEGRITY_REPAIRED', {
+        repairType: validation.repairType,
+        affectedIds: validation.affectedIds ?? [],
+        validationResult: 'valid',
+      });
+    }
+
+    const after = Buffer.byteLength(JSON.stringify(frame.context.messages), 'utf8');
+    const compressionPayload = {
+      level: compressed.decision.level === 'none' ? 'L1' as const : compressed.decision.level,
+      before,
+      after,
+      offloadedEvidenceIds: compressed.trace?.offloadedEvidenceIds ?? [],
+      savedTokens: Math.max(0, Math.floor((before - after) / 4)),
+    };
+    await this.publishTransitionV2(frame, 'CONTEXT_COMPRESSED', compressionPayload);
+    yield* this.publishStream('CONTEXT_COMPRESSED', frame.context, compressionPayload);
+  }
+
   private async loadCheckpoint(runId: string): Promise<{ context: AgentContext; revision?: number } | null> {
     const durable = this.dependencies.durableState;
     if (durable === undefined) {
@@ -1238,6 +1300,38 @@ function eventError(error: ToolExecutionResult['error']): { code: NonNullable<To
         },
       }
       : {}),
+  };
+}
+
+function compressionAttemptLevel(result: CompressionResult): 'L0' | 'L1' | 'L2' {
+  if (result.validation?.status === 'summary_fallback') return 'L2';
+  if (result.decision.level === 'none') return 'L1';
+  return result.decision.level;
+}
+
+function compressionReason(result: CompressionResult): string {
+  const reason = result.validation?.reasonCode ?? result.decision.reason;
+  return reason.length > 0 ? reason.slice(0, 256) : 'compression';
+}
+
+function compressionFailureReason(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && code.length > 0) return code.toLowerCase();
+  }
+  return 'compression_failed';
+}
+
+function compressionErrorPayload(reasonCode: string | undefined): AgentEventPayloadMap['CONTEXT_COMPRESSION_FAILED']['error'] {
+  const isModelFailure = reasonCode?.startsWith('compression_summary') === true;
+  return {
+    code: isModelFailure ? 'MODEL_ERROR' : 'STORAGE_ERROR',
+    message: isModelFailure ? 'Context summary model failed.' : 'Context compression candidate was rejected.',
+    retryable: false,
+    details: {
+      category: isModelFailure ? 'compression_summary' : 'compression_validation',
+      ...(reasonCode === undefined ? {} : { reason: reasonCode.slice(0, 128) }),
+    },
   };
 }
 

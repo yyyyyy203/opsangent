@@ -45,7 +45,7 @@
 - HITL 和外部执行恢复由 `pendingToolBatch`、Checkpoint revision、执行日志和应用服务共同处理。
 - ToolResult、Checkpoint、执行日志和耐久 Outbox 已通过窄用途 transition UoW 保证原子提交；V2 状态耦合事实在提交后由有界 Dispatcher 发布。
 - 增量 1 的验收基线只检测重复 toolCallId 和模型纠错预算耗尽；增量 4 已补齐按工具、参数和脱敏终态结果签名的循环检测。
-- `RuleBasedContextCompressor` 只有规则裁剪；当前标记为 L2 的路径并不调用摘要模型。
+- `RuleBasedContextCompressor` 已提供确定性 L1 候选、异步完整性校验和可选 compact model 的 L2 摘要；未配置 `compactModel` 时默认只执行 L1。
 - `pruneToolResult()` 已存在但没有接入生产工具执行路径。
 - Event V2 已有 `LOOP_DETECTED` 事实契约，并由增量 4 接入运行时生产路径和公共安全投影。
 - SQLite EvidenceStore 只适合有界内联证据；几十 MiB 日志必须进入 Manifest + BlobStore 数据面。
@@ -77,8 +77,21 @@
 
 以下能力仍明确属于后续增量，当前尚未实现其行为：
 
-- 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入。
-- 增量 6：L1/L2 结构裁剪、compact summarizer、Validator、回滚和完整性恢复链路。
+- 增量 5：L0 大证据边界、Manifest/BlobStore 数据面和 ToolResult 流式外置接入，已在前序实现中完成并由本地/注入式验收覆盖。
+- 增量 6：L1/L2 结构裁剪、compact summarizer、Validator、回滚、生命周期事件和重启恢复链路，已在 2026-09-14 完成首版实现与聚焦验收；真实在线 compact model、生产 ELK/对象存储和分布式租约仍不属于本 Spec 的已验证范围。
+
+### 2.5 增量 5/6 上下文压缩实施状态
+
+已交付：
+
+- L1 纯函数候选构造：保留最近消息、保护 pending/interrupt/未配对调用、按 ToolCall/ToolResult 成组裁剪，并把历史替换为确定性 `context_summary`。
+- L2 独立 `HistorySummarizer`：工具列表固定为空，历史使用不可信数据边界，严格 Zod JSON、来源/ToolCall/evidence/确认/Risk ID 白名单、一次重试、Abort/deadline 传播。
+- `DefaultCompressionValidator`：检查可见配对、历史摘要覆盖、证据 Manifest/Record 可见性和 Run 归属、durable state 不变、大小上限；只允许恢复压缩前精确 ToolResult，不生成伪造成功结果。
+- `RuleBasedContextCompressor`：L1 先行，字节阈值且存在 compact model 时再尝试 L2；L2 失败降级到已验证 L1，L1 失败返回原 Context。
+- Harness 通过现有 CAS/Outbox transition 提交压缩事实；V2 新事件不扩张 V1 EventType；Checkpoint Codec 接受新增 ContextSummary 字段。
+- SQLite 重启测试验证 CompressionState、summary version、来源消息范围和压缩事件不重复；公共投影、审计和 LangSmith 测试验证压缩事件不带原始历史或完整 ToolResult。
+
+已知边界：默认阈值使用 40 条消息与 256 KiB 序列化字节回退；未接入 tokenizer 感知的 70% 窗口计算。compact model 的在线供应商可用性、真实 ELK/对象存储、跨 Worker 租约和 64 MiB 生产压测需在各自数据源/部署计划中继续验收。
 
 ### 2.3 增量 3 实施状态
 

@@ -122,6 +122,20 @@ describe('ModelHistorySummarizer', () => {
     await expect(summarizer.summarize(input(), options())).resolves.toMatchObject({ summaryVersion: 1 });
   });
 
+  it('classifies a schema-invalid object as invalid after the single retry', async () => {
+    const invalid = validSummary({ unexpected: true });
+    const model = new RecordingSummaryModel([invalid, invalid]);
+    const summarizer = new ModelHistorySummarizer({
+      model,
+      clock: { now: () => new Date(timestamp) },
+    });
+
+    await expect(summarizer.summarize(input(), options())).rejects.toMatchObject({
+      code: 'COMPRESSION_SUMMARY_INVALID',
+    });
+    expect(model.calls).toHaveLength(2);
+  });
+
   it('retries once after invalid JSON and accepts the next valid summary', async () => {
     const model = new RecordingSummaryModel(['not json', validSummary()]);
     const summarizer = new ModelHistorySummarizer({

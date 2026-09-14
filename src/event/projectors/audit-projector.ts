@@ -46,6 +46,17 @@ function summarize(type: string, value: JsonValue): Record<string, JsonValue> {
       if (item !== null && typeof item === 'object' && !Array.isArray(item)) output.result = pick(item, ['toolCallId', 'toolName', 'status', 'startedAt', 'finishedAt', 'error']);
       continue;
     }
+    if (type === 'CONTEXT_COMPRESSION_FAILED' && key === 'error') {
+      if (item !== null && typeof item === 'object' && !Array.isArray(item)) {
+        const error = item as Record<string, JsonValue>;
+        output.error = {
+          code: typeof error.code === 'string' ? error.code : 'STORAGE_ERROR',
+          retryable: error.retryable === true,
+          ...(error.details === undefined ? {} : { details: safeDetails(error.details) }),
+        };
+      }
+      continue;
+    }
     output[key] = safeValue(item);
   }
   return output;
@@ -66,4 +77,16 @@ function safeValue(value: JsonValue): JsonValue {
   if (typeof value === 'string') return SECRET_VALUE.test(value) || INTERNAL_ADDRESS.test(value) ? '[REDACTED]' : value.slice(0, 500);
   if (Array.isArray(value)) return value.slice(0, 20).map(safeValue);
   return {};
+}
+
+function safeDetails(value: JsonValue): Record<string, JsonValue> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  const output: Record<string, JsonValue> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (SECRET_KEY.test(key)) continue;
+    if (item === null || typeof item === 'string' || typeof item === 'number' || typeof item === 'boolean') {
+      output[key] = safeValue(item);
+    }
+  }
+  return output;
 }

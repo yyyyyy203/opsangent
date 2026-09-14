@@ -152,8 +152,11 @@ describe('DefaultCompressionValidator', () => {
   it('repairs a candidate that retained a call but dropped its exact result', async () => {
     const before = baseContext([callMessage('call-old'), resultMessage('call-old')]);
     const candidate = baseContext([callMessage('call-old')], { contextVersion: 2 });
+    const store: EvidenceManifestStore = {
+      getVisible: () => Promise.resolve(visibleManifest('run-1', 'evidence-1')),
+    } as unknown as EvidenceManifestStore;
 
-    const result = await validator().validate({
+    const result = await validator(store).validate({
       before,
       candidate,
       sourceMessageIds: ['message-result-call-old'],

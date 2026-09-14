@@ -61,9 +61,14 @@ export class ModelHistorySummarizer implements HistorySummarizer {
       this.assertCanStart(options);
       try {
         const text = await this.callModel(input, options);
-        const parsed = parseStructuredHistorySummary(extractJson(text));
-        validateAllowlistedSummary(parsed, input);
-        return parsed;
+        try {
+          const parsed = parseStructuredHistorySummary(extractJson(text));
+          validateAllowlistedSummary(parsed, input);
+          return parsed;
+        } catch (error) {
+          if (error instanceof HistorySummaryError) throw error;
+          throw new HistorySummaryError('COMPRESSION_SUMMARY_INVALID', 'Compact model returned an invalid history summary.');
+        }
       } catch (error) {
         if (error instanceof HistorySummaryError && error.code === 'ABORTED') throw error;
         if (options.signal.aborted) throw new HistorySummaryError('ABORTED', 'History summarization aborted.');
@@ -75,9 +80,6 @@ export class ModelHistorySummarizer implements HistorySummarizer {
     }
 
     if (lastError instanceof HistorySummaryError && lastError.code === 'COMPRESSION_SUMMARY_INVALID') throw lastError;
-    if (lastError instanceof SyntaxError || lastError instanceof TypeError) {
-      throw new HistorySummaryError('COMPRESSION_SUMMARY_INVALID', 'Compact model returned an invalid history summary.');
-    }
     throw new HistorySummaryError('COMPRESSION_SUMMARY_MODEL_FAILED', 'Compact model failed to produce a history summary.');
   }
 

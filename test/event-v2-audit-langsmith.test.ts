@@ -81,6 +81,32 @@ describe('AuditProjectorV2', () => {
       payloadSummary: { provider: 'openai-compatible', model: 'deepseek-chat', purpose: 'diagnosis', attempt: 1 },
     });
   });
+
+  it('records compression facts as bounded references without raw history', () => {
+    const projector = new AuditProjectorV2();
+    projector.project(event('CONTEXT_COMPRESSION_FAILED', {
+      level: 'L2',
+      error: {
+        code: 'MODEL_ERROR',
+        message: 'Context summary model failed.',
+        retryable: false,
+        details: { category: 'compression_summary', reason: 'compression_summary_model_failed' },
+      },
+      fallbackPolicy: 'defer',
+    }));
+    projector.project(event('CONTEXT_COMPRESSED', {
+      level: 'L1', before: 1_000_000, after: 10_000,
+      offloadedEvidenceIds: ['evidence-1'], savedTokens: 247_500,
+    }));
+
+    expect(projector.records).toHaveLength(2);
+    expect(projector.records[0]?.payloadSummary).toMatchObject({
+      level: 'L2', fallbackPolicy: 'defer',
+      error: { code: 'MODEL_ERROR', retryable: false, details: { category: 'compression_summary' } },
+    });
+    expect(JSON.stringify(projector.records)).not.toContain('raw log');
+    expect(JSON.stringify(projector.records)).not.toContain('storage-key');
+  });
 });
 
 describe('LangSmithEventProjectorV2', () => {

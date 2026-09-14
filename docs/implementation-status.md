@@ -2,6 +2,14 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：L1/L2 上下文压缩、完整性校验与重启恢复
+
+2026-09-14：按 [Agent Runtime Governance 与上下文压缩设计](./superpowers/specs/2026-09-11-agent-runtime-governance-and-context-compression-design.md) 完成压缩治理链路。新增严格的 `StructuredHistorySummary`/`CompressionTrace`/`CompressionValidationResult` 契约、确定性 L1 结构裁剪、证据可见性与 ToolCall/ToolResult 配对校验、精确 ToolResult 修复、可选 compact model 的 L2 摘要和一次重试、L2 → 已验证 L1 降级，以及失败时保留旧 Context。
+
+Harness 现在通过现有 Durable Transition/Outbox 依次提交并发布 `CONTEXT_COMPRESSION_STARTED`、`CONTEXT_COMPRESSED`、`CONTEXT_COMPRESSION_FAILED` 和 `CONTEXT_INTEGRITY_REPAIRED` V2 事实；只有已接受的候选才更新 Checkpoint，既有 V1 `CONTEXT_COMPRESSED` 兼容事件仍由 V2 投影产生。新增的 `ContextSummary` 字段已纳入 Durable Codec，SQLite 重启验收验证 `CompressionState`、summary version、来源消息范围和生命周期事件不会重复；Audit/LangSmith 边界测试确认不携带原始历史、ToolResult、storage key 或路径。
+
+本轮验证：压缩契约、L1、Validator、摘要器、分层回退、Harness 生命周期、SQLite 重启和投影安全测试均通过；摘要器使用注入模型和本地协议测试，未宣称真实在线模型或生产 ELK 后端验收。默认 Runtime 在未配置 `compactModel` 时保持确定性 L1；通过 `compactModel`、`compressionValidator` 和 `compression` 选项可替换实现。完整质量门禁仍需在本轮全部变更合并后再次执行。
+
 ## 最新增量：持久化证据重启恢复验收
 
 2026-09-14：完成 Task 10 基础验收。使用 SQLite Event/Message/Checkpoint/Manifest、注入式日志分页源和本地 gzip NDJSON BlobStore，验证指标 Run 关闭后重新打开仍可读取 Checkpoint 和原始证据；日志证据的 Manifest、Blob 分块和有界读取也可在重启后恢复，使用稳定密钥的 opaque cursor 可以继续读取下一页。公共事件流只返回投影后的安全字段，不包含原始证据标记、Blob storage key 或路径。

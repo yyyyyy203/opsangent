@@ -32,7 +32,6 @@ export class DefaultCompressionValidator implements CompressionValidator {
 
     const beforeCalls = indexCalls(input.before.messages);
     const candidateCalls = indexCalls(input.candidate.messages);
-    const candidateResults = indexResults(input.candidate.messages);
     const pendingCalls = new Set([
       ...input.candidate.pendingToolCalls.map((call) => call.id),
       ...(input.candidate.pendingToolBatch?.calls.map((call) => call.id) ?? []),
@@ -40,6 +39,10 @@ export class DefaultCompressionValidator implements CompressionValidator {
     ]);
     const summary = collectSummary(input.candidate);
     const summaryCallIds = new Set(summary.keyToolCalls);
+
+    for (const sourceId of summary.sourceMessageIds) {
+      if (!beforeMessageIds.has(sourceId)) return failure('unknown_summary_source', [sourceId]);
+    }
 
     for (const callId of summaryCallIds) {
       if (!beforeCalls.has(callId) && !pendingCalls.has(callId)) return failure('summary_tool_call_unknown', [callId]);
@@ -53,36 +56,49 @@ export class DefaultCompressionValidator implements CompressionValidator {
       }
     }
 
+    let candidateContext = input.candidate;
+    const repairedIds: string[] = [];
     for (const [callId] of candidateCalls) {
+      const candidateResults = indexResults(candidateContext.messages);
       if (candidateResults.has(callId) || pendingCalls.has(callId)) continue;
       const originalResult = findResultMessage(input.before.messages, callId);
       if (originalResult !== undefined && sourceIds.has(originalResult.id)) {
-        const repairedContext = restoreMessageAfterCall(input.candidate, callId, originalResult);
-        return {
-          valid: true,
-          status: 'repaired',
-          repairable: true,
-          reasonCode: 'restore_tool_result',
-          repairType: 'restore_tool_result',
-          affectedIds: [callId],
-          repairedContext,
-        };
+        candidateContext = restoreMessageAfterCall(candidateContext, callId, originalResult);
+        repairedIds.push(callId);
+        continue;
       }
       return failure('orphan_visible_tool_call', [callId]);
     }
 
-    const preservedState = compareDurableState(input.before, input.candidate);
+    const candidateResults = indexResults(candidateContext.messages);
+    for (const resultCallId of candidateResults) {
+      if (!candidateCalls.has(resultCallId) && !pendingCalls.has(resultCallId)) {
+        return failure('orphan_visible_tool_result', [resultCallId]);
+      }
+    }
+
+    const preservedState = compareDurableState(input.before, candidateContext);
     if (!preservedState) return failure('durable_state_changed');
 
     const beforeEvidenceIds = collectEvidenceIds(input.before);
-    const candidateEvidenceIds = collectEvidenceIds(input.candidate);
+    const candidateEvidenceIds = collectEvidenceIds(candidateContext);
     for (const evidenceId of candidateEvidenceIds) {
       if (!beforeEvidenceIds.has(evidenceId)) return failure('unknown_evidence_id', [evidenceId]);
     }
-    const evidenceResult = await this.validateEvidence(input.candidate.runId, candidateEvidenceIds);
+    const evidenceResult = await this.validateEvidence(candidateContext.runId, candidateEvidenceIds);
     if (!evidenceResult.valid) return evidenceResult;
 
-    return { valid: true, status: 'valid' };
+    return repairedIds.length === 0
+      ? { valid: true, status: 'valid' }
+      : {
+        valid: true,
+        status: 'repaired',
+        repairable: true,
+        reasonCode: 'restore_tool_result',
+        repairType: 'restore_tool_result',
+        affectedIds: repairedIds,
+        repairedContext: candidateContext,
+      };
   }
 
   private async validateEvidence(
@@ -169,17 +185,24 @@ function restoreMessageAfterCall(
 function collectSummary(context: AgentContext): {
   keyToolCalls: string[];
   evidenceIds: string[];
+  sourceMessageIds: string[];
 } {
   const keyToolCalls: string[] = [];
   const evidenceIds: string[] = [];
+  const sourceMessageIds: string[] = [];
   for (const message of context.messages) {
     for (const block of message.blocks) {
       if (block.type !== 'context_summary') continue;
       keyToolCalls.push(...(block.summary.keyToolCalls ?? []));
       evidenceIds.push(...(block.summary.evidenceIds ?? []));
+      sourceMessageIds.push(...(block.summary.sourceMessageIds ?? []));
     }
   }
-  return { keyToolCalls: [...new Set(keyToolCalls)], evidenceIds: [...new Set(evidenceIds)] };
+  return {
+    keyToolCalls: [...new Set(keyToolCalls)],
+    evidenceIds: [...new Set(evidenceIds)],
+    sourceMessageIds: [...new Set(sourceMessageIds)],
+  };
 }
 
 function collectEvidenceIds(context: AgentContext): Set<string> {
