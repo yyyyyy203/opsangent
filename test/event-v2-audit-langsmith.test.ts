@@ -131,7 +131,7 @@ describe('LangSmithEventProjectorV2', () => {
       expect.objectContaining({ name: 'agent.run', kind: 'chain', runId: 'run-1', spanKey: 'run:run-1', sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-1' }),
       expect.objectContaining({ name: 'model.deepseek-chat', kind: 'llm', runId: 'run-1', spanKey: 'model:run-1:attempt-1', parentSpanKey: 'run:run-1' }),
       expect.objectContaining({ name: 'tool.metrics_subagent', kind: 'tool', runId: 'run-1', spanKey: 'tool:run-1:tool-1:tool-attempt-1', parentSpanKey: 'run:run-1' }),
-      expect.objectContaining({ name: 'subagent.metrics', kind: 'chain', runId: 'child-run-1', spanKey: 'run:child-run-1', parentSpanKey: 'run:run-1' }),
+      expect.objectContaining({ name: 'subagent.metrics', kind: 'chain', runId: 'child-run-1', spanKey: 'run:child-run-1', parentSpanKey: 'tool:run-1:tool-1:tool-attempt-1' }),
     ]);
   });
 

@@ -10,6 +10,10 @@ export interface ReplyOptions {
   maxIterations?: number;
   maxToolCalls?: number;
   maxDurationMs?: number;
+  /** Optional shared ledger used by delegated child Runs. */
+  toolCallBudget?: { remaining: number };
+  /** Optional inherited ledger used by a delegated child Run. */
+  networkAttemptBudget?: { remaining: number };
 }
 
 export interface DiagnosisRunResult {
@@ -25,5 +29,5 @@ export interface DiagnosisRunResult {
 export interface DiagnosisAgent {
   reply(options: ReplyOptions): Promise<DiagnosisRunResult>;
   replyStream(options: ReplyOptions): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
-  resumeStream(runId: string, signal?: AbortSignal): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
+  resumeStream(runId: string, signal?: AbortSignal, toolCallBudget?: { remaining: number }): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
 }

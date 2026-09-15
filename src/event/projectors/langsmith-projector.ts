@@ -31,7 +31,13 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
         }
         case 'TOOL_RESULT': this.end(this.toolKeys.get(`${event.runId}:${event.toolCallId ?? event.payload.result.toolCallId}`) ?? '', toolResultOutput(event.payload)); break;
         case 'TOOL_FAILED': this.fail(event.toolCallId === undefined ? '' : this.toolKeys.get(`${event.runId}:${event.toolCallId}`) ?? '', event.payload.error); break;
-        case 'SUBAGENT_STARTED': this.start({ name: `subagent.${event.payload.subagentType}`, kind: 'chain', runId: event.payload.childRunId, ...identityFields(event), spanKey: runKey(event.payload.childRunId), parentSpanKey: runKey(event.payload.parentRunId), event, attributes: { budget: event.payload.budget, toolCallId: event.toolCallId } }); break;
+        case 'SUBAGENT_STARTED': {
+          const parentSpanKey = event.toolCallId === undefined
+            ? runKey(event.payload.parentRunId)
+            : this.toolKeys.get(`${event.payload.parentRunId}:${event.toolCallId}`) ?? runKey(event.payload.parentRunId);
+          this.start({ name: `subagent.${event.payload.subagentType}`, kind: 'chain', runId: event.payload.childRunId, ...identityFields(event), spanKey: runKey(event.payload.childRunId), parentSpanKey, event, attributes: { budget: event.payload.budget, toolCallId: event.toolCallId } });
+          break;
+        }
         case 'SUBAGENT_COMPLETED': this.end(runKey(event.payload.childRunId), event.payload); break;
         case 'SUBAGENT_FAILED': this.fail(runKey(event.payload.childRunId), event.payload.error); break;
         default: break;

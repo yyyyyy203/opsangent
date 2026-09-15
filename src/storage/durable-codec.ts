@@ -165,6 +165,7 @@ const agentContext = z.object({
   contextVersion: z.number().int().positive(),
   toolCorrections: z.record(z.object({ firstCallId: z.string().min(1), failures: z.number().int().nonnegative() }).strict()).optional(),
   admittedToolCallIds: z.array(z.string().min(1)).optional(),
+  toolCallBudget: z.object({ remaining: z.number().int().nonnegative() }).strict().optional(),
   networkAttemptBudget: z.object({ remaining: z.number().int().nonnegative() }).strict().optional(),
   governance: governance.optional(),
   failure: agentError.optional(),

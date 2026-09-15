@@ -51,6 +51,8 @@ export interface AgentContext {
   /** Conservative V1: one model correction opportunity per tool per Run. */
   toolCorrections?: Record<string, { firstCallId: string; failures: number }>;
   admittedToolCallIds?: string[];
+  /** Shared in-process ledger for nested child Tool calls. */
+  toolCallBudget?: { remaining: number };
   networkAttemptBudget?: { remaining: number };
   /** Additive Run-level governance state; legacy checkpoints are migrated by the durable codec. */
   governance?: RunGovernanceState;

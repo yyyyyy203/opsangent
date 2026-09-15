@@ -96,12 +96,15 @@ export class AgentHarness implements DiagnosisAgent {
     return yield* this.forwardRunStream(this.run(frame, options.signal ?? new AbortController().signal));
   }
 
-  public async *resumeStream(runId: string, signal = new AbortController().signal): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+  public async *resumeStream(runId: string, signal = new AbortController().signal, toolCallBudget?: { remaining: number }): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const loaded = await this.loadCheckpoint(runId);
     if (loaded === null) throw new Error(`Checkpoint not found: ${runId}`);
     const { context } = loaded;
     context.sessionId ??= this.dependencies.ids.next('session');
     context.replyId ??= this.dependencies.ids.next('reply');
+    context.toolCallBudget = toolCallBudget ?? context.toolCallBudget ?? {
+      remaining: Math.max(0, context.budget.maxToolCalls - context.budget.toolCallsUsed),
+    };
     const newStreamId = this.dependencies.ids.next('stream');
     context.streamId = newStreamId;
     const frame: RunExecutionFrame = {
@@ -231,7 +234,7 @@ export class AgentHarness implements DiagnosisAgent {
         if (this.dependencies.durableState === undefined || !(failureCommitError instanceof CheckpointConflictError)) throw failureCommitError;
         const latest = await this.dependencies.durableState.checkpoints.load(context.runId);
         if (latest === null) throw failureCommitError;
-        frame.context = latest.context;
+        this.adoptContext(frame, latest.context);
         frame.context.status = signal.aborted ? 'cancelled' : 'failed';
         frame.context.failure = failure;
         frame.checkpointRevision = latest.revision;
@@ -992,7 +995,7 @@ export class AgentHarness implements DiagnosisAgent {
       return;
     }
 
-    frame.context = compressed.context;
+    this.adoptContext(frame, compressed.context);
     if (validation?.status === 'summary_fallback') {
       await this.publishTransitionV2(frame, 'CONTEXT_COMPRESSION_FAILED', {
         level: 'L2',
@@ -1098,6 +1101,7 @@ export class AgentHarness implements DiagnosisAgent {
   private createContext(options: ReplyOptions): AgentContext {
     const now = this.dependencies.clock.now().toISOString();
     const runId = options.runId ?? this.dependencies.ids.next('run');
+    const maxToolCalls = options.maxToolCalls ?? 20;
     const userMessage: AgentMessage = {
       id: this.dependencies.ids.next('msg'), role: 'user', createdAt: now,
       blocks: [{ type: 'text', text: options.message }],
@@ -1121,11 +1125,13 @@ export class AgentHarness implements DiagnosisAgent {
         startedAt: now,
         maxIterations: options.maxIterations ?? 15,
         iteration: 0,
-        maxToolCalls: options.maxToolCalls ?? 20,
+        maxToolCalls,
         toolCallsUsed: 0,
         maxDurationMs: options.maxDurationMs ?? 120_000,
       },
       contextVersion: 1,
+      toolCallBudget: options.toolCallBudget ?? { remaining: maxToolCalls },
+      ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
       governance: createInitialRunGovernanceState({ profileId: options.profileId, capturedAt: now }),
     };
   }
@@ -1247,13 +1253,22 @@ export class AgentHarness implements DiagnosisAgent {
       ...(governanceEffects === undefined ? {} : { governanceEffects }),
       outboxEvents: pending === undefined ? [] : [pending, ...additionalEvents],
     });
-    frame.context = saved.context;
+    this.adoptContext(frame, saved.context);
     frame.checkpointRevision = saved.revision;
     if (pending !== undefined && dispatcher !== undefined) await dispatcher.drainRun(frame.context.runId);
   }
 
   private lifecycleEffectsFor(frame: RunExecutionFrame, toolCallId: string): readonly GovernanceEffect[] {
     return frame.lifecycleEffects.get(toolCallId) ?? [];
+  }
+
+  private adoptContext(frame: RunExecutionFrame, next: AgentContext): void {
+    const sharedBudget = frame.context.toolCallBudget;
+    if (sharedBudget !== undefined) {
+      if (next.toolCallBudget !== undefined) sharedBudget.remaining = next.toolCallBudget.remaining;
+      next.toolCallBudget = sharedBudget;
+    }
+    frame.context = next;
   }
 
   private createPendingV2<T extends AgentEventTypeV2>(

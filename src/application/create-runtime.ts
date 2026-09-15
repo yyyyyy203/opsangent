@@ -5,6 +5,7 @@ import type {
   Clock,
   DurableRunState,
   EventStore,
+  EventPublisherV2Dependencies,
   EvidenceStore,
   EvidenceBlobStore,
   EvidenceManifestStore,
@@ -90,6 +91,11 @@ export interface RuntimeToolPorts {
   evidenceManifests?: EvidenceManifestStore;
   streamingEvidenceRecorder?: StreamingEvidenceRecorder;
   toolResultCompactor: ToolResultCompactor;
+  /** Shared V2 lifecycle ports for late-bound source/subagent Tools. */
+  events: EventPublisherV2Dependencies;
+  checkpoints: CheckpointStore;
+  clock: Clock;
+  ids: IdGenerator;
 }
 
 export type RuntimeToolFactory = (ports: RuntimeToolPorts) => readonly Tool[];
@@ -100,6 +106,8 @@ export interface AgentRuntimeOptions {
   compactModel?: ChatModel;
   workspaceRoots: string[];
   tools?: Tool[];
+  /** Canonical parent-level source Tools; their child-only Tools are never registered here. */
+  sourceSubagentTools?: readonly Tool[];
   /** Build tools after optional runtime-owned ports exist and before the Toolkit is frozen. */
   toolFactories?: readonly RuntimeToolFactory[];
   guardians?: Guardian[];
@@ -247,6 +255,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       ...(evidenceManifests === undefined ? {} : { evidenceManifests }),
       ...(streamingEvidenceRecorder === undefined ? {} : { streamingEvidenceRecorder }),
       toolResultCompactor,
+      events: v2EventDependencies,
+      checkpoints,
+      clock,
+      ids,
     })]);
   } catch (error) {
     persistence?.close();
@@ -283,6 +295,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   if (options.includeExternalBash !== false) toolkit.register(createExternalBashTool());
   for (const tool of options.tools ?? []) toolkit.register(tool);
   for (const tool of factoryTools) toolkit.register(tool);
+  for (const tool of options.sourceSubagentTools ?? []) toolkit.register(tool);
   const guard = new GuardEngine([
     new BashGuardian(options.workspaceRoots),
     ...(options.guardians ?? []),

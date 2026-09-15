@@ -2,6 +2,32 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：可恢复的 logs_subagent 来源 Subagent
+
+2026-09-15：按 [来源 Subagent 设计规格](./superpowers/specs/2026-09-14-source-subagent-design.md)
+完成首个真实闭环 `logs_subagent`。主 Agent 只看到 canonical Tool；`logs.capture`、
+`logs.search_evidence`、`logs.aggregate_evidence`、`logs.read_evidence_slice` 和内部
+`source_report` 只在 child Toolkit 中注册。child 通过注入的 `SourceChildAgentFactory`
+复用现有 AgentHarness、ToolAdmission、ToolBatchExecutor 和 ToolExecutionPipeline，不另起
+第二套 ReAct 循环。
+
+本轮新增 `source-subagent` 契约、`DefaultSourceSubagentRunner`、canonical Tool Adapter、
+有界 `SourceReportCollector` 和 `createLogsSubagentTool`。输入严格限制 profile、服务、时间窗、
+问题和父级 evidence hint；宿主 profile/Manifest 归属校验优先于模型字段。childRunId 由父
+Run + parent ToolCall 稳定生成；父 deadline、共享 Tool/网络尝试账本、取消信号和 profile revision
+沿执行/恢复路径传递。Checkpoint 恢复使用相同 childRunId 和 `resumeStream`，已提交或 partial
+证据不会被无条件重采集。
+
+重试最多三次，默认两次；已有父模型可见输出后不重试。实现了 Retry、Verify/Resume、Reduced
+Scope（保留已有证据并返回 partial）和 Unavailable（无证据时返回结构化失败）四轮降级。来源状态、
+coverage、调用计数和 evidence 引用由代码计算；结果、V2 `SUBAGENT_*` 生命周期、Public/Audit/
+LangSmith 投影均保持有界并脱敏。LangSmith child span 优先挂到同一父 `tool.logs_subagent` span。
+
+验收覆盖契约、输入闸门、child Harness 多轮取证、恢复、重试、父子预算和投影边界；测试使用注入式
+日志页源、SQLite/local Blob 或 ScriptedModel。当前没有接入真实 Elasticsearch/ELK 地址、公司凭据、
+线上模型或生产部署，因此不能宣称真实 ELK 生产验收。Metrics/Trace 的具体 Subagent Runner 仍待后续
+实现；本轮只完成通用端口和 logs 首个切片。
+
 ## 最新增量：L1/L2 上下文压缩、完整性校验与重启恢复
 
 2026-09-14：按 [Agent Runtime Governance 与上下文压缩设计](./superpowers/specs/2026-09-11-agent-runtime-governance-and-context-compression-design.md) 完成压缩治理链路。新增严格的 `StructuredHistorySummary`/`CompressionTrace`/`CompressionValidationResult` 契约、确定性 L1 结构裁剪、证据可见性与 ToolCall/ToolResult 配对校验、精确 ToolResult 修复、可选 compact model 的 L2 摘要和一次重试、L2 → 已验证 L1 降级，以及失败时保留旧 Context。

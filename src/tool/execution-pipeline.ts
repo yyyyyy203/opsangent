@@ -261,6 +261,10 @@ export class ToolExecutionPipeline {
       return { type: 'interrupted', result, risk, interrupt };
     }
 
+    const toolCallBudget = context.toolCallBudget ??= {
+      remaining: Math.max(0, context.budget.maxToolCalls - context.budget.toolCallsUsed),
+    };
+    const delegatedBudgetBefore = toolCallBudget.remaining;
     const toolContext = {
       toolCallId: call.id,
       runId: context.runId,
@@ -273,7 +277,9 @@ export class ToolExecutionPipeline {
       signal,
       mode: tool.kind === 'action' ? this.options.actionMode : 'execute' as const,
       deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,
+      toolCallBudget,
       networkAttemptBudget: context.networkAttemptBudget ??= { remaining: context.budget.maxToolCalls * 3 },
+      remainingToolCalls: toolCallBudget.remaining,
     };
     await this.publishV2('TOOL_STARTED', context, {
       toolName: tool.name,
@@ -360,6 +366,10 @@ export class ToolExecutionPipeline {
       await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id);
       return { type: 'completed', result, risk, ...(execution === undefined ? {} : { execution }) };
     } finally {
+      if (tool.source === 'subagent') {
+        const delegatedCalls = Math.max(0, delegatedBudgetBefore - toolCallBudget.remaining);
+        context.budget.toolCallsUsed = Math.min(context.budget.maxToolCalls, context.budget.toolCallsUsed + delegatedCalls);
+      }
       if (!streamCompleted && toolStream !== undefined) {
         await toolStream.return(undefined as unknown as ToolResponse).catch(() => undefined);
       }

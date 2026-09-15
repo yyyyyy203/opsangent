@@ -20,12 +20,14 @@ export function createInspectionRuntime(options: InspectionRuntimeOptions) {
     return Object.freeze({ ...tool });
   };
   const tools = (options.tools ?? []).map(validateTool);
+  const sourceSubagentTools = (options.sourceSubagentTools ?? []).map(validateTool);
   const toolFactories: readonly RuntimeToolFactory[] | undefined = options.toolFactories?.map((factory) => {
     return (ports: RuntimeToolPorts) => factory(ports).map(validateTool);
   });
   const runtime = createAgentRuntime({
     ...options,
     tools,
+    sourceSubagentTools,
     ...(toolFactories === undefined ? {} : { toolFactories }),
     includeExternalBash: false,
     actionMode: 'dry_run',

@@ -2,6 +2,23 @@
 
 本主题的首个可实施切片见 [来源 Subagent 设计规格](../superpowers/specs/2026-09-14-source-subagent-design.md)。
 
+## 当前实现状态（2026-09-15）
+
+`logs_subagent` 已完成首个可恢复闭环：它是父 Toolkit 中唯一的日志来源入口，内部通过注入的
+child AgentHarness 使用四个有界 `logs.*` evidence Tools 和一个仅 child 可见的 `source_report`
+Tool。child 仍经过统一 ToolAdmission、BatchExecutor、ExecutionPipeline、Guard/Hook 和
+Checkpoint 管线；没有 Bash、动作、外部执行、任意 HTTP/SQL 或其他 Subagent。
+
+适配器执行严格输入与宿主 profile/父 Run evidence 归属校验，使用稳定 childRunId，传递父 deadline、
+取消信号、共享 Tool/网络尝试账本和 profile revision，并把结果压平为一个有界 ToolResponse。重试
+最多三次；已产生父模型可见输出后不重试。child Checkpoint/Manifest 优先用于 Verify/Resume；已有
+证据而后续查询失败时返回 `partial`，无证据时返回 `unavailable`，状态和 coverage 不采信模型填值。
+
+当前验收是注入式/本地验收：日志页源、Manifest/Blob、Checkpoint 和模型均可替换，测试覆盖多轮
+capture/search/aggregate/report、重试、恢复、预算和 Public/Audit/LangSmith 脱敏。尚未接入真实
+Elasticsearch/ELK 地址、账号、Token 或公司 MCP，也没有实现 Metrics/Trace 的具体 Runner；后续接入
+必须继续复用本 Tool 契约和来源边界，不能把底层 MCP 工具直接暴露给父模型。
+
 ## 分工
 
 | 对外 Tool | 内部取证范围 | 返回重点 |

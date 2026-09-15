@@ -52,7 +52,9 @@ export interface SourceSubagentExecution {
   streamId?: string;
   deadline?: number;
   signal: AbortSignal;
+  toolCallBudget?: { remaining: number };
   networkAttemptBudget?: { remaining: number };
+  remainingToolCalls?: number;
 }
 
 export interface SourceSubagentRunner {
@@ -86,6 +88,11 @@ export interface SourceSubagentDescriptor {
   maxAttempts?: number;
   retry?: SourceSubagentRetryPolicy;
   lifecycle?: SubagentLifecyclePorts;
+  /** Host-side ownership check for evidence IDs supplied as investigation hints. */
+  validateEvidenceIds?: (evidenceIds: readonly string[], input: {
+    parentRunId: string;
+    profileId: string;
+  }) => Promise<void>;
 }
 
 export function canonicalSourceToolName(source: SourceSubagentType): string {

@@ -20,14 +20,18 @@ export function admitToolBatch(
   const gates: AdmittedToolBatch['gates'] = [];
   const corrections = context.toolCorrections ??= {};
   const admitted = context.admittedToolCallIds ??= [];
+  const toolCallBudget = context.toolCallBudget ??= {
+    remaining: Math.max(0, context.budget.maxToolCalls - context.budget.toolCallsUsed),
+  };
   for (const candidate of candidates) {
     const key = `tool:${candidate.name}`;
     const previous = corrections[key];
     let error: AgentError | undefined;
     if (signal.aborted) error = { code: 'ABORTED', message: 'Run cancelled.', retryable: false };
-    else if (context.budget.toolCallsUsed >= context.budget.maxToolCalls) error = { code: 'BUDGET_EXCEEDED', message: 'Tool call budget exhausted.', retryable: false };
+    else if (context.budget.toolCallsUsed >= context.budget.maxToolCalls || toolCallBudget.remaining <= 0) error = { code: 'BUDGET_EXCEEDED', message: 'Tool call budget exhausted.', retryable: false };
     else {
       context.budget.toolCallsUsed += 1;
+      toolCallBudget.remaining -= 1;
       if (admitted.includes(candidate.id)) error = { code: 'LOOP_DETECTED', message: 'Tool call ID has already been admitted.', retryable: false };
       else if ((previous?.failures ?? 0) >= 2) error = { code: 'LOOP_DETECTED', message: 'Model correction allowance exhausted.', retryable: false };
       else {

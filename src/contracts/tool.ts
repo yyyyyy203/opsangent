@@ -56,7 +56,11 @@ export interface ToolCallOptions {
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
   deadline?: number;
+  /** Shared ledger used when a Tool delegates work to a child Harness. */
+  toolCallBudget?: { remaining: number };
   networkAttemptBudget?: { remaining: number };
+  /** Remaining parent Tool-call budget available to a delegated source Run. */
+  remainingToolCalls?: number;
 }
 
 export type ToolResponseBlock =

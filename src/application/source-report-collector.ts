@@ -39,6 +39,7 @@ interface CaptureFact {
 export interface SourceReportCollectorOptions {
   maxSummaryBytes?: number;
   maxItems?: number;
+  knownEvidenceIds?: readonly string[];
 }
 
 export class DefaultSourceReportCollector implements SourceReportCollector {
@@ -57,6 +58,9 @@ export class DefaultSourceReportCollector implements SourceReportCollector {
     }
     if (!Number.isSafeInteger(this.maxItems) || this.maxItems <= 0) {
       throw new RangeError('maxItems must be a positive safe integer');
+    }
+    for (const evidenceId of options.knownEvidenceIds ?? []) {
+      if (isIdentifier(evidenceId) && this.evidenceIds.size < this.maxItems) this.evidenceIds.add(evidenceId);
     }
   }
 

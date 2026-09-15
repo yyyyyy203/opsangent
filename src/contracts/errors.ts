@@ -19,6 +19,8 @@ export type AgentErrorCode =
   | 'MCP_AUTH_ERROR'
   | 'MCP_PROTOCOL_ERROR'
   | 'CIRCUIT_OPEN'
+  | 'TIMEOUT'
+  | 'UNAVAILABLE'
   | 'USER_REJECTED';
 
 export interface AgentError {

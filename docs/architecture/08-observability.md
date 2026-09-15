@@ -1,4 +1,4 @@
-> **DEPRECATED**：本文保留早期可观测性目标；Event/Message、投影、身份字段和当前实现状态已由 [Event 与 Message V2 协议](./15-event-message-v2.md) 与 [实现进度](../implementation-status.md) 取代。
+> 本文保留可观测性总体目标；Event/Message 字段契约以 [Event 与 Message V2 协议](./15-event-message-v2.md) 为准，当前实现范围以 [实现进度](../implementation-status.md) 为准。
 
 # 可观测、LangSmith 与审计
 
@@ -33,6 +33,16 @@ inspection.run
 ```
 
 记录起止时间、状态、模型版本、usage、脱敏输入摘要、错误码、闸门、修复规则、重试次数、预算消耗、数据覆盖和证据引用。并行 span 必须显式带 parent，不能依赖共享可变“当前 span”。
+
+### 当前 Subagent 链路
+
+已实现的 `logs_subagent` 生命周期复用 V2 `SUBAGENT_*` 事件。事件信封携带 childRunId、
+parentRunId、parent ToolCall/step 关联和 attempt 信息；LangSmith Projector 优先把 child
+`subagent.logs` span 挂到同一父 `tool.logs_subagent` span，历史事件缺少 ToolCall 关联时才
+回退到 parent Run。生命周期上报失败不会阻塞本地 ToolResult、Checkpoint 或证据提交。
+
+当前只验证了注入式日志页源、SQLite/local Blob 和本地模型/协议测试。真实 ELK、公司 MCP、线上模型
+和生产 LangSmith 数据集仍未接入；不得把本地 span 关系测试表述为线上观测验收。
 
 ## 本地事实与远程观测
 

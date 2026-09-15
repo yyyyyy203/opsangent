@@ -1,7 +1,8 @@
 # 来源 Subagent 设计规格
 
 日期：2026-09-14
-状态：设计基线，待实施；本文不代表代码已经完成。
+状态：设计基线；`logs_subagent` 已按本文范围实现并通过注入式/本地验收，Metrics/Trace 具体 Runner
+以及真实 ELK/线上生产验收仍待后续增量。
 适用分支：codex/event-message-v2
 
 ## 1. 背景与问题
@@ -170,6 +171,7 @@ export interface SourceSubagentExecution {
   streamId?: string;
   deadline?: number;
   signal: AbortSignal;
+  toolCallBudget?: { remaining: number };
   networkAttemptBudget?: { remaining: number };
 }
 
@@ -249,6 +251,7 @@ export interface SourceChildAgent {
       sessionId?: string;
       replyId?: string;
       signal: AbortSignal;
+      toolCallBudget?: { remaining: number };
       maxToolCalls: number;
       maxDurationMs: number;
     },
@@ -256,6 +259,7 @@ export interface SourceChildAgent {
   resumeStream(
     runId: string,
     signal?: AbortSignal,
+    toolCallBudget?: { remaining: number },
   ): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
 }
 
@@ -266,6 +270,10 @@ export interface SourceChildAgentFactory {
     tools: readonly Tool[];
     maxToolCalls: number;
     maxDurationMs: number;
+    profileId: string;
+    profileRevision?: string;
+    toolCallBudget?: { remaining: number };
+    networkAttemptBudget?: { remaining: number };
   }): SourceChildAgent;
 }
 

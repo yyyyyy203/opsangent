@@ -10,6 +10,10 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-14-source-subagent-design.md`
 
+**实施状态（2026-09-15）：** 本计划已完成。`logs_subagent` 已通过注入式/本地验收；全量质量门禁为
+90 个测试文件通过、1 个真实 Prometheus 文件按默认配置跳过，451 项测试通过、1 项跳过。真实 ELK、
+线上模型和 Metrics/Trace 具体 Runner 不属于本计划完成范围。
+
 ## Global Constraints
 
 - The parent Registry exposes only canonical `logs_subagent`; child-only `logs.*` and `source_report` Tools never enter the parent Toolkit.
@@ -34,14 +38,14 @@
 - Consumes: existing `Tool`, `ToolResponse`, `ToolResponseChunk`, `ToolCallOptions`, `EventFactoryV2Like`, `EventPublisherV2Like`, `IdGenerator`, `AgentEvent`, `DiagnosisRunResult` types.
 - Produces: `SourceSubagentType`, `SourceSubagentStatus`, `SourceFinding`, `SourceSubagentRequest`, `SourceSubagentResult`, `SourceSubagentExecution`, `SourceSubagentRunner`, `SourceSubagentDescriptor`, `SourceSubagentRetryPolicy`, `SubagentLifecyclePorts`.
 
-- [ ] **Step 1: Write the failing contract test.** Assert canonical name mapping (`logs -> logs_subagent`, `metrics -> metrics_subagent`, `traces -> traces_subagent`), strict result fields, and that `ToolCallOptions` accepts optional `profileId` and `profileRevision` without changing existing required fields.
-- [ ] **Step 2: Run the focused test and verify it fails because the source contract module and canonical mapping do not exist.**
+- [x] **Step 1: Write the failing contract test.** Assert canonical name mapping (`logs -> logs_subagent`, `metrics -> metrics_subagent`, `traces -> traces_subagent`), strict result fields, and that `ToolCallOptions` accepts optional `profileId` and `profileRevision` without changing existing required fields.
+- [x] **Step 2: Run the focused test and verify it fails because the source contract module and canonical mapping do not exist.**
 
   Run: `pnpm exec vitest run test/source-subagent-contract.test.ts`
 
-- [ ] **Step 3: Implement the contracts.** Define the exact unions and interfaces from Spec §6; add `profileId?: string` and `profileRevision?: string` to `ToolCallOptions`; export the new module from `src/contracts/index.ts`. Add a pure `canonicalSourceToolName(source)` helper that returns the three fixed names and throws on an unknown source.
-- [ ] **Step 4: Run the focused test and verify it passes.**
-- [ ] **Step 5: Commit the contract increment.**
+- [x] **Step 3: Implement the contracts.** Define the exact unions and interfaces from Spec §6; add `profileId?: string` and `profileRevision?: string` to `ToolCallOptions`; export the new module from `src/contracts/index.ts`. Add a pure `canonicalSourceToolName(source)` helper that returns the three fixed names and throws on an unknown source.
+- [x] **Step 4: Run the focused test and verify it passes.**
+- [x] **Step 5: Commit the contract increment.**
 
   Commit: `feat: add source subagent contracts`
 
@@ -55,11 +59,11 @@
 - Consumes: `EvidenceManifestStore`, `ToolResponse`, `SourceFinding`, `SourceSubagentResult`, `Clock`.
 - Produces: `SourceReportCollector` implementation with `observeToolResult`, `acceptReport`, and `finalize`.
 
-- [ ] **Step 1: Write failing tests for four behaviors:** only observed evidence IDs may be cited; an invalid/unknown citation rejects the candidate; Manifest coverage and partial state determine status/coverage; no observed evidence produces `unavailable` with no fabricated evidence ID. Also assert summary, statements, trace IDs and missing-evidence arrays are bounded.
-- [ ] **Step 2: Run `pnpm exec vitest run test/source-report-collector.test.ts` and verify the expected missing-module failures.**
-- [ ] **Step 3: Implement the collector.** Track only evidence IDs from successful child ToolResponses; query `getVisible` during finalization; validate finding references against the observed set and visible manifest ownership; normalize trace IDs and enforce the existing 16 KiB summary and 20-item limits; compute `complete` only when a valid report exists and all visible manifests are committed with no missing evidence, otherwise compute `partial` when evidence exists, otherwise `unavailable`.
-- [ ] **Step 4: Run the focused tests and verify they pass.**
-- [ ] **Step 5: Commit the collector increment.**
+- [x] **Step 1: Write failing tests for four behaviors:** only observed evidence IDs may be cited; an invalid/unknown citation rejects the candidate; Manifest coverage and partial state determine status/coverage; no observed evidence produces `unavailable` with no fabricated evidence ID. Also assert summary, statements, trace IDs and missing-evidence arrays are bounded.
+- [x] **Step 2: Run `pnpm exec vitest run test/source-report-collector.test.ts` and verify the expected missing-module failures.**
+- [x] **Step 3: Implement the collector.** Track only evidence IDs from successful child ToolResponses; query `getVisible` during finalization; validate finding references against the observed set and visible manifest ownership; normalize trace IDs and enforce the existing 16 KiB summary and 20-item limits; compute `complete` only when a valid report exists and all visible manifests are committed with no missing evidence, otherwise compute `partial` when evidence exists, otherwise `unavailable`.
+- [x] **Step 4: Run the focused tests and verify they pass.**
+- [x] **Step 5: Commit the collector increment.**
 
   Commit: `feat: add bounded source report collector`
 
@@ -76,14 +80,14 @@
 - Consumes: Task 1 contracts, Task 2 collector, injected `SourceChildAgentFactory`, injected child-tool factory, `CheckpointStore`, `EvidenceManifestStore`, `Clock`, `IdGenerator`, and existing V2 lifecycle ports.
 - Produces: `SourceChildAgent`, `SourceChildAgentFactory`, `SourceReportCollectorFactory`, `SourceSubagentRunner` implementation, and `createSourceSubagentTool(descriptor)`.
 
-- [ ] **Step 1: Write failing adapter tests.** Cover strict input rejection, host profile mismatch, missing `profileId`/`toolCallId` fail-closed behavior, fixed `kind/source/recoveryPolicy/isConcurrencySafe`, stable childRunId across retries, retryable errors only before visible output, abort/policy/terminal errors without retry, and partial/unavailable flattening into a bounded `ToolResponse`.
-- [ ] **Step 2: Write failing Runner tests.** Use a child factory that returns an actual `AgentHarness` backed by a minimal Toolkit and ScriptedModel; assert the child receives only the allowed tools, its first message is rendered from stable fields, `TOOL_RESULT` evidence is collected, `source_report` is accepted through the child Pipeline, parent budget/deadline/network ledger are bounded, and `resumeStream` is used after a child checkpoint exists.
-- [ ] **Step 3: Run both focused test files and verify failures are due to missing Runner/adapter behavior rather than test setup.**
-- [ ] **Step 4: Implement `SourceSubagentRunner`.** Build the child execution context from host-injected values, calculate `maxToolCalls = min(8, remaining parent calls)` and `maxDurationMs = min(30_000, parent deadline remaining)`, create a child Toolkit from the injected factory, observe only child V1 `TOOL_RESULT` payloads, drive `replyStream`/`resumeStream`, and finalize through the collector. Render the child prompt with stable field order and never include raw log content or internal storage fields.
-- [ ] **Step 5: Implement `createSourceSubagentTool`.** Validate the descriptor’s canonical name/source pair, parse the strict request schema, validate the host scope and visible parent evidence, derive the stable child identity from parent Run + ToolCall + source, emit existing `SUBAGENT_*` V2 events with `toolCallId`/`parentRunId`, apply max three attempts and the four rounds of retry → verify/resume → reduced scope → unavailable, and return a bounded JSON result plus evidence references. Preserve old `adaptSubagentTool` behavior unchanged.
-- [ ] **Step 6: Add `profileId` and `profileRevision` to the ToolCallOptions object built in `ToolExecutionPipeline`, taking them from `context.profileId` and the immutable governance profile revision when present.
-- [ ] **Step 7: Run the focused tests and verify they pass.**
-- [ ] **Step 8: Commit the Runner and adapter increment.**
+- [x] **Step 1: Write failing adapter tests.** Cover strict input rejection, host profile mismatch, missing `profileId`/`toolCallId` fail-closed behavior, fixed `kind/source/recoveryPolicy/isConcurrencySafe`, stable childRunId across retries, retryable errors only before visible output, abort/policy/terminal errors without retry, and partial/unavailable flattening into a bounded `ToolResponse`.
+- [x] **Step 2: Write failing Runner tests.** Use a child factory that returns an actual `AgentHarness` backed by a minimal Toolkit and ScriptedModel; assert the child receives only the allowed tools, its first message is rendered from stable fields, `TOOL_RESULT` evidence is collected, `source_report` is accepted through the child Pipeline, parent budget/deadline/network ledger are bounded, and `resumeStream` is used after a child checkpoint exists.
+- [x] **Step 3: Run both focused test files and verify failures are due to missing Runner/adapter behavior rather than test setup.**
+- [x] **Step 4: Implement `SourceSubagentRunner`.** Build the child execution context from host-injected values, calculate `maxToolCalls = min(8, remaining parent calls)` and `maxDurationMs = min(30_000, parent deadline remaining)`, create a child Toolkit from the injected factory, observe only child V1 `TOOL_RESULT` payloads, drive `replyStream`/`resumeStream`, and finalize through the collector. Render the child prompt with stable field order and never include raw log content or internal storage fields.
+- [x] **Step 5: Implement `createSourceSubagentTool`.** Validate the descriptor’s canonical name/source pair, parse the strict request schema, validate the host scope and visible parent evidence, derive the stable child identity from parent Run + ToolCall + source, emit existing `SUBAGENT_*` V2 events with `toolCallId`/`parentRunId`, apply max three attempts and the four rounds of retry → verify/resume → reduced scope → unavailable, and return a bounded JSON result plus evidence references. Preserve old `adaptSubagentTool` behavior unchanged.
+- [x] **Step 6: Add `profileId` and `profileRevision` to the ToolCallOptions object built in `ToolExecutionPipeline`, taking them from `context.profileId` and the immutable governance profile revision when present.**
+- [x] **Step 7: Run the focused tests and verify they pass.**
+- [x] **Step 8: Commit the Runner and adapter increment.**
 
   Commit: `feat: add recoverable source subagent runner`
 
@@ -100,12 +104,12 @@
 - Consumes: `createLogEvidenceTools`, `LogEvidenceToolOptions`, `SourceChildAgentFactory`, Task 3 Runner/adapter, existing L0 ports and V2 lifecycle dependencies.
 - Produces: `createLogsSubagentTool(options)` and an explicit Runtime composition option that registers the canonical parent Tool while constructing child-only tools separately.
 
-- [ ] **Step 1: Write failing composition tests.** Assert the parent Toolkit contains `logs_subagent` but none of the four `logs.*` Tools; the child Toolkit contains exactly the four `logs.*` Tools plus `source_report`; Bash, action, external and subagent Tools are absent; a multi-turn child capture/search/report returns a structured result with evidence IDs; and the parent receives one ordinary ToolResponse.
-- [ ] **Step 2: Run `pnpm exec vitest run test/logs-subagent-runtime.test.ts` and verify the expected registration/runner failures.**
-- [ ] **Step 3: Implement the bootstrap factory.** Accept log page source, recorder, manifests, reader, budget, child-agent factory, checkpoint and lifecycle ports; create the four `logs.*` Tools only for the child; create `source_report` with the strict report schema; construct the Runner and canonical adapter; return only `logs_subagent` to the parent.
-- [ ] **Step 4: Extend Runtime options with an explicit `sourceSubagentTools?: readonly Tool[]` or equivalent factory boundary, register those tools before Toolkit freeze, and keep `createInspectionRuntime` allowlist/action/Bash checks applied to the parent Tool only. Do not auto-register child-only Tools.
-- [ ] **Step 5: Run the focused runtime test and verify it passes.**
-- [ ] **Step 6: Commit the Logs Subagent composition increment.**
+- [x] **Step 1: Write failing composition tests.** Assert the parent Toolkit contains `logs_subagent` but none of the four `logs.*` Tools; the child Toolkit contains exactly the four `logs.*` Tools plus `source_report`; Bash, action, external and subagent Tools are absent; a multi-turn child capture/search/report returns a structured result with evidence IDs; and the parent receives one ordinary ToolResponse.
+- [x] **Step 2: Run `pnpm exec vitest run test/logs-subagent-runtime.test.ts` and verify the expected registration/runner failures.**
+- [x] **Step 3: Implement the bootstrap factory.** Accept log page source, recorder, manifests, reader, budget, child-agent factory, checkpoint and lifecycle ports; create the four `logs.*` Tools only for the child; create `source_report` with the strict report schema; construct the Runner and canonical adapter; return only `logs_subagent` to the parent.
+- [x] **Step 4: Extend Runtime options with an explicit `sourceSubagentTools?: readonly Tool[]` or equivalent factory boundary, register those tools before Toolkit freeze, and keep `createInspectionRuntime` allowlist/action/Bash checks applied to the parent Tool only. Do not auto-register child-only Tools.
+- [x] **Step 5: Run the focused runtime test and verify it passes.**
+- [x] **Step 6: Commit the Logs Subagent composition increment.**
 
   Commit: `feat: compose logs source subagent`
 
@@ -122,21 +126,21 @@
 - Consumes: the complete Logs Subagent composition and existing SQLite/Event/Message/LangSmith projectors.
 - Produces: restart/retry/partial/unavailable and redaction evidence, plus documentation that separates injected/local validation from real ELK production acceptance.
 
-- [ ] **Step 1: Write failing recovery and boundary tests.** Simulate a committed capture followed by an aggregate failure, restart the SQLite-backed runtime, assert the same childRunId resumes without a second capture, assert exhausted retries return partial/unavailable correctly, assert shared network attempts are consumed, and assert Public/Audit/LangSmith projections contain no raw log, DSL, storage key, path or complete ToolResponse.
-- [ ] **Step 2: Run `pnpm exec vitest run test/source-subagent-recovery.test.ts` and verify the failures identify the missing recovery behavior.**
-- [ ] **Step 3: Implement only the missing recovery/projector changes.** Reuse existing checkpoint and Manifest ports; do not add a second persistence mechanism or duplicate V2 event names.
-- [ ] **Step 4: Update status and architecture docs with exact implemented files, injected/local test scope, and explicit real ELK/online-model non-claims.**
-- [ ] **Step 5: Run the complete quality gate:** `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `git diff --check`.
-- [ ] **Step 6: Review the Spec §2–§16 line by line against tests and code, then commit the documentation and verification increment.**
+- [x] **Step 1: Write failing recovery and boundary tests.** Simulate a committed capture followed by an aggregate failure, restart the SQLite-backed runtime, assert the same childRunId resumes without a second capture, assert exhausted retries return partial/unavailable correctly, assert shared network attempts are consumed, and assert Public/Audit/LangSmith projections contain no raw log, DSL, storage key, path or complete ToolResponse.
+- [x] **Step 2: Run `pnpm exec vitest run test/source-subagent-recovery.test.ts` and verify the failures identify the missing recovery behavior.**
+- [x] **Step 3: Implement only the missing recovery/projector changes.** Reuse existing checkpoint and Manifest ports; do not add a second persistence mechanism or duplicate V2 event names.
+- [x] **Step 4: Update status and architecture docs with exact implemented files, injected/local test scope, and explicit real ELK/online-model non-claims.**
+- [x] **Step 5: Run the complete quality gate:** `pnpm lint`, `pnpm typecheck`, `pnpm test`, `pnpm build`, and `git diff --check`.
+- [x] **Step 6: Review the Spec §2–§16 line by line against tests and code, then commit the documentation and verification increment.**
 
   Commit: `docs: record logs source subagent implementation`
 
 ## Completion Checklist
 
-- [ ] Parent exposes only canonical `logs_subagent`; child-only Tools are not parent-visible.
-- [ ] Child execution uses the existing AgentHarness and the standard admission/execution pipeline.
-- [ ] Stable child identity, parent budget/deadline/signal/profile scope and shared network ledger are enforced.
-- [ ] Report references are manifest-visible and status/coverage are deterministic.
-- [ ] Retry, verify/resume, reduced scope and unavailable degradation are covered by tests.
-- [ ] Parent/child events, Checkpoint, Public/Audit/LangSmith redaction and restart behavior are verified.
-- [ ] All quality gates pass, and documentation does not claim real ELK or online production acceptance.
+- [x] Parent exposes only canonical `logs_subagent`; child-only Tools are not parent-visible.
+- [x] Child execution uses the existing AgentHarness and the standard admission/execution pipeline.
+- [x] Stable child identity, parent budget/deadline/signal/profile scope and shared network ledger are enforced.
+- [x] Report references are manifest-visible and status/coverage are deterministic.
+- [x] Retry, verify/resume, reduced scope and unavailable degradation are covered by tests.
+- [x] Parent/child events, Checkpoint, Public/Audit/LangSmith redaction and restart behavior are verified.
+- [x] All quality gates pass, and documentation does not claim real ELK or online production acceptance.
