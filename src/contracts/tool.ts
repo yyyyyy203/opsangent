@@ -50,6 +50,9 @@ export interface ToolCallOptions {
   sessionId?: string;
   replyId?: string;
   streamId?: string;
+  /** Immutable host scope captured from the parent AgentContext. */
+  profileId?: string;
+  profileRevision?: string;
   signal: AbortSignal;
   mode: 'dry_run' | 'execute';
   deadline?: number;

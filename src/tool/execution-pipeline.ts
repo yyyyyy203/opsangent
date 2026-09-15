@@ -268,6 +268,8 @@ export class ToolExecutionPipeline {
       ...(context.sessionId === undefined ? {} : { sessionId: context.sessionId }),
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
+      profileId: context.profileId,
+      ...(context.governance?.profile.revision === undefined ? {} : { profileRevision: context.governance.profile.revision }),
       signal,
       mode: tool.kind === 'action' ? this.options.actionMode : 'execute' as const,
       deadline: Date.parse(context.budget.startedAt) + context.budget.maxDurationMs,

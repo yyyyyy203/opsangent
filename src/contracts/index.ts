@@ -18,4 +18,5 @@ export * from './model.js';
 export * from './observability.js';
 export * from './storage.js';
 export * from './log-evidence.js';
+export * from './source-subagent.js';
 export * from './tool.js';
