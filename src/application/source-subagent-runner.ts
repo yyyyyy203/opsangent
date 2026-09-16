@@ -288,7 +288,7 @@ function renderSourcePrompt(source: SourceSubagentType, request: SourceSubagentR
     `end=${request.end}`,
     `question=${request.question}`,
     `knownEvidenceIds=${JSON.stringify(request.evidenceIds)}`,
-    '请先采集或检索证据，最后调用 source_report；不要输出查询 DSL、路径、凭据或原始日志。',
+    '请先采集或检索证据，最后调用 source_report；不要输出查询 DSL、路径、凭据或原始来源数据。',
   ].join('\n');
 }
 

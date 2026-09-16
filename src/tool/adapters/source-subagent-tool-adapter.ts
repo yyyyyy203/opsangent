@@ -81,7 +81,7 @@ async function* invokeSourceSubagent(
   try {
     await descriptor.validateRequest?.(request, executionBase);
   } catch (error) {
-    throw toSourceToolFailure(error, errorCode(error));
+    throw toValidatorFailure(error);
   }
   const childRunId = descriptor.childRunId(executionBase);
   if (typeof childRunId !== 'string' || childRunId.trim().length === 0) {
@@ -425,6 +425,11 @@ function safeErrorMessage(error: unknown): string {
 function toSourceToolFailure(error: unknown, code: AgentErrorCode): SourceToolFailure {
   if (error instanceof SourceToolFailure) return error;
   return new SourceToolFailure(code, safeErrorMessage(error), isAgentErrorLike(error) && error.retryable);
+}
+
+function toValidatorFailure(error: unknown): SourceToolFailure {
+  if (isAgentErrorLike(error)) return toSourceToolFailure(error, errorCode(error));
+  return new SourceToolFailure('MCP_SERVER_ERROR', 'Source subagent validator failed.', true);
 }
 
 function toAgentError(error: unknown, fallback: AgentErrorCode) {

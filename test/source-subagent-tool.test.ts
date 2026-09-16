@@ -156,6 +156,31 @@ describe('source subagent Tool adapter', () => {
     expect(createdIdentity).toBe(false);
     expect(invokedRunner).toBe(false);
   });
+
+  it('maps an unclassified source-specific validator failure to a retryable server error', async () => {
+    let createdIdentity = false;
+    let invokedRunner = false;
+    const tool = createSourceSubagentTool(descriptor(async function* () {
+      await Promise.resolve();
+      invokedRunner = true;
+      yield* [] as ToolResponseChunk[];
+      return completeResult();
+    }, {
+      childRunId: () => {
+        createdIdentity = true;
+        return 'child-should-not-exist';
+      },
+      validateRequest: () => {
+        throw new Error('validator crashed');
+      },
+    }));
+
+    await expect(drain(tool.call?.(request, options()))).rejects.toMatchObject({
+      code: 'MCP_SERVER_ERROR', retryable: true,
+    });
+    expect(createdIdentity).toBe(false);
+    expect(invokedRunner).toBe(false);
+  });
 });
 
 function descriptor(

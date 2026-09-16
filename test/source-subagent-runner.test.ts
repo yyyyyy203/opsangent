@@ -185,6 +185,7 @@ describe('source subagent Runner', () => {
 
     expect(message).toContain('只读 metrics 来源取证 Subagent');
     expect(message).not.toContain('日志取证');
+    expect(message).not.toContain('原始日志');
   });
 
   it('preserves structured collector observation errors', async () => {
