@@ -8,6 +8,7 @@ import { assessSettlementMetrics, type SettlementMetricFact, type SettlementMetr
 import { readSourceEvidenceObservation } from './source-evidence-observation.js';
 import {
   DefaultSourceReportCollector,
+  SourceReportValidationError,
   type SourceReportCandidate,
   type SourceReportCollector,
   type SourceReportFinalizeInput,
@@ -37,6 +38,9 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
   private toolCallsUsed = 0;
 
   public constructor(private readonly options: MetricsSourceReportCollectorOptions) {
+    if (options.request.profileId !== options.profile.profileId || options.request.service !== options.profile.service) {
+      throw new MetricsSourceReportPolicyError('request is outside the injected metrics profile');
+    }
     this.requestStart = parseTimestamp(options.request.start, 'request start');
     this.requestEnd = parseTimestamp(options.request.end, 'request end');
     if (this.requestStart >= this.requestEnd || this.requestEnd - this.requestStart !== options.profile.windowSeconds) {
@@ -61,7 +65,7 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
     if (facts.length !== 1 || facts[0]?.type !== 'json') {
       throw new MetricsSourceReportProtocolError('metrics response must contain exactly one metric fact');
     }
-    const fact = parseMetricFact(facts[0].value);
+    const fact = parseMetricFact(facts[0].value, this.options.profile);
     validateMetricFact(fact, observation, this.options.profile);
 
     const overlapCoverage = intervalCoverage(fact.start, fact.end, this.requestStart, this.requestEnd);
@@ -72,12 +76,18 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
       fact,
       observation,
       windowMatchesRequest,
-      coverage: windowMatchesRequest ? observation.coverage : Math.min(observation.coverage, overlapCoverage),
+      coverage: overlapCoverage,
     });
   }
 
   public acceptReport(candidate: SourceReportCandidate): void {
     this.delegate.acceptReport(candidate);
+    const observedEvidenceIds = new Set(this.observations.map((observation) => observation.evidenceId));
+    const citesMetricEvidence = candidate.findings.some((finding) => finding.evidenceIds
+      .some((evidenceId) => observedEvidenceIds.has(evidenceId)));
+    if (!citesMetricEvidence) {
+      throw new SourceReportValidationError('metrics report must cite observed metric evidence');
+    }
     this.reportAccepted = true;
   }
 
@@ -142,7 +152,17 @@ export class MetricsSourceReportProtocolError extends Error {
   }
 }
 
-function parseMetricFact(value: unknown): SettlementMetricFact {
+export class MetricsSourceReportPolicyError extends Error {
+  public readonly code = 'POLICY_DENIED';
+  public readonly retryable = false;
+
+  public constructor(message: string) {
+    super(message);
+    this.name = 'MetricsSourceReportPolicyError';
+  }
+}
+
+function parseMetricFact(value: unknown, profile: SettlementMetricsProfile): SettlementMetricFact {
   if (!isRecord(value) || !hasOnlyKeys(value, [
     'status', 'total', 'failed', 'failureRate', 'threshold', 'minSamples', 'service', 'environment', 'start', 'end',
   ])) throw new MetricsSourceReportProtocolError('invalid metric fact');
@@ -151,11 +171,25 @@ function parseMetricFact(value: unknown): SettlementMetricFact {
     || !isSafeInteger(total) || !isSafeInteger(failed)
     || (failureRate !== null && typeof failureRate !== 'number')
     || typeof threshold !== 'number' || !isSafeInteger(minSamples)
-    || service !== 'checkout' || environment !== 'simulation'
+    || typeof service !== 'string' || typeof environment !== 'string'
     || !isSafeInteger(start) || !isSafeInteger(end)) {
     throw new MetricsSourceReportProtocolError('invalid metric fact');
   }
-  return { status, total, failed, failureRate, threshold, minSamples, service, environment, start, end };
+  if (service !== profile.service || environment !== profile.environment) {
+    throw new MetricsSourceReportProtocolError('metric fact is outside the injected profile');
+  }
+  return {
+    status,
+    total,
+    failed,
+    failureRate,
+    threshold,
+    minSamples,
+    service: profile.service,
+    environment: profile.environment,
+    start,
+    end,
+  };
 }
 
 function validateMetricFact(
@@ -203,7 +237,7 @@ function renderFinding(observation: MetricObservation): SourceSubagentResult['fi
 
 function intervalCoverage(actualStart: number, actualEnd: number, requestedStart: number, requestedEnd: number): number {
   const overlap = Math.max(0, Math.min(actualEnd, requestedEnd) - Math.max(actualStart, requestedStart));
-  return overlap / (requestedEnd - requestedStart);
+  return Math.min(1, Math.max(0, overlap / (requestedEnd - requestedStart)));
 }
 
 function parseTimestamp(value: string, label: string): number {

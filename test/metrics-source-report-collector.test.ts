@@ -48,7 +48,7 @@ function fact(total: number, failed: number, overrides: Partial<SettlementMetric
   };
 }
 
-function metricResponse(metricFact: SettlementMetricFact, evidenceId = 'metric-evidence-1'): ToolResponse {
+function metricResponse(metricFact: SettlementMetricFact, evidenceId = 'metric-evidence-1', coverage = 1): ToolResponse {
   return attachSourceEvidenceObservation({
     blocks: [
       { type: 'json', value: metricFact },
@@ -60,7 +60,7 @@ function metricResponse(metricFact: SettlementMetricFact, evidenceId = 'metric-e
     source: 'metrics',
     evidenceId,
     state: 'committed',
-    coverage: 1,
+    coverage,
     timeRange: {
       start: new Date(metricFact.start * 1_000).toISOString(),
       end: new Date(metricFact.end * 1_000).toISOString(),
@@ -145,6 +145,31 @@ describe('MetricsSourceReportCollector', () => {
     });
   });
 
+  it('rejects an empty source report and leaves the metric report unaccepted', () => {
+    const subject = collector();
+    subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15)));
+
+    expect(() => subject.acceptReport({ ...candidate(['metric-evidence-1']), findings: [] })).toThrow(expect.objectContaining({
+      code: 'POLICY_DENIED',
+    }));
+    expect(subject.finalize(finalizeInput)).toMatchObject({
+      status: 'partial', missingEvidence: ['source_report'],
+    });
+  });
+
+  it('rejects a source report whose known citation is not metric evidence', () => {
+    const subject = collector();
+    subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15)));
+    subject.observeToolResult('logs.capture', {
+      blocks: [{ type: 'evidence_ref', evidenceId: 'non-metric-evidence' }],
+      evidenceIds: ['non-metric-evidence'],
+    });
+
+    expect(() => subject.acceptReport(candidate(['non-metric-evidence']))).toThrow(expect.objectContaining({
+      code: 'POLICY_DENIED',
+    }));
+  });
+
   it('returns unavailable when no valid metric evidence was observed', () => {
     expect(collector().finalize(finalizeInput)).toMatchObject({
       status: 'unavailable', evidenceIds: [], coverage: 0,
@@ -174,6 +199,24 @@ describe('MetricsSourceReportCollector', () => {
     expect(result.status).toBe('partial');
     expect(result.coverage).toBeCloseTo(179 / 300);
     expect(result.missingEvidence).toContain('window_outside_request_tolerance');
+  });
+
+  it.each([
+    ['profileId', { ...request, profileId: 'another-profile' }],
+    ['service', { ...request, service: 'another-service' }],
+  ])('fails closed when the request %s is outside the injected Profile', (_field, invalidRequest) => {
+    expect(() => new MetricsSourceReportCollector({
+      request: invalidRequest,
+      profile: settlementMetricsLabProfile,
+    })).toThrow(expect.objectContaining({ code: 'POLICY_DENIED', retryable: false }));
+  });
+
+  it('recomputes final coverage from the metric fact interval instead of metadata', () => {
+    const subject = collector();
+    subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15), 'metric-evidence-1', 0.25));
+    subject.acceptReport(candidate(['metric-evidence-1']));
+
+    expect(subject.finalize(finalizeInput)).toMatchObject({ status: 'complete', coverage: 1 });
   });
 
   it('rejects a report that cites unknown evidence', () => {
