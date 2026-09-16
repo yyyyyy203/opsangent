@@ -78,6 +78,11 @@ async function* invokeSourceSubagent(
 ): AsyncGenerator<ToolResponseChunk, ToolResponse> {
   const request = validateRequest(input, schemaTool);
   const executionBase = createExecutionBase(request, options);
+  try {
+    await descriptor.validateRequest?.(request, executionBase);
+  } catch (error) {
+    throw toSourceToolFailure(error, errorCode(error));
+  }
   const childRunId = descriptor.childRunId(executionBase);
   if (typeof childRunId !== 'string' || childRunId.trim().length === 0) {
     throw new SourceToolFailure('STORAGE_ERROR', 'Child Run identity could not be created.', false);

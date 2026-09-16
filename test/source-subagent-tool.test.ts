@@ -131,6 +131,31 @@ describe('source subagent Tool adapter', () => {
     expect(result.evidenceIds).toEqual(['evidence-1']);
     expect(result.blocks[0]).toMatchObject({ type: 'json', value: { status: 'partial', coverage: 0.5 } });
   });
+
+  it('runs source-specific request validation before child identity or runner execution', async () => {
+    let createdIdentity = false;
+    let invokedRunner = false;
+    const tool = createSourceSubagentTool(descriptor(async function* () {
+      await Promise.resolve();
+      invokedRunner = true;
+      yield* [] as ToolResponseChunk[];
+      return completeResult();
+    }, {
+      childRunId: () => {
+        createdIdentity = true;
+        return 'child-should-not-exist';
+      },
+      validateRequest: () => {
+        throw new SourceSubagentFailure('MCP_PROTOCOL_ERROR', 'source request is invalid', false);
+      },
+    }));
+
+    await expect(drain(tool.call?.(request, options()))).rejects.toMatchObject({
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    });
+    expect(createdIdentity).toBe(false);
+    expect(invokedRunner).toBe(false);
+  });
 });
 
 function descriptor(

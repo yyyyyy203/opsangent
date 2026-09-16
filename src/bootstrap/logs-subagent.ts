@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import type {
   CheckpointStore,
@@ -6,7 +5,6 @@ import type {
   SourceSubagentDescriptor,
   SubagentLifecyclePorts,
   Tool,
-  ToolResponse,
 } from '../contracts/index.js';
 import {
   createLogEvidenceTools,
@@ -19,7 +17,8 @@ import {
   type SourceChildToolsFactory,
 } from '../application/source-subagent-runner.js';
 import { createSourceSubagentTool } from '../tool/adapters/source-subagent-tool-adapter.js';
-import type { SourceReportCandidate, SourceReportCollector } from '../application/source-report-collector.js';
+import { createSourceReportTool } from './source-report-tool.js';
+import { stableSourceChildRunId } from './source-subagent-identity.js';
 
 export const logsSubagentInputSchema = z.object({
   profileId: z.string().min(1),
@@ -28,17 +27,6 @@ export const logsSubagentInputSchema = z.object({
   end: z.string().min(1),
   question: z.string().min(1),
   evidenceIds: z.array(z.string().min(1)).optional(),
-}).strict();
-
-const sourceReportInputSchema = z.object({
-  summary: z.string().min(1),
-  findings: z.array(z.object({
-    kind: z.enum(['observation', 'inference']),
-    statement: z.string().min(1),
-    evidenceIds: z.array(z.string().min(1)),
-  }).strict()),
-  businessTraceIds: z.array(z.string().min(1)),
-  missingEvidence: z.array(z.string().min(1)),
 }).strict();
 
 export interface LogsSubagentOptions extends Omit<LogEvidenceToolOptions, 'maxModelBytes'> {
@@ -68,6 +56,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     childTools,
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    renderPrompt: renderLogsPrompt,
   });
   const descriptor: SourceSubagentDescriptor = {
     publicToolName: 'logs_subagent',
@@ -77,7 +66,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     runner,
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.lifecycle === undefined ? {} : { lifecycle: options.lifecycle }),
-    childRunId: (execution) => stableChildRunId(execution.parentRunId, execution.parentToolCallId),
+    childRunId: (execution) => stableSourceChildRunId('logs', execution.parentRunId, execution.parentToolCallId),
     validateEvidenceIds: async (evidenceIds, input) => {
       for (const evidenceId of evidenceIds) {
         const visible = await options.manifests.getVisible(evidenceId);
@@ -90,30 +79,24 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
   return createSourceSubagentTool(descriptor);
 }
 
-export function createSourceReportTool(collector: SourceReportCollector): Tool {
-  return {
-    name: 'source_report',
-    description: '提交已脱敏且引用可验证的来源调查报告。',
-    kind: 'utility',
-    source: 'builtin',
-    inputSchema: sourceReportInputSchema,
-    recoveryPolicy: 'replay_safe',
-    isConcurrencySafe: () => false,
-    userFacingLabel: () => '提交来源报告',
-    call: (input): ToolResponse => {
-      const parsed = sourceReportInputSchema.parse(input);
-      collector.acceptReport(parsed satisfies SourceReportCandidate);
-      return { blocks: [{ type: 'json', value: { accepted: true } }] };
-    },
-  };
-}
-
-function stableChildRunId(parentRunId: string, parentToolCallId: string): string {
-  const digest = createHash('sha256')
-    .update(`logs\u0000${parentRunId}\u0000${parentToolCallId}`)
-    .digest('hex')
-    .slice(0, 32);
-  return `source-child-logs-${digest}`;
+function renderLogsPrompt(request: {
+  profileId: string;
+  service: string;
+  start: string;
+  end: string;
+  question: string;
+  evidenceIds: readonly string[];
+}): string {
+  return [
+    '你是只读日志取证 Subagent，只能使用宿主提供的日志证据工具。',
+    `profileId=${request.profileId}`,
+    `service=${request.service}`,
+    `start=${request.start}`,
+    `end=${request.end}`,
+    `question=${request.question}`,
+    `knownEvidenceIds=${JSON.stringify(request.evidenceIds)}`,
+    '请先采集或检索证据，最后调用 source_report；不要输出查询 DSL、路径、凭据或原始日志。',
+  ].join('\n');
 }
 
 class SourceScopeError extends Error {

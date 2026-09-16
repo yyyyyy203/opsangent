@@ -12,6 +12,7 @@ import type {
   Tool,
 } from '../src/application/source-subagent-runner.js';
 import { SourceSubagentFailure } from '../src/application/source-subagent-runner.js';
+import { DefaultSourceReportCollector, type SourceReportCollector } from '../src/application/source-report-collector.js';
 
 describe('source subagent Runner', () => {
   it('uses a bounded child Harness, collects child evidence, and resumes an existing child checkpoint', async () => {
@@ -108,6 +109,114 @@ describe('source subagent Runner', () => {
         { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
         { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
       ] },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    const failure = await drainFailure(runner.run(request(), executionContext()));
+
+    expect(failure).toMatchObject({ code: 'MCP_PROTOCOL_ERROR', retryable: false });
+  });
+
+  it('uses injected source prompt and collector seams for a metrics child', async () => {
+    const collector = new DefaultSourceReportCollector();
+    let message = '';
+    const child: SourceChildAgent = {
+      replyStream: async function* (options) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        message = options.message;
+        return completedChildResult(options.runId);
+      },
+      resumeStream: async function* (runId) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        return completedChildResult(runId);
+      },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => child },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      renderPrompt: (sourceRequest, execution) => `source=metrics\nprofile=${execution.profileId}\nquestion=${sourceRequest.question}`,
+      collector: ({ request: sourceRequest, execution }) => {
+        expect(sourceRequest.service).toBe('checkout');
+        expect(execution.childRunId).toBe('child-1');
+        return collector;
+      },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    await drain(runner.run(request(), executionContext()));
+
+    expect(message).toMatch(/^source=metrics/);
+    expect(message).toContain('profile=group-buy-market');
+    expect(message).not.toContain('日志取证');
+  });
+
+  it('uses a neutral default prompt naming the configured source', async () => {
+    let message = '';
+    const child: SourceChildAgent = {
+      replyStream: async function* (options) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        message = options.message;
+        return completedChildResult(options.runId);
+      },
+      resumeStream: async function* (runId) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        return completedChildResult(runId);
+      },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => child },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    await drain(runner.run(request(), executionContext()));
+
+    expect(message).toContain('只读 metrics 来源取证 Subagent');
+    expect(message).not.toContain('日志取证');
+  });
+
+  it('preserves structured collector observation errors', async () => {
+    const collector: SourceReportCollector = {
+      observeToolResult: () => {
+        throw Object.assign(new Error('invalid observation'), { code: 'MCP_PROTOCOL_ERROR', retryable: false });
+      },
+      acceptReport: () => undefined,
+      finalize: () => ({
+        source: 'metrics', status: 'unavailable', summary: '', findings: [], evidenceIds: [], businessTraceIds: [], missingEvidence: [], coverage: 0, toolCallsUsed: 0, durationMs: 0,
+      }),
+    };
+    const child: SourceChildAgent = {
+      replyStream: async function* (options) {
+        await Promise.resolve();
+        yield malformedObservationEvent(options.runId);
+        return completedChildResult(options.runId);
+      },
+      resumeStream: async function* (runId) {
+        await Promise.resolve();
+        yield malformedObservationEvent(runId);
+        return completedChildResult(runId);
+      },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => child },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      collector: () => collector,
       clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
     });
 

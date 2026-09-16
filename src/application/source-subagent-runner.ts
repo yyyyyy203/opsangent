@@ -61,13 +61,24 @@ export interface SourceChildToolsFactory {
   }): readonly Tool[];
 }
 
+export type SourcePromptRenderer = (
+  request: SourceSubagentRequest,
+  execution: SourceSubagentExecution,
+) => string;
+
+export type SourceReportCollectorFactory = (input: {
+  request: SourceSubagentRequest;
+  execution: SourceSubagentExecution;
+}) => SourceReportCollector;
+
 export interface SourceSubagentRunnerOptions {
   source: SourceSubagentType;
   childAgentFactory: SourceChildAgentFactory;
   childTools: SourceChildToolsFactory;
   checkpoints?: CheckpointStore;
   clock?: Clock;
-  collector?: () => SourceReportCollector;
+  collector?: SourceReportCollectorFactory;
+  renderPrompt?: SourcePromptRenderer;
 }
 
 export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
@@ -97,7 +108,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
     const maxDurationMs = Math.min(30_000, parentRemainingMs);
     const existingCheckpoint = await this.options.checkpoints?.load(execution.childRunId);
     const checkpointEvidenceIds = existingCheckpoint?.evidenceIds ?? [];
-    const collector = this.options.collector?.() ?? new DefaultSourceReportCollector({
+    const collector = this.options.collector?.({ request, execution }) ?? new DefaultSourceReportCollector({
       knownEvidenceIds: [...new Set([...request.evidenceIds, ...checkpointEvidenceIds])],
     });
     if (existingCheckpoint !== null && existingCheckpoint !== undefined) restoreCheckpoint(existingCheckpoint, collector);
@@ -124,7 +135,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
       ...(execution.toolCallBudget === undefined ? {} : { toolCallBudget: execution.toolCallBudget }),
       ...(execution.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: execution.networkAttemptBudget }),
     });
-    const prompt = renderSourcePrompt(request);
+    const prompt = this.options.renderPrompt?.(request, execution) ?? renderSourcePrompt(this.options.source, request);
     const childStream = existingCheckpoint === null || existingCheckpoint === undefined
       ? child.replyStream({
         runId: execution.childRunId,
@@ -268,9 +279,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function renderSourcePrompt(request: SourceSubagentRequest): string {
+function renderSourcePrompt(source: SourceSubagentType, request: SourceSubagentRequest): string {
   return [
-    '你是只读日志取证 Subagent，只能使用宿主提供的日志证据工具。',
+    `你是只读 ${source} 来源取证 Subagent，只能使用宿主提供的${source}证据工具。`,
     `profileId=${request.profileId}`,
     `service=${request.service}`,
     `start=${request.start}`,

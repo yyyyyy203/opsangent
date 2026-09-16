@@ -4,6 +4,9 @@ import {
   createLogsSubagentTool,
   type LogEvidencePageSource,
 } from '../src/bootstrap/logs-subagent.js';
+import { createSourceReportTool } from '../src/bootstrap/source-report-tool.js';
+import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
+import { DefaultSourceReportCollector } from '../src/application/source-report-collector.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import type {
   EvidenceCaptureBudget,
@@ -89,7 +92,34 @@ describe('logs_subagent runtime composition', () => {
     }, 'parent-run-1')).rejects.toMatchObject({ code: 'POLICY_DENIED' });
     expect(created).toBe(false);
   });
+
+  it('keeps the child Tool list, strict source_report schema, and stable source identities', () => {
+    const collector = new DefaultSourceReportCollector({ knownEvidenceIds: ['evidence-1'] });
+    const reportTool = createSourceReportTool(collector);
+
+    expect(reportTool).toMatchObject({
+      name: 'source_report', kind: 'utility', source: 'builtin', recoveryPolicy: 'replay_safe',
+    });
+    expect(reportTool.isConcurrencySafe?.({})).toBe(false);
+    expect(reportTool.call?.({
+      summary: '已完成。', findings: [{ kind: 'observation', statement: '发现异常。', evidenceIds: ['evidence-1'] }],
+      businessTraceIds: [], missingEvidence: [],
+    }, sourceReportCallOptions())).toEqual({ blocks: [{ type: 'json', value: { accepted: true } }] });
+    expect(() => reportTool.call?.({ summary: 'invalid', findings: [], businessTraceIds: [], missingEvidence: [], coverage: 1 }, sourceReportCallOptions())).toThrow();
+    expect(stableSourceChildRunId('logs', 'parent-run-1', 'parent-tool-1')).toBe(
+      'source-child-logs-72b878d8f96985975683bd426fd359ff',
+    );
+    expect(stableSourceChildRunId('logs', 'parent-run-1', 'parent-tool-1')).not.toBe(
+      stableSourceChildRunId('metrics', 'parent-run-1', 'parent-tool-1'),
+    );
+  });
 });
+
+function sourceReportCallOptions() {
+  return {
+    runId: 'child-run-1', stepId: 'child-step-1', signal: new AbortController().signal, mode: 'execute' as const,
+  };
+}
 
 function evidenceOptions() {
   const manifest = {
