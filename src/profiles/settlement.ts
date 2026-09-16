@@ -8,10 +8,44 @@ export interface SettlementRule {
   minSamples: number;
 }
 
-export const settlementLabRule: Readonly<SettlementRule> = Object.freeze({
+export interface SettlementMetricsProfile extends SettlementRule {
+  profileId: string;
+  service: 'checkout';
+  environment: 'simulation';
+  windowSeconds: 300;
+  maxWindowSkewSeconds: 120;
+  maxFutureSkewSeconds: 30;
+}
+
+export const settlementMetricsLabProfile: Readonly<SettlementMetricsProfile> = Object.freeze({
+  profileId: 'simulation',
+  service: 'checkout',
+  environment: 'simulation',
+  windowSeconds: 300,
+  maxWindowSkewSeconds: 120,
+  maxFutureSkewSeconds: 30,
   threshold: 0.05,
   minSamples: 20,
 });
+
+/** Compatibility view for existing low-level metric callers. */
+export const settlementLabRule: Readonly<SettlementRule> = Object.freeze({
+  threshold: settlementMetricsLabProfile.threshold,
+  minSamples: settlementMetricsLabProfile.minSamples,
+});
+
+export interface SettlementMetricFact {
+  status: 'healthy' | 'breached' | 'insufficient_data';
+  total: number;
+  failed: number;
+  failureRate: number | null;
+  threshold: number;
+  minSamples: number;
+  service: 'checkout';
+  environment: 'simulation';
+  start: number;
+  end: number;
+}
 
 /** Snapshot counts only: counter estimates from increase() need a different profile. */
 export function assessSettlementMetrics(counts: SettlementCounts, rule: SettlementRule) {
