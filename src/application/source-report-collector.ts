@@ -5,6 +5,7 @@ import type {
   SourceSubagentType,
   ToolResponse,
 } from '../contracts/index.js';
+import { readSourceEvidenceObservation } from './source-evidence-observation.js';
 
 const DEFAULT_MAX_SUMMARY_BYTES = 16 * 1024;
 const DEFAULT_MAX_ITEMS = 20;
@@ -21,13 +22,15 @@ export interface SourceReportCandidate {
 export interface SourceReportCollector {
   observeToolResult(toolName: string, response: ToolResponse): void;
   acceptReport(candidate: SourceReportCandidate): void;
-  finalize(input: {
-    source: SourceSubagentType;
-    startedAt: number;
-    finishedAt: number;
-    parentRunId: string;
-    childRunId: string;
-  }): SourceSubagentResult;
+  finalize(input: SourceReportFinalizeInput): SourceSubagentResult;
+}
+
+export interface SourceReportFinalizeInput {
+  source: SourceSubagentType;
+  startedAt: number;
+  finishedAt: number;
+  parentRunId: string;
+  childRunId: string;
 }
 
 interface CaptureFact {
@@ -69,8 +72,18 @@ export class DefaultSourceReportCollector implements SourceReportCollector {
     this.toolCallsUsed += 1;
     if (response.isError === true) return;
 
+    const observation = readSourceEvidenceObservation(response);
+
     for (const evidenceId of response.evidenceIds ?? []) {
       if (isIdentifier(evidenceId)) this.evidenceIds.add(evidenceId);
+    }
+    if (observation !== undefined) {
+      this.captureFacts.set(observation.evidenceId, {
+        status: observation.state,
+        coverage: observation.coverage,
+        missingEvidence: [...observation.missingEvidence],
+      });
+      return;
     }
     for (const block of response.blocks) {
       if (block.type !== 'json' || !isRecord(block.value)) continue;
@@ -120,13 +133,7 @@ export class DefaultSourceReportCollector implements SourceReportCollector {
     };
   }
 
-  public finalize(input: {
-    source: SourceSubagentType;
-    startedAt: number;
-    finishedAt: number;
-    parentRunId: string;
-    childRunId: string;
-  }): SourceSubagentResult {
+  public finalize(input: SourceReportFinalizeInput): SourceSubagentResult {
     if (input.parentRunId.length === 0 || input.childRunId.length === 0) throw new Error('source run identities are required');
     const evidenceIds = [...this.evidenceIds].slice(0, this.maxItems);
     const facts = evidenceIds.map((evidenceId) => this.captureFacts.get(evidenceId));

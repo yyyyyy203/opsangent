@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest';
+import { z } from 'zod';
 import {
   canonicalSourceToolName,
+  type SourceEvidenceObservation,
+  type SourceSubagentDescriptor,
+  type SourceSubagentExecution,
   type SourceSubagentResult,
+  type SourceSubagentRunner,
   type ToolCallOptions,
 } from '../src/contracts/index.js';
 
@@ -38,5 +43,58 @@ describe('source subagent contracts', () => {
     expect(result.source).toBe('logs');
     expect(options.profileId).toBe('group-buy-market');
     expect(options.profileRevision).toBe('profile-v1');
+  });
+
+  it('keeps the source evidence observation contract structured and versioned', () => {
+    const observation = {
+      schemaVersion: 1,
+      source: 'metrics',
+      evidenceId: 'metric-evidence-1',
+      state: 'committed',
+      coverage: 1,
+      timeRange: {
+        start: '2026-09-15T00:00:00.000Z',
+        end: '2026-09-15T00:05:00.000Z',
+      },
+      missingEvidence: [],
+    } satisfies SourceEvidenceObservation;
+
+    expect(observation.source).toBe('metrics');
+  });
+
+  it('supports an optional host request validator without changing legacy descriptors', () => {
+    const runner = {} as SourceSubagentRunner;
+    const descriptor = {
+      publicToolName: 'metrics_subagent',
+      subagentType: 'metrics',
+      description: 'metrics evidence collection',
+      inputSchema: z.object({}).strict(),
+      runner,
+      childRunId: () => 'child-1',
+      validateRequest: (request, execution) => {
+        expect(request.profileId).toBe(execution.profileId);
+      },
+    } satisfies SourceSubagentDescriptor;
+    const legacyDescriptor = {
+      publicToolName: 'logs_subagent',
+      subagentType: 'logs',
+      description: 'logs evidence collection',
+      inputSchema: z.object({}).strict(),
+      runner,
+      childRunId: () => 'child-2',
+    } satisfies SourceSubagentDescriptor;
+    const execution: Omit<SourceSubagentExecution, 'childRunId'> = {
+      parentRunId: 'parent-1',
+      parentToolCallId: 'tool-1',
+      parentStepId: 'step-1',
+      profileId: 'group-buy-market',
+      signal: new AbortController().signal,
+    };
+
+    expect(descriptor.validateRequest?.({
+      profileId: 'group-buy-market', service: 'checkout', start: '2026-09-15T00:00:00.000Z',
+      end: '2026-09-15T00:05:00.000Z', question: '检查失败率', evidenceIds: [],
+    }, execution)).toBeUndefined();
+    expect('validateRequest' in legacyDescriptor).toBe(false);
   });
 });

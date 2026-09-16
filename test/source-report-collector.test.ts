@@ -1,7 +1,115 @@
 import { describe, expect, it } from 'vitest';
 import { DefaultSourceReportCollector } from '../src/application/source-report-collector.js';
+import {
+  attachSourceEvidenceObservation,
+  readSourceEvidenceObservation,
+} from '../src/application/source-evidence-observation.js';
+import type { SourceEvidenceObservation, ToolResponse } from '../src/contracts/index.js';
+
+const observation: SourceEvidenceObservation = {
+  schemaVersion: 1,
+  source: 'metrics',
+  evidenceId: 'metric-evidence-1',
+  state: 'partial',
+  coverage: 0.75,
+  timeRange: {
+    start: '2026-09-15T00:00:00.000Z',
+    end: '2026-09-15T00:05:00.000Z',
+  },
+  missingEvidence: ['一段指标窗口未获取'],
+};
+
+function responseWithObservation(
+  sourceEvidence: unknown,
+  evidenceIds: string[] = ['metric-evidence-1'],
+): ToolResponse {
+  return {
+    blocks: [
+      { type: 'json', value: { status: 'breached', total: 100, failed: 15 } },
+      { type: 'evidence_ref', evidenceId: 'metric-evidence-1' },
+    ],
+    evidenceIds,
+    metadata: { sourceEvidence },
+  };
+}
 
 describe('source report collector', () => {
+  it('uses source evidence metadata for coverage, state and missing evidence', () => {
+    const collector = new DefaultSourceReportCollector();
+    const response: ToolResponse = {
+      blocks: [
+        { type: 'json', value: { status: 'breached', total: 100, failed: 15 } },
+        { type: 'evidence_ref', evidenceId: 'metric-evidence-1' },
+      ],
+      evidenceIds: ['metric-evidence-1'],
+      metadata: { sourceEvidence: observation },
+    };
+
+    collector.observeToolResult('metrics.settlement', response);
+
+    const result = collector.finalize({
+      source: 'metrics', startedAt: 100, finishedAt: 200, parentRunId: 'parent-1', childRunId: 'child-1',
+    });
+    expect(result).toMatchObject({
+      source: 'metrics', status: 'partial', coverage: 0.75, evidenceIds: ['metric-evidence-1'],
+    });
+    expect(result.missingEvidence).toEqual(['一段指标窗口未获取']);
+  });
+
+  it('rejects an observation whose evidence is absent from the response evidence IDs', () => {
+    expect(() => readSourceEvidenceObservation(responseWithObservation(observation, []))).toThrow(expect.objectContaining({
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    }));
+  });
+
+  it.each([
+    ['schemaVersion', { ...observation, schemaVersion: 2 }],
+    ['source', { ...observation, source: 'unknown' }],
+    ['state', { ...observation, state: 'healthy' }],
+    ['coverage', { ...observation, coverage: 1.1 }],
+    ['timeRange', { ...observation, timeRange: { start: observation.timeRange!.end, end: observation.timeRange!.start } }],
+  ])('rejects malformed observation %s with the MCP protocol error', (_field, malformed) => {
+    expect(() => readSourceEvidenceObservation(responseWithObservation(malformed))).toThrow(expect.objectContaining({
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    }));
+  });
+
+  it.each(['raw', 'url', 'promql', 'storageKey', 'headers'])('rejects unsafe source evidence key %s', (unsafeKey) => {
+    const unsafeObservation = { ...observation, [unsafeKey]: 'sensitive-value' };
+
+    expect(() => readSourceEvidenceObservation(responseWithObservation(unsafeObservation))).toThrow(expect.objectContaining({
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    }));
+  });
+
+  it('keeps logs.capture top-level control JSON compatible without metadata', () => {
+    const collector = new DefaultSourceReportCollector();
+    collector.observeToolResult('logs.capture', {
+      blocks: [{ type: 'json', value: {
+        status: 'partial', evidenceId: 'evidence-1', coverage: 0.4, missingEvidence: ['下一页未采集'],
+      } }],
+      evidenceIds: ['evidence-1'],
+    });
+
+    const result = collector.finalize({
+      source: 'logs', startedAt: 100, finishedAt: 200, parentRunId: 'parent-1', childRunId: 'child-1',
+    });
+    expect(result).toMatchObject({ status: 'partial', coverage: 0.4, evidenceIds: ['evidence-1'] });
+    expect(result.missingEvidence).toEqual(['下一页未采集']);
+  });
+
+  it('attaches an observation without mutating the caller response', () => {
+    const response: ToolResponse = {
+      blocks: [{ type: 'evidence_ref', evidenceId: 'metric-evidence-1' }],
+      evidenceIds: ['metric-evidence-1'],
+    };
+
+    const attached = attachSourceEvidenceObservation(response, observation);
+
+    expect(response.metadata).toBeUndefined();
+    expect(attached.metadata).toEqual({ sourceEvidence: observation });
+  });
+
   it('rejects a report that cites evidence the child never observed', () => {
     const collector = new DefaultSourceReportCollector({ maxSummaryBytes: 16 * 1024, maxItems: 20 });
     collector.observeToolResult('logs.capture', {

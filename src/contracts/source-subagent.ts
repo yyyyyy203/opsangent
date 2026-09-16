@@ -12,6 +12,16 @@ export type SourceSubagentType = 'metrics' | 'logs' | 'traces';
 export type SourceSubagentStatus = 'complete' | 'partial' | 'unavailable';
 export type SourceFindingKind = 'observation' | 'inference';
 
+export interface SourceEvidenceObservation {
+  schemaVersion: 1;
+  source: SourceSubagentType;
+  evidenceId: string;
+  state: 'committed' | 'partial';
+  coverage: number;
+  timeRange?: { start: string; end: string };
+  missingEvidence: string[];
+}
+
 export interface SourceFinding {
   kind: SourceFindingKind;
   statement: string;
@@ -88,6 +98,10 @@ export interface SourceSubagentDescriptor {
   maxAttempts?: number;
   retry?: SourceSubagentRetryPolicy;
   lifecycle?: SubagentLifecyclePorts;
+  validateRequest?: (
+    request: SourceSubagentRequest,
+    execution: Omit<SourceSubagentExecution, 'childRunId'>,
+  ) => void | Promise<void>;
   /** Host-side ownership check for evidence IDs supplied as investigation hints. */
   validateEvidenceIds?: (evidenceIds: readonly string[], input: {
     parentRunId: string;
