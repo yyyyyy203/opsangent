@@ -8,7 +8,13 @@ import { InMemoryEvidenceStore } from '../src/storage/in-memory-evidence-store.j
 import { ResilientExecutor, SourceCircuitBreaker } from '../src/mcp/resilience.js';
 import { PrometheusQueryError, type SettlementSnapshot } from '../src/infrastructure/prometheus/settlement-source.js';
 
-const snapshot: SettlementSnapshot = { status: 'available', counts: { total: 100, failed: 15 }, start: 700, end: 1000, raw: { original: 'raw-only-marker' } };
+const snapshot: SettlementSnapshot = {
+  status: 'available', counts: { total: 100, failed: 15 }, start: 700, end: 1000,
+  raw: {
+    original: 'raw-only-marker', url: 'https://metrics.example.test/private',
+    query: 'sum(rate(checkout_failures_total[5m]))', credentials: 'credential-only-marker',
+  },
+};
 async function fixture(query: (signal: AbortSignal) => Promise<SettlementSnapshot>, failStorage = false) {
   const server = await startSettlementMcpServer({ query }, { port: 0 });
   const connection = new HttpMcpConnection({ url: server.url });
@@ -38,8 +44,26 @@ describe('settlement MCP to Harness evidence integration', () => {
       expect(result.status).toBe('success');
       expect(result.response?.evidenceIds).toEqual(['evidence-1']);
       expect(result.response?.blocks).toContainEqual({ type: 'evidence_ref', evidenceId: 'evidence-1' });
+      expect(result.response?.metadata).toEqual({
+        sourceEvidence: {
+          schemaVersion: 1,
+          source: 'metrics',
+          evidenceId: 'evidence-1',
+          state: 'committed',
+          coverage: 1,
+          timeRange: {
+            start: '1970-01-01T00:11:40.000Z',
+            end: '1970-01-01T00:16:40.000Z',
+          },
+          missingEvidence: [],
+        },
+      });
       expect(await f.evidence.get('evidence-1')).toMatchObject({ runId: run.runId, source: 'metric', raw: snapshot.raw, summary: { status: 'breached', failureRate: 0.15, missingEvidence: ['logs', 'traces'] } });
       expect(JSON.stringify(context)).not.toContain('raw-only-marker');
+      expect(JSON.stringify(result.response?.metadata)).not.toContain('raw-only-marker');
+      expect(JSON.stringify(result.response?.metadata)).not.toContain('metrics.example.test');
+      expect(JSON.stringify(result.response?.metadata)).not.toContain('checkout_failures_total');
+      expect(JSON.stringify(result.response?.metadata)).not.toContain('credential-only-marker');
     } finally { await f.close(); }
   });
   it('retries upstream transient errors through the existing client budget', async () => {
@@ -59,6 +83,8 @@ describe('settlement MCP to Harness evidence integration', () => {
     try {
       const { result } = await inspect(f);
       expect(result.response?.blocks).toContainEqual({ type: 'json', value: { status: 'insufficient_data', reason: 'missing_series', missingEvidence: ['metrics', 'logs', 'traces'] } });
+      expect(result.response?.metadata?.sourceEvidence).toBeUndefined();
+      expect(result.response?.evidenceIds).toBeUndefined();
       expect(await f.evidence.get('evidence-1')).toBeNull();
     } finally { await f.close(); }
   });

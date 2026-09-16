@@ -1,6 +1,7 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { EvidenceStore, Tool, ToolResponse } from '../contracts/index.js';
 import { DefaultEvidenceRecorder, type EvidenceRecorder } from '../application/evidence-recorder.js';
+import { attachSourceEvidenceObservation } from '../application/source-evidence-observation.js';
 import type { McpConnection } from '../mcp/types.js';
 import { bindReadonlyMcpTools } from '../mcp/readonly-tools.js';
 import { type ResilientExecutor, SourceFailure } from '../mcp/resilience.js';
@@ -16,12 +17,19 @@ function decode(response: ToolResponse) {
   return parsed.data;
 }
 
+function stableMetricEvidenceId(runId: string, toolCallId: string): string {
+  const digest = createHash('sha256')
+    .update(runId + '\u0000' + toolCallId)
+    .digest('hex')
+    .slice(0, 32);
+  return 'metric-evidence-' + digest;
+}
+
 export async function bindSettlementEvidenceTool(options: {
   connection: McpConnection; recorder?: EvidenceRecorder; /** @deprecated Inject an EvidenceRecorder for audit-event publication. */ evidence?: EvidenceStore; executor: ResilientExecutor;
   signal: AbortSignal; id?: () => string; now?: () => number;
 }): Promise<Tool> {
   const now = options.now ?? Date.now;
-  const id = options.id ?? randomUUID;
   const recorder = options.recorder ?? (options.evidence === undefined ? undefined : new DefaultEvidenceRecorder({ evidence: options.evidence }));
   if (recorder === undefined) throw new Error('Settlement Evidence Tool requires an EvidenceRecorder');
   const validated: McpConnection = {
@@ -55,7 +63,7 @@ export async function bindSettlementEvidenceTool(options: {
     };
     callOptions.signal.throwIfAborted();
     if (callOptions.toolCallId === undefined) throw new SourceFailure('STORAGE_ERROR');
-    const evidenceId = id();
+    const evidenceId = options.id?.() ?? stableMetricEvidenceId(callOptions.runId, callOptions.toolCallId);
     const capturedAt = new Date(now()).toISOString();
     const failureRate = summary.failureRate === null ? 'unavailable' : `${(summary.failureRate * 100).toFixed(2)}%`;
     try { await recorder.capture({
@@ -77,6 +85,20 @@ export async function bindSettlementEvidenceTool(options: {
     }); }
     catch { throw new SourceFailure('STORAGE_ERROR'); }
     callOptions.signal.throwIfAborted();
-    return { blocks: [{ type: 'json', value: summary }, { type: 'evidence_ref', evidenceId }], evidenceIds: [evidenceId] };
+    return attachSourceEvidenceObservation({
+      blocks: [{ type: 'json', value: summary }, { type: 'evidence_ref', evidenceId }],
+      evidenceIds: [evidenceId],
+    }, {
+      schemaVersion: 1,
+      source: 'metrics',
+      evidenceId,
+      state: 'committed',
+      coverage: 1,
+      timeRange: {
+        start: new Date(result.start * 1000).toISOString(),
+        end: new Date(result.end * 1000).toISOString(),
+      },
+      missingEvidence: [],
+    });
   } } satisfies Tool);
 }
