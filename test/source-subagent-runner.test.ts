@@ -87,6 +87,34 @@ describe('source subagent Runner', () => {
       status: 'partial', evidenceIds: ['evidence-1'], coverage: 1,
     } });
   });
+
+  it('preserves a non-retryable source observation protocol failure from the child stream', async () => {
+    const child: SourceChildAgent = {
+      replyStream: async function* (options) {
+        await Promise.resolve();
+        yield malformedObservationEvent(options.runId);
+        return completedChildResult(options.runId);
+      },
+      resumeStream: async function* (runId) {
+        await Promise.resolve();
+        yield malformedObservationEvent(runId);
+        return completedChildResult(runId);
+      },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => child },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    const failure = await drainFailure(runner.run(request(), executionContext()));
+
+    expect(failure).toMatchObject({ code: 'MCP_PROTOCOL_ERROR', retryable: false });
+  });
 });
 
 function request(): SourceSubagentRequest {
@@ -103,6 +131,23 @@ function toolResultEvent(runId: string): AgentEvent {
     payload: {
       toolCallId: 'capture-1', toolName: 'logs.capture', status: 'success',
       response: { blocks: [{ type: 'json', value: { status: 'partial', evidenceId: 'evidence-1', coverage: 1 } }], evidenceIds: ['evidence-1'] },
+      startedAt: '2026-09-14T00:00:00.000Z', finishedAt: '2026-09-14T00:00:01.000Z',
+    },
+  };
+}
+
+function malformedObservationEvent(runId: string): AgentEvent {
+  return {
+    schemaVersion: 1, type: 'TOOL_RESULT', runId, stepId: 'child-step-1', timestamp: '2026-09-14T00:00:01.000Z',
+    payload: {
+      toolCallId: 'metrics-1', toolName: 'metrics.settlement', status: 'success',
+      response: {
+        blocks: [{ type: 'evidence_ref', evidenceId: 'metric-evidence-1' }],
+        evidenceIds: ['metric-evidence-1'],
+        metadata: { sourceEvidence: {
+          schemaVersion: 2, source: 'metrics', evidenceId: 'metric-evidence-1', state: 'committed', coverage: 1, missingEvidence: [],
+        } },
+      },
       startedAt: '2026-09-14T00:00:00.000Z', finishedAt: '2026-09-14T00:00:01.000Z',
     },
   };

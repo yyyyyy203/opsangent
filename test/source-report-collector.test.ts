@@ -74,6 +74,17 @@ describe('source report collector', () => {
     }));
   });
 
+  it('rejects a calendar-invalid ISO timestamp that Date.parse normalizes', () => {
+    const malformed = {
+      ...observation,
+      timeRange: { start: '2026-02-30T00:00:00Z', end: '2026-03-03T00:00:00Z' },
+    };
+
+    expect(() => readSourceEvidenceObservation(responseWithObservation(malformed))).toThrow(expect.objectContaining({
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    }));
+  });
+
   it.each(['raw', 'url', 'promql', 'storageKey', 'headers'])('rejects unsafe source evidence key %s', (unsafeKey) => {
     const unsafeObservation = { ...observation, [unsafeKey]: 'sensitive-value' };
 

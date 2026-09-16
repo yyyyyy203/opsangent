@@ -144,6 +144,15 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
       childResult = await consumeChildStream(childStream, collector, execution.signal);
     } catch (error) {
       if (error instanceof SourceSubagentFailure) throw error;
+      if (isStructuredSourceFailure(error)) {
+        const partial = reducedScope(finalize(), 'child_run_failed');
+        throw new SourceSubagentFailure(
+          error.code,
+          error instanceof Error ? error.message : 'Child source run failed.',
+          error.retryable,
+          partial.evidenceIds.length > 0 ? partial : undefined,
+        );
+      }
       const partial = reducedScope(finalize(), 'child_run_failed');
       if (partial.evidenceIds.length > 0) {
         throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source run failed.', true, partial);
@@ -305,3 +314,21 @@ export type SourceSubagentFailureCode =
   | 'MCP_NETWORK_ERROR'
   | 'MCP_RATE_LIMITED'
   | 'MCP_PROTOCOL_ERROR';
+
+function isStructuredSourceFailure(error: unknown): error is {
+  code: SourceSubagentFailureCode;
+  retryable: boolean;
+} {
+  if (!isRecord(error) || typeof error.code !== 'string' || typeof error.retryable !== 'boolean') return false;
+  return error.code === 'ABORTED'
+    || error.code === 'BUDGET_EXCEEDED'
+    || error.code === 'INVALID_INPUT'
+    || error.code === 'MCP_SERVER_ERROR'
+    || error.code === 'TIMEOUT'
+    || error.code === 'UNAVAILABLE'
+    || error.code === 'POLICY_DENIED'
+    || error.code === 'MCP_TIMEOUT'
+    || error.code === 'MCP_NETWORK_ERROR'
+    || error.code === 'MCP_RATE_LIMITED'
+    || error.code === 'MCP_PROTOCOL_ERROR';
+}
