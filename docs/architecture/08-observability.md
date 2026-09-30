@@ -44,6 +44,28 @@ parentRunId、parent ToolCall/step 关联和 attempt 信息；LangSmith Projecto
 当前只验证了注入式日志页源、SQLite/local Blob 和本地模型/协议测试。真实 ELK、公司 MCP、线上模型
 和生产 LangSmith 数据集仍未接入；不得把本地 span 关系测试表述为线上观测验收。
 
+### Metrics Subagent 链路
+
+Metrics 的本地组合固定为：
+
+```text
+tool.metrics_subagent
+  subagent.run
+    model.reasoning
+    tool.metrics.settlement
+    tool.source_report
+    report.validation
+```
+
+父级只发布 `metrics_subagent`，child 只看到 `metrics.settlement` 和 `source_report`。父子 Run、
+ToolCall、step、attempt 和 evidenceId 通过既有 V2 生命周期与 LangSmith 投影关联；Collector 在
+投影前重新计算指标事实和 coverage，模型候选数字或根因不具备覆盖权。测试确认父 Context、Public
+SSE、Audit 与 LangSmith 事件不含原始 Prometheus 响应或测试 raw marker。
+
+目前验证的是 simulation checkout Profile 和本地 OpenAI-compatible SDK/SSE 协议。真实 Prometheus
+路径仅在 `AGENTOPS_REAL_PROMETHEUS=1` 且后端实际运行时才算验收；默认测试保持跳过，本轮 Docker
+不可用，因此没有真实后端结果。线上 LangSmith、ELK/Trace 和生产数据集仍未接入。
+
 ## 本地事实与远程观测
 
 本地事件及 SQLite 是审计和恢复事实来源。LangSmith 是可替换 Observability 实现，支持 Noop 和有界发送队列。上报失败记录本地状态，可重试但不拖垮诊断；flush 有截止时间，不能无期限阻塞 RUN_FINISHED。

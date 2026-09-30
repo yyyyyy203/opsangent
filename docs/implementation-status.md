@@ -2,6 +2,25 @@
 
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
+## 最新增量：Metrics Subagent 组合与真实 Prometheus 验收边界
+
+2026-09-30：完成 `metrics_subagent` 的父子 Harness 组合。父 Agent 只暴露 canonical
+`metrics_subagent`；child Toolkit 严格只有 `metrics.settlement` 和 `source_report`。实现复用既有
+`SourceSubagentRunner`、AgentHarness、统一 Tool Pipeline、Checkpoint、重试/恢复和共享预算，使用
+simulation checkout Profile 对正常、失败率超阈值和低样本三个场景生成确定性报告。失败率、阈值、样本状态、窗口和 coverage 由代码校验/计算，模型摘要不能覆盖事实；来源 evidenceId 可回查，原始 Prometheus 内容不进入父 Context、Public/Audit/LangSmith 投影。
+
+本轮还验证了合法/非法时间窗口、scope fail-closed、partial/unavailable、Abort、预算、恢复、父子
+Tool 隔离和本地 OpenAI-compatible SDK/SSE 嵌套调用。Task 5 修复轮主控聚焦验证为 13 个文件、93
+项测试通过，并通过 ESLint、TypeScript 类型检查和 diff 检查。
+
+Task 6 已加入真实 Prometheus → MCP HTTP → Metrics Subagent → EvidenceStore 的 opt-in 验收测试，
+默认运行保持跳过；本机 Docker daemon 不可用，因此本轮没有执行真实 Prometheus 命令，不能宣称真实
+Prometheus 后端验收完成。`D:\\xfg\\group-buy-market`、线上模型质量、Run/Evidence API、前端、ELK/Trace
+和真实动作仍不在本增量；没有新增 Event/Message 类型。
+
+Task 6 收尾质量门已通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 和 `git diff --check`；
+全量测试为 95 个文件通过、1 个真实 Prometheus 文件跳过，537 项测试通过、1 项跳过。
+
 ## 最新增量：可恢复的 logs_subagent 来源 Subagent
 
 2026-09-15：按 [来源 Subagent 设计规格](./superpowers/specs/2026-09-14-source-subagent-design.md)

@@ -2,7 +2,7 @@
 
 本主题的首个可实施切片见 [来源 Subagent 设计规格](../superpowers/specs/2026-09-14-source-subagent-design.md)。
 
-## 当前实现状态（2026-09-15）
+## 当前实现状态（2026-09-30）
 
 `logs_subagent` 已完成首个可恢复闭环：它是父 Toolkit 中唯一的日志来源入口，内部通过注入的
 child AgentHarness 使用四个有界 `logs.*` evidence Tools 和一个仅 child 可见的 `source_report`
@@ -16,8 +16,26 @@ Checkpoint 管线；没有 Bash、动作、外部执行、任意 HTTP/SQL 或其
 
 当前验收是注入式/本地验收：日志页源、Manifest/Blob、Checkpoint 和模型均可替换，测试覆盖多轮
 capture/search/aggregate/report、重试、恢复、预算和 Public/Audit/LangSmith 脱敏。尚未接入真实
-Elasticsearch/ELK 地址、账号、Token 或公司 MCP，也没有实现 Metrics/Trace 的具体 Runner；后续接入
+Elasticsearch/ELK 地址、账号、Token 或公司 MCP；后续接入
 必须继续复用本 Tool 契约和来源边界，不能把底层 MCP 工具直接暴露给父模型。
+
+### Metrics Subagent
+
+`metrics_subagent` 已完成首个 simulation checkout Profile 闭环。父 Toolkit 只注册该 canonical
+Tool；child Toolkit 严格只注册 `metrics.settlement` 与 `source_report`，不存在 `metrics.settlement`
+直达父模型、Bash、动作 Tool 或递归 Subagent。child 复用同一 Source Runner、AgentHarness、统一
+Admission/Pipeline、Checkpoint、重试/恢复和父子共享预算。
+
+Metrics Collector 对 `healthy`、`breached`、`insufficient_data` 重新计算失败率、阈值、样本状态、
+时间窗口和 coverage；低样本仍是 complete 结果中的 `insufficient_data`，不是 unavailable。结果必须
+引用当前运行实际观察到的 evidenceId，原始 Prometheus 响应只留在 EvidenceStore，不进入父 Context、
+Public SSE、Audit 或 LangSmith。正常、阈值超限、低样本三场景及本地 OpenAI-compatible 嵌套协议均已
+验证。
+
+真实 Prometheus 验收路径已加入 `test/real-prometheus.test.ts`，但只由
+`AGENTOPS_REAL_PROMETHEUS=1` 显式启用；默认测试为 skip。本轮 Docker daemon 不可用，未执行真实
+后端命令，不能把该路径表述为真实 Prometheus 已验收。Trace Subagent、真实 ELK/Tempo 和线上来源
+账号仍待后续增量。
 
 ## 分工
 
