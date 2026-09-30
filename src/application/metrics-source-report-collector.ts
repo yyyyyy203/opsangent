@@ -52,6 +52,7 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
     this.toolCallsUsed += 1;
     this.delegate.observeToolResult(toolName, response);
     if (toolName !== METRIC_TOOL_NAME || response.isError === true) return;
+    if (isExplicitUnavailableResponse(response)) return;
 
     const observation = readSourceEvidenceObservation(response);
     if (observation === undefined || observation.source !== 'metrics') {
@@ -76,7 +77,7 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
       fact,
       observation,
       windowMatchesRequest,
-      coverage: overlapCoverage,
+      coverage: Math.min(observation.coverage, overlapCoverage),
     });
   }
 
@@ -244,6 +245,21 @@ function renderFinding(observation: MetricObservation): SourceSubagentResult['fi
 function intervalCoverage(actualStart: number, actualEnd: number, requestedStart: number, requestedEnd: number): number {
   const overlap = Math.max(0, Math.min(actualEnd, requestedEnd) - Math.max(actualStart, requestedStart));
   return Math.min(1, Math.max(0, overlap / (requestedEnd - requestedStart)));
+}
+
+function isExplicitUnavailableResponse(response: ToolResponse): boolean {
+  if (response.evidenceIds !== undefined || response.metadata !== undefined || response.blocks.length !== 1) return false;
+  const block = response.blocks[0];
+  if (block?.type !== 'json' || !isRecord(block.value)
+    || !hasOnlyKeys(block.value, ['status', 'reason', 'missingEvidence'])) return false;
+  return block.value.status === 'insufficient_data'
+    && typeof block.value.reason === 'string'
+    && block.value.reason.length > 0
+    && Array.isArray(block.value.missingEvidence)
+    && block.value.missingEvidence.length === 3
+    && block.value.missingEvidence[0] === 'metrics'
+    && block.value.missingEvidence[1] === 'logs'
+    && block.value.missingEvidence[2] === 'traces';
 }
 
 function parseTimestamp(value: string, label: string): number {

@@ -108,6 +108,49 @@ describe('metrics_subagent runtime composition', () => {
     expect(created).toBe(false);
   });
 
+  it.each([
+    ['invalid calendar day', {
+      profileId: 'simulation', service: 'checkout',
+      start: '2026-02-30T00:00:00.000Z', end: '2026-02-30T00:05:00.000Z',
+      question: '结算失败率是否升高？',
+    }, '2026-03-02T00:05:00.000Z'],
+    ['invalid month', {
+      profileId: 'simulation', service: 'checkout',
+      start: '2026-13-15T00:00:00.000Z', end: '2026-13-15T00:05:00.000Z',
+      question: '结算失败率是否升高？',
+    }, '2027-01-15T00:05:00.000Z'],
+    ['invalid time', {
+      profileId: 'simulation', service: 'checkout',
+      start: '2026-09-15T24:00:00.000Z', end: '2026-09-15T24:05:00.000Z',
+      question: '结算失败率是否升高？',
+    }, '2026-09-16T00:05:00.000Z'],
+    ['missing timezone', { ...request, start: '2026-09-15T00:00:00.000', end: '2026-09-15T00:05:00.000' }, '2026-09-15T00:05:00.000Z'],
+    ['non-300-second window', { ...request, end: '2026-09-15T00:06:00.000Z' }, '2026-09-15T00:06:00.000Z'],
+  ] as const)('rejects %s before child creation', async (_name, input, clockTime) => {
+    let created = false;
+    const tool = createMetricsSubagentTool({ profile: settlementMetricsLabProfile, settlementTool: settlementTool(),
+      childAgentFactory: { create: () => { created = true; throw new Error('child created'); } },
+      clock: { now: () => new Date(clockTime) } });
+    await expect(drain(tool, input)).rejects.toMatchObject({ code: 'INVALID_INPUT', retryable: false });
+    expect(created).toBe(false);
+  });
+
+  it('accepts a valid offset timestamp window before creating the child', async () => {
+    let created = false;
+    const tool = createMetricsSubagentTool({ profile: settlementMetricsLabProfile, settlementTool: settlementTool(),
+      childAgentFactory: { create: (input) => {
+        created = true;
+        return childFactory(() => undefined).create(input);
+      } }, clock: { now: () => new Date(now) } });
+    const result = await drain(tool, {
+      ...request,
+      start: '2026-09-14T19:00:00.000-05:00',
+      end: '2026-09-14T19:05:00.000-05:00',
+    });
+    expect(created).toBe(true);
+    expect(result.isError).not.toBe(true);
+  });
+
   it.each([{ name: 'arbitrary.http' }, { kind: 'action' }, { source: 'builtin' }, { call: undefined }])(
     'rejects invalid settlement composition at bootstrap', (override) => {
       expect(() => createMetricsSubagentTool({ profile: settlementMetricsLabProfile,

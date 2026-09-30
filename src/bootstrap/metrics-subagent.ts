@@ -21,7 +21,7 @@ import { createSourceReportTool } from './source-report-tool.js';
 import { stableSourceChildRunId } from './source-subagent-identity.js';
 
 const MAX_QUESTION_BYTES = 2 * 1024;
-const ISO_WITH_ZONE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+const ISO_WITH_ZONE = /^(\d{4})-(\d{2})-(\d{2})T([01]\d|2[0-3]):([0-5]\d):([0-5]\d)(?:\.\d{1,3})?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
 
 export const metricsSubagentInputSchema = z.object({
   profileId: z.string().min(1),
@@ -108,7 +108,7 @@ function validateMetricsRequest(
     throw new SourceSubagentFailure('BUDGET_EXCEEDED', 'Metrics child requires two remaining Tool calls.', false);
   }
   if (request.question.trim().length === 0 || Buffer.byteLength(request.question, 'utf8') > MAX_QUESTION_BYTES
-    || !ISO_WITH_ZONE.test(request.start) || !ISO_WITH_ZONE.test(request.end)) {
+    || !isStrictIsoWithZone(request.start) || !isStrictIsoWithZone(request.end)) {
     throw new SourceSubagentFailure('INVALID_INPUT', 'Metrics request question or timestamps are invalid.', false);
   }
   const start = Date.parse(request.start);
@@ -120,6 +120,21 @@ function validateMetricsRequest(
     || end > now + profile.maxFutureSkewSeconds * 1_000) {
     throw new SourceSubagentFailure('INVALID_INPUT', 'Metrics request must select the latest 300-second window.', false);
   }
+}
+
+function isStrictIsoWithZone(value: string): boolean {
+  const match = ISO_WITH_ZONE.exec(value);
+  if (match === null) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (day > daysInMonth(year, month)) return false;
+  return Number.isFinite(Date.parse(value));
+}
+
+function daysInMonth(year: number, month: number): number {
+  if (month === 2) return year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0) ? 29 : 28;
+  return [4, 6, 9, 11].includes(month) ? 30 : 31;
 }
 
 function renderMetricsPrompt(request: SourceSubagentRequest): string {

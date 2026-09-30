@@ -48,7 +48,12 @@ function fact(total: number, failed: number, overrides: Partial<SettlementMetric
   };
 }
 
-function metricResponse(metricFact: SettlementMetricFact, evidenceId = 'metric-evidence-1', coverage = 1): ToolResponse {
+function metricResponse(
+  metricFact: SettlementMetricFact,
+  evidenceId = 'metric-evidence-1',
+  coverage = 1,
+  state: 'committed' | 'partial' = 'committed',
+): ToolResponse {
   return attachSourceEvidenceObservation({
     blocks: [
       { type: 'json', value: metricFact },
@@ -59,7 +64,7 @@ function metricResponse(metricFact: SettlementMetricFact, evidenceId = 'metric-e
     schemaVersion: 1,
     source: 'metrics',
     evidenceId,
-    state: 'committed',
+    state,
     coverage,
     timeRange: {
       start: new Date(metricFact.start * 1_000).toISOString(),
@@ -197,6 +202,46 @@ describe('MetricsSourceReportCollector', () => {
     });
   });
 
+  it('treats the explicit settlement unavailable response as having no metric evidence', () => {
+    const subject = collector();
+    subject.observeToolResult('metrics.settlement', {
+      blocks: [{ type: 'json', value: {
+        status: 'insufficient_data',
+        reason: 'missing_series',
+        missingEvidence: ['metrics', 'logs', 'traces'],
+      } }],
+    });
+
+    expect(subject.finalize(finalizeInput)).toMatchObject({
+      status: 'unavailable', evidenceIds: [], coverage: 0,
+    });
+  });
+
+  it.each([
+    {
+      name: 'a malformed unavailable payload',
+      response: {
+        blocks: [{ type: 'json' as const, value: {
+          status: 'insufficient_data', reason: 'missing_series', missingEvidence: ['logs', 'traces'],
+        } }],
+      },
+    },
+    {
+      name: 'an unavailable payload with malformed evidence metadata',
+      response: {
+        blocks: [{ type: 'json' as const, value: {
+          status: 'insufficient_data', reason: 'missing_series',
+          missingEvidence: ['metrics', 'logs', 'traces'],
+        } }],
+        metadata: { sourceEvidence: {} },
+      },
+    },
+  ])('rejects $name instead of swallowing the protocol error', ({ response }) => {
+    expectToThrowWithProperties(() => collector().observeToolResult('metrics.settlement', response), {
+      code: 'MCP_PROTOCOL_ERROR', retryable: false,
+    });
+  });
+
   it('returns partial for conflicting metric snapshots', () => {
     const subject = collector();
     subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 0), 'metric-evidence-1'));
@@ -232,12 +277,23 @@ describe('MetricsSourceReportCollector', () => {
     }), { code: 'POLICY_DENIED', retryable: false });
   });
 
-  it('recomputes final coverage from the metric fact interval instead of metadata', () => {
+  it('caps final coverage by source metadata and metric fact overlap', () => {
     const subject = collector();
     subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15), 'metric-evidence-1', 0.25));
     subject.acceptReport(candidate(['metric-evidence-1']));
 
-    expect(subject.finalize(finalizeInput)).toMatchObject({ status: 'complete', coverage: 1 });
+    expect(subject.finalize(finalizeInput)).toMatchObject({ status: 'complete', coverage: 0.25 });
+  });
+
+  it('preserves partial source observation semantics while capping coverage', () => {
+    const subject = collector();
+    subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15), 'metric-evidence-1', 0.75, 'partial'));
+    subject.acceptReport(candidate(['metric-evidence-1']));
+
+    expect(subject.finalize(finalizeInput)).toMatchObject({
+      status: 'partial', evidenceIds: ['metric-evidence-1'], coverage: 0.75,
+      missingEvidence: ['metric_evidence_partial'],
+    });
   });
 
   it('rejects a report that cites unknown evidence', () => {
