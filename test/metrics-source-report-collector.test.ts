@@ -82,12 +82,23 @@ function collector(): MetricsSourceReportCollector {
   return new MetricsSourceReportCollector({ request, profile: settlementMetricsLabProfile });
 }
 
+function expectToThrowWithProperties(action: () => unknown, properties: Record<string, unknown>): void {
+  let didThrow = false;
+  try {
+    action();
+  } catch (error: unknown) {
+    didThrow = true;
+    expect(error).toMatchObject(properties);
+  }
+  expect(didThrow).toBe(true);
+}
+
 describe('MetricsSourceReportCollector', () => {
-  it.each([
-    { total: 100, failed: 0, expected: 'healthy', sourceStatus: 'complete' },
-    { total: 100, failed: 15, expected: 'breached', sourceStatus: 'complete' },
-    { total: 10, failed: 8, expected: 'insufficient_data', sourceStatus: 'complete' },
-  ] as const)('renders the $expected metric fact deterministically', ({ total, failed, expected, sourceStatus }) => {
+  it.each<[number, number, 'healthy' | 'breached' | 'insufficient_data', 'complete']>([
+    [100, 0, 'healthy', 'complete'],
+    [100, 15, 'breached', 'complete'],
+    [10, 8, 'insufficient_data', 'complete'],
+  ])('renders the %s metric fact deterministically', (total, failed, expected, sourceStatus) => {
     const subject = collector();
     subject.observeToolResult('metrics.settlement', metricResponse(fact(total, failed)));
     subject.acceptReport(candidate(['metric-evidence-1']));
@@ -122,7 +133,7 @@ describe('MetricsSourceReportCollector', () => {
     expect(result.findings[0]?.statement).not.toContain('MySQL');
   });
 
-  it.each([
+  it.each<[string, SettlementMetricFact]>([
     ['threshold differs from the Profile', fact(100, 15, { threshold: 0.01 })],
     ['minSamples differs from the Profile', fact(100, 15, { minSamples: 1 })],
     ['failureRate differs from failed divided by total', fact(100, 15, { failureRate: 0.01 })],
@@ -130,9 +141,9 @@ describe('MetricsSourceReportCollector', () => {
   ])('rejects a metric fact when its %s', (_name, invalidFact) => {
     const subject = collector();
 
-    expect(() => subject.observeToolResult('metrics.settlement', metricResponse(invalidFact))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => subject.observeToolResult('metrics.settlement', metricResponse(invalidFact)), {
       code: 'MCP_PROTOCOL_ERROR', retryable: false,
-    }));
+    });
   });
 
   it('returns partial when valid metric evidence has no source report', () => {
@@ -149,9 +160,9 @@ describe('MetricsSourceReportCollector', () => {
     const subject = collector();
     subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15)));
 
-    expect(() => subject.acceptReport({ ...candidate(['metric-evidence-1']), findings: [] })).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => subject.acceptReport({ ...candidate(['metric-evidence-1']), findings: [] }), {
       code: 'POLICY_DENIED',
-    }));
+    });
     expect(subject.finalize(finalizeInput)).toMatchObject({
       status: 'partial', missingEvidence: ['source_report'],
     });
@@ -165,9 +176,9 @@ describe('MetricsSourceReportCollector', () => {
       evidenceIds: ['non-metric-evidence'],
     });
 
-    expect(() => subject.acceptReport(candidate(['non-metric-evidence']))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => subject.acceptReport(candidate(['non-metric-evidence'])), {
       code: 'POLICY_DENIED',
-    }));
+    });
   });
 
   it('returns unavailable when no valid metric evidence was observed', () => {
@@ -201,14 +212,14 @@ describe('MetricsSourceReportCollector', () => {
     expect(result.missingEvidence).toContain('window_outside_request_tolerance');
   });
 
-  it.each([
+  it.each<[string, SourceSubagentRequest]>([
     ['profileId', { ...request, profileId: 'another-profile' }],
     ['service', { ...request, service: 'another-service' }],
   ])('fails closed when the request %s is outside the injected Profile', (_field, invalidRequest) => {
-    expect(() => new MetricsSourceReportCollector({
+    expectToThrowWithProperties(() => new MetricsSourceReportCollector({
       request: invalidRequest,
       profile: settlementMetricsLabProfile,
-    })).toThrow(expect.objectContaining({ code: 'POLICY_DENIED', retryable: false }));
+    }), { code: 'POLICY_DENIED', retryable: false });
   });
 
   it('recomputes final coverage from the metric fact interval instead of metadata', () => {
@@ -223,8 +234,8 @@ describe('MetricsSourceReportCollector', () => {
     const subject = collector();
     subject.observeToolResult('metrics.settlement', metricResponse(fact(100, 15)));
 
-    expect(() => subject.acceptReport(candidate(['unknown-evidence']))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => subject.acceptReport(candidate(['unknown-evidence'])), {
       code: 'POLICY_DENIED',
-    }));
+    });
   });
 });

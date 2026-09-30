@@ -33,6 +33,17 @@ function responseWithObservation(
   };
 }
 
+function expectToThrowWithProperties(action: () => unknown, properties: Record<string, unknown>): void {
+  let didThrow = false;
+  try {
+    action();
+  } catch (error: unknown) {
+    didThrow = true;
+    expect(error).toMatchObject(properties);
+  }
+  expect(didThrow).toBe(true);
+}
+
 describe('source report collector', () => {
   it('uses source evidence metadata for coverage, state and missing evidence', () => {
     const collector = new DefaultSourceReportCollector();
@@ -57,21 +68,21 @@ describe('source report collector', () => {
   });
 
   it('rejects an observation whose evidence is absent from the response evidence IDs', () => {
-    expect(() => readSourceEvidenceObservation(responseWithObservation(observation, []))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => readSourceEvidenceObservation(responseWithObservation(observation, [])), {
       code: 'MCP_PROTOCOL_ERROR', retryable: false,
-    }));
+    });
   });
 
-  it.each([
+  it.each<[string, unknown]>([
     ['schemaVersion', { ...observation, schemaVersion: 2 }],
     ['source', { ...observation, source: 'unknown' }],
     ['state', { ...observation, state: 'healthy' }],
     ['coverage', { ...observation, coverage: 1.1 }],
     ['timeRange', { ...observation, timeRange: { start: observation.timeRange!.end, end: observation.timeRange!.start } }],
   ])('rejects malformed observation %s with the MCP protocol error', (_field, malformed) => {
-    expect(() => readSourceEvidenceObservation(responseWithObservation(malformed))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => readSourceEvidenceObservation(responseWithObservation(malformed)), {
       code: 'MCP_PROTOCOL_ERROR', retryable: false,
-    }));
+    });
   });
 
   it('rejects a calendar-invalid ISO timestamp that Date.parse normalizes', () => {
@@ -80,17 +91,17 @@ describe('source report collector', () => {
       timeRange: { start: '2026-02-30T00:00:00Z', end: '2026-03-03T00:00:00Z' },
     };
 
-    expect(() => readSourceEvidenceObservation(responseWithObservation(malformed))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => readSourceEvidenceObservation(responseWithObservation(malformed)), {
       code: 'MCP_PROTOCOL_ERROR', retryable: false,
-    }));
+    });
   });
 
-  it.each(['raw', 'url', 'promql', 'storageKey', 'headers'])('rejects unsafe source evidence key %s', (unsafeKey) => {
+  it.each<[string]>([['raw'], ['url'], ['promql'], ['storageKey'], ['headers']])('rejects unsafe source evidence key %s', (unsafeKey) => {
     const unsafeObservation = { ...observation, [unsafeKey]: 'sensitive-value' };
 
-    expect(() => readSourceEvidenceObservation(responseWithObservation(unsafeObservation))).toThrow(expect.objectContaining({
+    expectToThrowWithProperties(() => readSourceEvidenceObservation(responseWithObservation(unsafeObservation)), {
       code: 'MCP_PROTOCOL_ERROR', retryable: false,
-    }));
+    });
   });
 
   it('keeps logs.capture top-level control JSON compatible without metadata', () => {
