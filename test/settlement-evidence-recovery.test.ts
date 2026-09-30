@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import type { Tool, ToolCallOptions, ToolResponse, ToolResponseChunk } from '../src/contracts/index.js';
 import { bindSettlementEvidenceTool } from '../src/bootstrap/settlement-evidence-tool.js';
@@ -45,9 +46,19 @@ describe('settlement evidence recovery', () => {
       const first = await invoke(tool, options);
       const evidenceId = first.evidenceIds?.[0];
       if (evidenceId === undefined) throw new Error('Missing evidence ID');
+      const expectedEvidenceId = `metric-evidence-${createHash('sha256')
+        .update(`${options.runId}\u0000${options.toolCallId}`)
+        .digest('hex')
+        .slice(0, 32)}`;
+      expect(evidenceId).toBe(expectedEvidenceId);
+
       const second = await invoke(tool, options);
 
       expect(second.evidenceIds).toEqual([evidenceId]);
+      const differentIdentity = await invoke(tool, { ...options, runId: 'child-run-2' });
+      const differentEvidenceId = differentIdentity.evidenceIds?.[0];
+      if (differentEvidenceId === undefined) throw new Error('Missing evidence ID for different identity');
+      expect(differentEvidenceId).not.toBe(evidenceId);
       expect(await evidence.get(evidenceId)).toMatchObject({
         evidenceId,
         captureKey: 'metric:child-run-1:metric-call-1:0',
