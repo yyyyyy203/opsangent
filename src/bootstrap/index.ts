@@ -4,5 +4,6 @@ export * from './metrics-lab.js';
 export * from './openai-compatible.js';
 export * from './log-evidence-tools.js';
 export * from './logs-subagent.js';
+export * from './metrics-subagent.js';
 export * from './source-report-tool.js';
 export * from './source-subagent-identity.js';

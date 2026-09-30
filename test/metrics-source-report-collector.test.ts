@@ -94,6 +94,16 @@ function expectToThrowWithProperties(action: () => unknown, properties: Record<s
 }
 
 describe('MetricsSourceReportCollector', () => {
+  it('accepts the bound settlement Tool legacy missingEvidence hint without adopting it as Metrics missing evidence', () => {
+    const current = collector();
+    const response = metricResponse(fact(100, 0));
+    const first = response.blocks[0];
+    if (first?.type !== 'json') throw new Error('metric fact missing');
+    response.blocks[0] = { type: 'json', value: { ...(first.value as object), missingEvidence: ['logs', 'traces'] } };
+    current.observeToolResult('metrics.settlement', response);
+    current.acceptReport(candidate(['metric-evidence-1']));
+    expect(current.finalize(finalizeInput)).toMatchObject({ status: 'complete', missingEvidence: [] });
+  });
   it.each<[number, number, 'healthy' | 'breached' | 'insufficient_data', 'complete']>([
     [100, 0, 'healthy', 'complete'],
     [100, 15, 'breached', 'complete'],

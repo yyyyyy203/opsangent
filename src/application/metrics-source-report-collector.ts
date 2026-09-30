@@ -164,8 +164,14 @@ export class MetricsSourceReportPolicyError extends Error {
 
 function parseMetricFact(value: unknown, profile: SettlementMetricsProfile): SettlementMetricFact {
   if (!isRecord(value) || !hasOnlyKeys(value, [
-    'status', 'total', 'failed', 'failureRate', 'threshold', 'minSamples', 'service', 'environment', 'start', 'end',
+    'status', 'total', 'failed', 'failureRate', 'threshold', 'minSamples', 'service', 'environment', 'start', 'end', 'missingEvidence',
   ])) throw new MetricsSourceReportProtocolError('invalid metric fact');
+  // The existing settlement Tool includes this legacy hint in its public summary.
+  // It describes follow-up sources, not missing Metrics evidence or a model fact.
+  if (value.missingEvidence !== undefined
+    && (JSON.stringify(value.missingEvidence) !== '["logs","traces"]')) {
+    throw new MetricsSourceReportProtocolError('invalid settlement follow-up hint');
+  }
   const { status, total, failed, failureRate, threshold, minSamples, service, environment, start, end } = value;
   if ((status !== 'healthy' && status !== 'breached' && status !== 'insufficient_data')
     || !isSafeInteger(total) || !isSafeInteger(failed)
