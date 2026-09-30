@@ -29,5 +29,10 @@ export interface DiagnosisRunResult {
 export interface DiagnosisAgent {
   reply(options: ReplyOptions): Promise<DiagnosisRunResult>;
   replyStream(options: ReplyOptions): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
-  resumeStream(runId: string, signal?: AbortSignal, toolCallBudget?: { remaining: number }): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
+  resumeStream(
+    runId: string,
+    signal?: AbortSignal,
+    toolCallBudget?: { remaining: number },
+    networkAttemptBudget?: { remaining: number },
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
 }

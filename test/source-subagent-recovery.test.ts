@@ -14,6 +14,7 @@ import type { CheckpointStore, SourceSubagentResult } from '../src/contracts/ind
 describe('source subagent recovery', () => {
   it('resumes the stable child Run and restores committed evidence/report without replaying capture', async () => {
     const calls: string[] = [];
+    const networkAttemptBudget = { remaining: 5 };
     const childFactory: SourceChildAgentFactory = {
       create: (input) => {
         expect(input.childRunId).toBe('child-1');
@@ -24,9 +25,11 @@ describe('source subagent recovery', () => {
             calls.push('reply');
             return completedResult();
           },
-          resumeStream: async function* (runId): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+          resumeStream: async function* (...args: unknown[]): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
             await Promise.resolve();
             yield* [] as AgentEvent[];
+            const runId = args[0] as string;
+            expect(args[3]).toBe(networkAttemptBudget);
             calls.push(`resume:${runId}`);
             return completedResult();
           },
@@ -80,7 +83,7 @@ describe('source subagent recovery', () => {
       clock: { now: () => new Date('2026-09-14T00:00:03.000Z') },
     });
 
-    const result = await drain(runner.run(request(), execution()));
+    const result = await drain(runner.run(request(), execution(networkAttemptBudget)));
 
     expect(calls).toEqual(['resume:child-1']);
     expect(result).toMatchObject({ status: 'complete', evidenceIds: ['evidence-1'], businessTraceIds: ['trace-1'], coverage: 1 });
@@ -91,8 +94,17 @@ function request(): SourceSubagentRequest {
   return { profileId: 'group-buy-market', service: 'checkout', start: '2026-09-14T00:00:00.000Z', end: '2026-09-14T01:00:00.000Z', question: '定位超时', evidenceIds: [] };
 }
 
-function execution(): SourceSubagentExecution {
-  return { parentRunId: 'parent-1', parentToolCallId: 'tool-1', parentStepId: 'step-1', childRunId: 'child-1', profileId: 'group-buy-market', signal: new AbortController().signal, remainingToolCalls: 3 };
+function execution(networkAttemptBudget?: { remaining: number }): SourceSubagentExecution {
+  return {
+    parentRunId: 'parent-1',
+    parentToolCallId: 'tool-1',
+    parentStepId: 'step-1',
+    childRunId: 'child-1',
+    profileId: 'group-buy-market',
+    signal: new AbortController().signal,
+    remainingToolCalls: 3,
+    ...(networkAttemptBudget === undefined ? {} : { networkAttemptBudget }),
+  };
 }
 
 function completedResult(): DiagnosisRunResult {

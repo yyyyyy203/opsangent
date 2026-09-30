@@ -96,7 +96,12 @@ export class AgentHarness implements DiagnosisAgent {
     return yield* this.forwardRunStream(this.run(frame, options.signal ?? new AbortController().signal));
   }
 
-  public async *resumeStream(runId: string, signal = new AbortController().signal, toolCallBudget?: { remaining: number }): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
+  public async *resumeStream(
+    runId: string,
+    signal = new AbortController().signal,
+    toolCallBudget?: { remaining: number },
+    networkAttemptBudget?: { remaining: number },
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult> {
     const loaded = await this.loadCheckpoint(runId);
     if (loaded === null) throw new Error(`Checkpoint not found: ${runId}`);
     const { context } = loaded;
@@ -104,6 +109,9 @@ export class AgentHarness implements DiagnosisAgent {
     context.replyId ??= this.dependencies.ids.next('reply');
     context.toolCallBudget = toolCallBudget ?? context.toolCallBudget ?? {
       remaining: Math.max(0, context.budget.maxToolCalls - context.budget.toolCallsUsed),
+    };
+    context.networkAttemptBudget = networkAttemptBudget ?? context.networkAttemptBudget ?? {
+      remaining: context.budget.maxToolCalls * 3,
     };
     const newStreamId = this.dependencies.ids.next('stream');
     context.streamId = newStreamId;
@@ -1267,6 +1275,13 @@ export class AgentHarness implements DiagnosisAgent {
     if (sharedBudget !== undefined) {
       if (next.toolCallBudget !== undefined) sharedBudget.remaining = next.toolCallBudget.remaining;
       next.toolCallBudget = sharedBudget;
+    }
+    const sharedNetworkAttemptBudget = frame.context.networkAttemptBudget;
+    if (sharedNetworkAttemptBudget !== undefined) {
+      if (next.networkAttemptBudget !== undefined) {
+        sharedNetworkAttemptBudget.remaining = next.networkAttemptBudget.remaining;
+      }
+      next.networkAttemptBudget = sharedNetworkAttemptBudget;
     }
     frame.context = next;
   }

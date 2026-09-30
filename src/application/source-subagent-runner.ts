@@ -36,7 +36,12 @@ export interface SourceChildAgent {
     maxDurationMs: number;
     networkAttemptBudget?: { remaining: number };
   }): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
-  resumeStream(runId: string, signal?: AbortSignal, toolCallBudget?: { remaining: number }): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
+  resumeStream(
+    runId: string,
+    signal?: AbortSignal,
+    toolCallBudget?: { remaining: number },
+    networkAttemptBudget?: { remaining: number },
+  ): AsyncGenerator<AgentEvent, DiagnosisRunResult>;
 }
 
 export interface SourceChildAgentFactory {
@@ -149,7 +154,12 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
         ...(execution.toolCallBudget === undefined ? {} : { toolCallBudget: execution.toolCallBudget }),
         ...(execution.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: execution.networkAttemptBudget }),
       })
-      : child.resumeStream(execution.childRunId, execution.signal, execution.toolCallBudget);
+      : child.resumeStream(
+        execution.childRunId,
+        execution.signal,
+        execution.toolCallBudget,
+        execution.networkAttemptBudget,
+      );
     let childResult: DiagnosisRunResult;
     try {
       childResult = await consumeChildStream(childStream, collector, execution.signal);

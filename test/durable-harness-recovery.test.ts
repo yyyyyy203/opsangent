@@ -10,6 +10,7 @@ import type {
   Clock,
   Tool,
   ToolCall,
+  ToolCallOptions,
   ToolExecutionRecord,
   ToolExecutionResult,
 } from '../src/contracts/index.js';
@@ -34,6 +35,7 @@ describe('durable Harness recovery', () => {
     const sqlitePath = join(root, 'runtime.sqlite');
     const finishedCall: ToolCall = { id: 'finished-call', name: 'metrics.finished', input: { service: 'settlement' } };
     const unfinishedCall: ToolCall = { id: 'unfinished-call', name: 'metrics.unfinished', input: { service: 'settlement' } };
+    const networkAttemptBudget = { remaining: 5 };
     const completedResult = resultFor(finishedCall, 'success');
     const seed = createSqlitePersistence({ path: sqlitePath, clock });
 
@@ -63,7 +65,10 @@ describe('durable Harness recovery', () => {
       clock,
       tools: [
         evidenceTool(finishedCall.name, 'replay_safe', () => { finishedCalls += 1; }),
-        evidenceTool(unfinishedCall.name, 'replay_safe', () => { unfinishedCalls += 1; }),
+        evidenceTool(unfinishedCall.name, 'replay_safe', (options) => {
+          expect(options.networkAttemptBudget).toBe(networkAttemptBudget);
+          unfinishedCalls += 1;
+        }),
       ],
     });
 
@@ -83,7 +88,7 @@ describe('durable Harness recovery', () => {
         durationMs: 0,
         evidenceIds: [],
       }));
-      const resumed = await drain(runtime.agent.resumeStream('run-parallel'));
+      const resumed = await drain(runtime.agent.resumeStream('run-parallel', undefined, undefined, networkAttemptBudget));
       expect(resumed.status).toBe('completed');
       expect(finishedCalls).toBe(0);
       expect(unfinishedCalls).toBe(1);
@@ -340,15 +345,15 @@ function resultFor(call: ToolCall, status: ToolExecutionResult['status']): ToolE
   };
 }
 
-function evidenceTool(name: string, recoveryPolicy: NonNullable<Tool['recoveryPolicy']>, onCall: () => void): Tool {
+function evidenceTool(name: string, recoveryPolicy: NonNullable<Tool['recoveryPolicy']>, onCall: (options: ToolCallOptions) => void): Tool {
   return {
     name,
     description: name,
     kind: 'evidence',
     recoveryPolicy,
     inputSchema: z.object({ service: z.string() }),
-    call: () => {
-      onCall();
+    call: (_input, options) => {
+      onCall(options);
       return Promise.resolve({ blocks: [{ type: 'text' as const, text: 'fresh result' }] });
     },
   };
