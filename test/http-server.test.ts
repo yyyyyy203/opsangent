@@ -30,6 +30,8 @@ describe('inspection HTTP/SSE bootstrap', () => {
       }
       expect(body).toContain('event: RUN_STARTED');
       expect(body).toContain('event: RUN_FINISHED');
+      const firstEventId = /^id: (.+)$/mu.exec(body)?.[1];
+      expect(firstEventId).toBeTruthy();
       await reader.cancel();
       await runtime.evidence.save({
         evidenceId: 'http-evidence-1', runId, source: 'metric',
@@ -51,6 +53,24 @@ describe('inspection HTTP/SSE bootstrap', () => {
       expect(JSON.stringify(await evidenceDetail.json())).not.toContain('http-raw-marker');
       expect((await fetch(`${server.url}/runs/unknown-run`)).status).toBe(404);
       expect((await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events?lastEventId=missing-event`)).status).toBe(400);
+      const otherStarted = await fetch(`${server.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: '另一轮巡检', profileId: 'group-buy-market', runId: 'other-run' }),
+      });
+      expect(otherStarted.status).toBe(202);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if ((await fetch(`${server.url}/runs/other-run`)).status === 200) break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect((await fetch(`${server.url}/runs/other-run/events?lastEventId=${encodeURIComponent(firstEventId!)}`)).status).toBe(400);
+      const idle = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events?snapshots=none`);
+      expect(idle.status).toBe(200);
+      expect(idle.headers.get('content-type')).toContain('text/event-stream');
+      await idle.body?.cancel();
+      const unknownEvents = await fetch(`${server.url}/runs/unknown-run/events`);
+      expect(unknownEvents.status).toBe(404);
+      expect(unknownEvents.headers.get('content-type')).toContain('application/json');
+      expect((await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events?snapshots=bogus`)).status).toBe(400);
       expect((await fetch(`${server.url}/runs`, { method: 'POST', body: '{bad' })).status).toBe(400);
     } finally {
       await server.close();

@@ -17,6 +17,10 @@ export interface InspectionHttpServerOptions {
   messageQueries?: WebMessageQueries;
   webQueries?: { listProfiles(): readonly PublicProfile[]; getConfirmation(runId: string): Promise<PublicConfirmation | null> };
   allowedOrigins?: readonly string[];
+  heartbeatTimer?: {
+    set(callback: () => void, ms: number): unknown;
+    clear(handle: unknown): void;
+  };
 }
 
 export interface InspectionHttpServer {
@@ -75,7 +79,20 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   const eventMatch = method === 'GET' ? /^\/runs\/([^/]+)\/events$/u.exec(parsed.pathname) : null;
   const headerLastEventId = request.headers['last-event-id'];
   const lastEventId = typeof headerLastEventId === 'string' ? headerLastEventId : parsed.searchParams.get('lastEventId') ?? undefined;
-  if (eventMatch?.[1] !== undefined) { await streamEvents(request, response, options.events, decodePath(eventMatch[1]), lastEventId); return; }
+  if (eventMatch?.[1] !== undefined) {
+    const snapshots = parsed.searchParams.getAll('snapshots');
+    if (snapshots.length > 1 || (snapshots[0] !== undefined && snapshots[0] !== 'none')) {
+      throw Object.assign(new Error('snapshots must be none.'), { statusCode: 400 });
+    }
+    const runId = decodePath(eventMatch[1]);
+    const queries = requireQueries(options.queries);
+    if (await queries.getRun(runId) === null) {
+      writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
+      return;
+    }
+    await streamEvents(request, response, options.events, runId, lastEventId, snapshots[0] !== 'none', options.heartbeatTimer);
+    return;
+  }
 
   if (method === 'POST' && parsed.pathname === '/runs') {
     const body = await readJson(request, maxBodyBytes);
@@ -171,7 +188,18 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   writeJson(response, 404, { error: 'NOT_FOUND', message: 'Route not found.' });
 }
 
-async function streamEvents(request: IncomingMessage, response: ServerResponse, events: EventStreamService, runId: string, lastEventId: string | undefined): Promise<void> {
+export async function streamEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  events: EventStreamService,
+  runId: string,
+  lastEventId: string | undefined,
+  includeMessageSnapshot = true,
+  heartbeatTimer: InspectionHttpServerOptions['heartbeatTimer'] = {
+    set: (callback, ms) => setInterval(callback, ms),
+    clear: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+  },
+): Promise<void> {
   try {
     await events.validateCursor(runId, lastEventId);
   } catch (error) {
@@ -180,30 +208,50 @@ async function streamEvents(request: IncomingMessage, response: ServerResponse, 
   }
   const controller = new AbortController();
   const abort = () => controller.abort();
-  request.on('close', abort);
-  const iterator = events.open({ runId, signal: controller.signal, ...(lastEventId === undefined ? {} : { lastEventId }) });
+  request.on('aborted', abort);
+  response.on('close', abort);
+  const iterator = events.open({ runId, signal: controller.signal, includeMessageSnapshot, ...(lastEventId === undefined ? {} : { lastEventId }) });
+  let heartbeat: unknown;
+  let heartbeatPending = false;
+  const write = async (data: string): Promise<boolean> => {
+    if (controller.signal.aborted || response.destroyed || response.writableEnded) return false;
+    if (response.write(data)) return true;
+    return new Promise<boolean>((resolve) => {
+      const done = (ready: boolean): void => {
+        response.off('drain', onDrain);
+        controller.signal.removeEventListener('abort', onAbort);
+        resolve(ready);
+      };
+      const onDrain = () => done(!controller.signal.aborted && !response.destroyed);
+      const onAbort = () => done(false);
+      response.once('drain', onDrain);
+      controller.signal.addEventListener('abort', onAbort, { once: true });
+      if (controller.signal.aborted || response.destroyed) onAbort();
+    });
+  };
   try {
-    let first: IteratorResult<Awaited<ReturnType<typeof events.open>> extends AsyncIterable<infer Frame> ? Frame : never, void>;
-    try {
-      first = await iterator.next();
-    } catch (error) {
-      if (error instanceof EventStreamCursorError) throw Object.assign(new Error('Event stream cursor is invalid.'), { statusCode: 400 });
-      throw error;
-    }
     response.writeHead(200, {
       'Content-Type': 'text/event-stream; charset=utf-8',
       'Cache-Control': 'no-cache, no-transform',
       Connection: 'keep-alive',
       'X-Accel-Buffering': 'no',
     });
-    if (!first.done && !response.destroyed) response.write(encodeSseFrame(first.value));
+    response.flushHeaders();
+    heartbeat = heartbeatTimer.set(() => {
+      if (heartbeatPending || controller.signal.aborted) return;
+      heartbeatPending = true;
+      void write(': heartbeat\n\n').finally(() => { heartbeatPending = false; });
+    }, 15_000);
     for await (const frame of iterator) {
-      if (response.destroyed) break;
-      response.write(encodeSseFrame(frame));
+      if (controller.signal.aborted || response.destroyed) break;
+      if (!await write(encodeSseFrame(frame))) break;
     }
   } finally {
+    abort();
+    if (heartbeat !== undefined) heartbeatTimer.clear(heartbeat);
     await iterator.return?.(undefined);
-    request.off('close', abort);
+    request.off('aborted', abort);
+    response.off('close', abort);
     if (!response.writableEnded) response.end();
   }
 }
