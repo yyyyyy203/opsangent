@@ -27,7 +27,7 @@ function stableMetricEvidenceId(runId: string, toolCallId: string): string {
 
 export async function bindSettlementEvidenceTool(options: {
   connection: McpConnection; recorder?: EvidenceRecorder; /** @deprecated Inject an EvidenceRecorder for audit-event publication. */ evidence?: EvidenceStore; executor: ResilientExecutor;
-  signal: AbortSignal; id?: () => string; now?: () => number;
+  signal: AbortSignal; id?: () => string; now?: () => number; deadline?: number; networkAttemptBudget?: { remaining: number };
 }): Promise<Tool> {
   const now = options.now ?? Date.now;
   const recorder = options.recorder ?? (options.evidence === undefined ? undefined : new DefaultEvidenceRecorder({ evidence: options.evidence }));
@@ -46,7 +46,12 @@ export async function bindSettlementEvidenceTool(options: {
     description: '查询 checkout 结算指标，返回失败率、证据引用和缺失证据；不判断根因。',
     inputSchema: settlementInput, expectedRemoteSchema: settlementInputSchema,
     readOnly: true, idempotent: true, concurrencySafe: true,
-  }], { signal: options.signal, executor: options.executor });
+  }], {
+    signal: options.signal,
+    executor: options.executor,
+    ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
+    ...(options.networkAttemptBudget === undefined ? {} : { attemptBudget: options.networkAttemptBudget }),
+  });
   if (!base?.call) throw new SourceFailure('MCP_PROTOCOL_ERROR');
   return Object.freeze({ ...base, async *call(input, callOptions) {
     const invocation = base.call!(input, callOptions);

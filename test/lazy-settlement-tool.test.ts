@@ -33,13 +33,14 @@ async function invoke(tool: Tool, options: ToolCallOptions): Promise<ToolRespons
 async function fixture() {
   const server = await startSettlementMcpServer({ query: () => Promise.resolve(snapshot) }, { port: 0 });
   const evidence = new InMemoryEvidenceStore();
+  const sourceExecutor = executor();
   const lazy = createLazySettlementEvidenceTool({
     mcpUrl: server.url,
     recorder: new DefaultEvidenceRecorder({ evidence }),
-    executor: executor(),
+    executor: sourceExecutor,
     clock,
   });
-  return { server, evidence, lazy };
+  return { server, evidence, lazy, sourceExecutor };
 }
 
 describe('lazy settlement evidence tool', () => {
@@ -113,6 +114,44 @@ describe('lazy settlement evidence tool', () => {
       expect(first.evidenceIds).toHaveLength(1);
       expect(second.evidenceIds).toHaveLength(1);
     } finally {
+      await f.lazy.close();
+      await f.server.close();
+    }
+  });
+
+  it('uses the same deadline and network attempt ledger for connect, manifest, and call', async () => {
+    const f = await fixture();
+    try {
+      const networkAttemptBudget = { remaining: 3 };
+      const result = await invoke(f.lazy.tool, {
+        runId: 'run-1', stepId: 'step-1', toolCallId: 'call-budget', signal: new AbortController().signal,
+        mode: 'dry_run', deadline: clock.now().getTime() + 10_000, networkAttemptBudget,
+      });
+
+      expect(result.evidenceIds).toHaveLength(1);
+      expect(networkAttemptBudget.remaining).toBe(0);
+    } finally {
+      await f.lazy.close();
+      await f.server.close();
+    }
+  });
+
+  it('passes one deadline and attempt ledger through connect and manifest listing', async () => {
+    const f = await fixture();
+    const executeSpy = vi.spyOn(f.sourceExecutor, 'execute');
+    const attemptBudget = { remaining: 2 };
+    const deadline = clock.now().getTime() + 30_000;
+    try {
+      await expect(invoke(f.lazy.tool, {
+        runId: 'run-1', stepId: 'step-1', toolCallId: 'call-1', signal: new AbortController().signal,
+        mode: 'dry_run', deadline, networkAttemptBudget: attemptBudget,
+      })).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+
+      expect(executeSpy.mock.calls[0]?.[1]).toMatchObject({ deadline, attemptBudget });
+      expect(executeSpy.mock.calls[1]?.[1]).toMatchObject({ deadline, attemptBudget });
+      expect(attemptBudget.remaining).toBe(0);
+    } finally {
+      executeSpy.mockRestore();
       await f.lazy.close();
       await f.server.close();
     }

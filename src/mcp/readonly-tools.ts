@@ -25,10 +25,21 @@ function canonical(value: unknown): string {
 
 export async function bindReadonlyMcpTools(
   connection: McpConnection, manifests: readonly ReadonlyMcpManifest[],
-  options: { signal: AbortSignal; executor: ResilientExecutor; now?: () => number; onEvent?: (sourceId: string, event: RetryEvent) => void },
+  options: {
+    signal: AbortSignal;
+    executor: ResilientExecutor;
+    now?: () => number;
+    deadline?: number;
+    attemptBudget?: { remaining: number };
+    onEvent?: (sourceId: string, event: RetryEvent) => void;
+  },
 ): Promise<Tool[]> {
   const now = options.now ?? Date.now;
-  const descriptors = await options.executor.execute((signal) => connection.listTools(signal), { signal: options.signal, deadline: now() + 30_000 });
+  const descriptors = await options.executor.execute((signal) => connection.listTools(signal), {
+    signal: options.signal,
+    deadline: options.deadline ?? now() + 30_000,
+    ...(options.attemptBudget === undefined ? {} : { attemptBudget: options.attemptBudget }),
+  });
   const names = new Set<string>();
   // Validate the complete manifest before returning any capability.
   for (const manifest of manifests) {

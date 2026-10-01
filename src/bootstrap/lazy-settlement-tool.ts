@@ -51,6 +51,8 @@ export function createLazySettlementEvidenceTool(options: LazySettlementToolOpti
           executor: options.executor,
           signal,
           now: () => options.clock.now().getTime(),
+          deadline,
+          ...(attemptBudget === undefined ? {} : { networkAttemptBudget: attemptBudget }),
         });
         if (candidate.name !== 'metrics.settlement' || candidate.kind !== 'evidence' || candidate.source !== 'mcp') {
           throw new SourceFailure('MCP_PROTOCOL_ERROR');
