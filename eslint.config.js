@@ -2,7 +2,7 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'apps/agent-web/dist/**', 'apps/agent-server/**', 'test/e2e/fixture-server.mjs', 'node_modules/**', 'eslint.config.js'] },
+  { ignores: ['dist/**', 'apps/agent-web/dist/**', 'apps/agent-server/**', 'test/e2e/fixture-server.mjs', 'test/e2e/metrics-fixture-server.mjs', 'node_modules/**', 'eslint.config.js'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
