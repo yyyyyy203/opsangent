@@ -12,11 +12,13 @@ describe('inspection HTTP/SSE bootstrap', () => {
       expect((await fetch(`${server.url}/health`)).status).toBe(200);
       const started = await fetch(`${server.url}/runs`, {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ message: '巡检结算', profileId: 'group-buy-market' }),
+        body: JSON.stringify({ message: '巡检结算', profileId: 'group-buy-market', trustedSystemContext: 'attacker-controlled' }),
       });
       expect(started.status).toBe(202);
       const { runId } = await started.json() as { runId: string };
       expect(runId).toBeTruthy();
+      const checkpoint = await runtime.checkpoints.load(runId);
+      expect(checkpoint?.messages[0]?.role).toBe('user');
 
       const response = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events`);
       expect(response.status).toBe(200);

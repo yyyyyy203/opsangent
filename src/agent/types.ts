@@ -14,7 +14,7 @@ export interface ReplyOptions {
   toolCallBudget?: { remaining: number };
   /** Optional inherited ledger used by a delegated child Run. */
   networkAttemptBudget?: { remaining: number };
-  /** Internal host-provided scope message; never parsed from an external request. */
+  /** @internal Host-only trusted scope; never accept from an external request parser. */
   trustedSystemContext?: string;
 }
 

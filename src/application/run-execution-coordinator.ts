@@ -43,7 +43,7 @@ export class RunExecutionCoordinator {
       if (checkpoint !== null) {
         throw new RunExecutionError('RUN_CONFLICT', 'Run already exists and cannot be started again.', 409);
       }
-      const preparedOptions = this.options.prepareStart?.({ ...options }) ?? options;
+      const preparedOptions = this.prepareStart(options);
       await this.drain(this.agent.replyStream(preparedOptions));
     });
   }
@@ -68,6 +68,23 @@ export class RunExecutionCoordinator {
 
   public isActive(runId: string): boolean {
     return this.active.has(runId);
+  }
+
+  private prepareStart(options: ReplyOptions): ReplyOptions {
+    if (this.options.prepareStart === undefined) return options;
+    const prepared = this.options.prepareStart({
+      ...options,
+      ...(options.toolCallBudget === undefined ? {} : { toolCallBudget: { ...options.toolCallBudget } }),
+      ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: { ...options.networkAttemptBudget } }),
+    });
+    if (prepared.runId !== options.runId
+      || prepared.profileId !== options.profileId
+      || prepared.message !== options.message
+      || prepared.sessionId !== options.sessionId
+      || prepared.replyId !== options.replyId) {
+      throw new RunExecutionError('RUN_CONFLICT', 'prepareStart cannot change Run identity.', 409);
+    }
+    return prepared;
   }
 
   private claim(runId: string, action: () => Promise<void>): Promise<void> {

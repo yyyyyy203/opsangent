@@ -99,6 +99,79 @@ describe('RunExecutionCoordinator trusted start preparation', () => {
 
     expect(calls).toEqual(['start:host scope', 'resume:resume-me']);
   });
+
+  it('isolates mutable execution budgets before prepareStart and preserves caller options', async () => {
+    let observed: ReplyOptions | undefined;
+    const agent: DiagnosisAgent = {
+      reply: () => Promise.resolve(result('unused')),
+      replyStream: async function* (options: ReplyOptions) {
+        observed = options;
+        await Promise.resolve();
+        yield* [];
+        return result(options.runId!);
+      },
+      resumeStream: async function* (runId: string) {
+        await Promise.resolve();
+        yield* [];
+        return result(runId);
+      },
+    };
+    const original: ReplyOptions = {
+      runId: 'budget-run',
+      profileId: 'simulation',
+      message: 'inspect',
+      sessionId: 'session-1',
+      replyId: 'reply-1',
+      toolCallBudget: { remaining: 4 },
+      networkAttemptBudget: { remaining: 6 },
+    };
+    const before = structuredClone(original);
+    const coordinator = new RunExecutionCoordinator(agent, { load: () => Promise.resolve(null) }, {
+      prepareStart: (options) => {
+        options.toolCallBudget!.remaining = 1;
+        options.networkAttemptBudget!.remaining = 2;
+        return { ...options, trustedSystemContext: 'host scope' };
+      },
+    });
+
+    await coordinator.start(original);
+
+    expect(original).toEqual(before);
+    expect(observed).toMatchObject({ trustedSystemContext: 'host scope' });
+    expect(observed?.toolCallBudget).toEqual({ remaining: 1 });
+    expect(observed?.networkAttemptBudget).toEqual({ remaining: 2 });
+    expect(observed?.toolCallBudget).not.toBe(original.toolCallBudget);
+    expect(observed?.networkAttemptBudget).not.toBe(original.networkAttemptBudget);
+  });
+
+  it('rejects prepareStart when it changes Run identity fields', async () => {
+    let replyCalled = false;
+    const agent: DiagnosisAgent = {
+      reply: () => Promise.resolve(result('unused')),
+      replyStream: async function* (options: ReplyOptions) {
+        replyCalled = true;
+        await Promise.resolve();
+        yield* [];
+        return result(options.runId!);
+      },
+      resumeStream: async function* (runId: string) {
+        await Promise.resolve();
+        yield* [];
+        return result(runId);
+      },
+    };
+    const coordinator = new RunExecutionCoordinator(agent, { load: () => Promise.resolve(null) }, {
+      prepareStart: (options) => ({ ...options, runId: 'different-run' }),
+    });
+
+    await expect(coordinator.start({ runId: 'identity-run', profileId: 'simulation', message: 'inspect' }))
+      .rejects.toMatchObject({
+        code: 'RUN_CONFLICT',
+        statusCode: 409,
+        message: 'prepareStart cannot change Run identity.',
+      });
+    expect(replyCalled).toBe(false);
+  });
 });
 
 function result(runId: string): DiagnosisRunResult {
