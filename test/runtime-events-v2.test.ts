@@ -5,6 +5,7 @@ import type { ModelResponse } from '../src/contracts/index.js';
 import type { ChatModel, ModelStreamEvent } from '../src/contracts/index.js';
 import { ModelFailure } from '../src/model/model-failure.js';
 import { z } from 'zod';
+import { PublicEventProjectorV2 } from '../src/event/projectors/public-projector.js';
 
 describe('runtime V2 event wiring', () => {
   it('persists lifecycle events from the authoritative Harness run', async () => {
@@ -31,6 +32,51 @@ describe('runtime V2 event wiring', () => {
     const events = await runtime.eventStoreV2.readRun(result.runId, 0, 200);
     expect(events.filter((item) => item.type === 'TOOL_RESULT')).toHaveLength(1);
     expect(events.map((item) => item.type)).toContain('RISK_EVALUATED');
+  });
+
+  it('projects sanitized tool lifecycle status to the public stream', async () => {
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ toolCalls: [{ id: 'public-tool-1', name: 'metrics.query', input: { service: 'settlement' } }] }, { text: 'done', toolCalls: [] }]),
+      workspaceRoots: [],
+      tools: [{ name: 'metrics.query', description: 'query', kind: 'evidence', inputSchema: z.object({ service: z.string() }), call: () => ({ blocks: [{ type: 'json', value: { failureRate: 0.02, secret: 'must-not-leak' } }] }), isConcurrencySafe: () => true }],
+    });
+    const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
+    const projector = new PublicEventProjectorV2();
+    const events = await runtime.eventStoreV2.readRun(result.runId, 0, 200);
+    const publicEvents = events.flatMap((event) => {
+      const projected = projector.project(event);
+      return projected === null ? [] : [projected];
+    });
+    expect(publicEvents.map((event) => event.type)).toContain('TOOL_STARTED');
+    const publicResult = publicEvents.find((event) => event.type === 'TOOL_RESULT');
+    expect(publicResult).toBeDefined();
+    expect(publicResult?.payload).toMatchObject({ result: { toolCallId: 'public-tool-1', toolName: 'metrics.query', status: 'success' } });
+    expect(JSON.stringify(publicResult)).not.toContain('must-not-leak');
+  });
+
+  it('projects a rejected confirmation result without exposing the private payload', async () => {
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ toolCalls: [{ id: 'rejected-tool-1', name: 'metrics.query', input: { service: 'settlement' } }] }]),
+      workspaceRoots: [],
+      tools: [{ name: 'metrics.query', description: 'query', kind: 'evidence', requireUserConfirm: true, inputSchema: z.object({ service: z.string() }), call: () => ({ blocks: [{ type: 'json', value: { secret: 'never-public' } }] }), isConcurrencySafe: () => true }],
+    });
+    const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
+    const checkpoint = await runtime.durableState?.checkpoints.load(result.runId);
+    expect(checkpoint).toBeDefined();
+    await runtime.hitl.decideWithResult({
+      runId: result.runId, toolCallId: 'rejected-tool-1', confirmed: false,
+      expectedRevision: checkpoint!.revision, actor: 'test', decidedAt: '2026-10-01T00:00:01.000Z',
+      reason: 'rejected in test',
+    });
+    const projector = new PublicEventProjectorV2();
+    const events = await runtime.eventStoreV2.readRun(result.runId, 0, 200);
+    const publicEvents = events.flatMap((event) => {
+      const projected = projector.project(event);
+      return projected === null ? [] : [projected];
+    });
+    const publicResult = publicEvents.find((event) => event.type === 'TOOL_RESULT' && JSON.stringify(event).includes('USER_REJECTED'));
+    expect(publicResult?.payload).toMatchObject({ result: { status: 'aborted', error: { code: 'USER_REJECTED' } } });
+    expect(JSON.stringify(publicResult)).not.toContain('never-public');
   });
 
   it('emits model attempt failure and fallback activation through the runtime', async () => {

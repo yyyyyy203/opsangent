@@ -25,6 +25,7 @@ import type {
   ToolExecutionRecord,
   RiskSeverity,
 } from '../contracts/index.js';
+import { visibilityForV2Event } from '../event/v2/visibility.js';
 import { CheckpointConflictError, checkpointChecksum, createInitialRunGovernanceState, toAgentError } from '../contracts/index.js';
 import type { CompressionResult, ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
@@ -1301,7 +1302,7 @@ export class AgentHarness implements DiagnosisAgent {
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       correlationId: typeof v2.correlationId === 'function' ? v2.correlationId(context.runId) : v2.correlationId,
-      visibility: type.startsWith('RUN_') || type.startsWith('STEP_') || type === 'REASONING_STARTED' || type === 'LOOP_DETECTED' ? 'public' : 'audit',
+      visibility: visibilityForV2Event(type),
       durability: 'durable',
       ...(stepId === undefined ? {} : { stepId }),
       ...(toolCallId === undefined ? {} : { toolCallId }),

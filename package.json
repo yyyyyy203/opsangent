@@ -20,7 +20,8 @@
     "web:server": "pnpm build && node apps/agent-server/index.mjs",
     "web:dev": "pnpm --dir apps/agent-web dev",
     "web:build": "pnpm --dir apps/agent-web build",
-    "web:typecheck": "pnpm --dir apps/agent-web typecheck"
+    "web:typecheck": "pnpm --dir apps/agent-web typecheck",
+    "e2e": "pnpm build && pnpm web:build && playwright test"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -32,6 +33,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.35.0",
+    "@playwright/test": "1.55.0",
     "@types/better-sqlite3": "7.6.13",
     "@types/node": "^20.19.14",
     "eslint": "^9.35.0",

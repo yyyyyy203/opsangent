@@ -35,6 +35,7 @@ import {
   legacyToolProgressFromChunk,
   legacyToolStartedPayload,
 } from '../event/v1-payloads.js';
+import { visibilityForV2Event } from '../event/v2/visibility.js';
 
 export interface ExecutionPipelineOptions {
   actionMode: 'dry_run' | 'execute';
@@ -530,7 +531,7 @@ export class ToolExecutionPipeline {
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       correlationId: this.v2Events.correlationId(context.runId),
-      visibility: 'audit',
+      visibility: visibilityForV2Event(type),
       durability: type === 'TOOL_OUTPUT_DELTA' ? 'transient' : 'durable',
       stepId,
       ...(toolCallId === undefined ? {} : { toolCallId }),

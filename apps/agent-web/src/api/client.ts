@@ -51,7 +51,7 @@ export class ApiClient {
 
   public constructor(options: ApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/u, '');
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = options.fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
     this.eventSourceFactory = options.eventSourceFactory ?? ((url) => {
       if (typeof EventSource === 'undefined') throw new Error('EventSource is unavailable in this browser.');
       return new EventSource(url);

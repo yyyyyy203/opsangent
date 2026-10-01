@@ -33,10 +33,20 @@ export interface RunViewState {
   messages: readonly PublicMessageItem[];
   evidence: PublicEvidencePage['items'];
   confirmation: PublicConfirmation | null;
+  toolActivity: PublicToolActivity | null;
   status: 'idle' | 'loading' | 'ready' | 'error';
   connected: boolean;
+  /** A confirmation decision changes durable state but intentionally does not invoke resume. */
+  resumeRequired: boolean;
   pendingCommand: 'start' | 'resume' | 'confirmation' | null;
   notice: string | null;
+}
+
+export type PublicToolActivityStatus = 'running' | 'success' | 'failed' | 'aborted' | 'timeout' | 'skipped' | 'interrupted' | 'awaiting_external' | 'unknown';
+
+export interface PublicToolActivity {
+  toolName: string;
+  status: PublicToolActivityStatus;
 }
 
 export interface TimerPort {
@@ -60,7 +70,8 @@ export function mergeMessagePage(current: readonly PublicMessageItem[], page: Pu
 export class RunViewController {
   private state: RunViewState = {
     profiles: [], runs: [], runId: null, detail: null, messages: [], evidence: [], confirmation: null,
-    status: 'idle', connected: false, pendingCommand: null, notice: null,
+    toolActivity: null,
+    status: 'idle', connected: false, resumeRequired: false, pendingCommand: null, notice: null,
   };
   private readonly listeners = new Set<() => void>();
   private readonly timers: TimerPort;
@@ -94,7 +105,7 @@ export class RunViewController {
   public async openRun(runId: string, initialMessages: readonly PublicMessageItem[] = []): Promise<void> {
     this.closeRunResources();
     const generation = ++this.generation;
-    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], confirmation: null, status: 'loading', connected: false, notice: null });
+    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], confirmation: null, toolActivity: null, status: 'loading', connected: false, resumeRequired: false, notice: null });
     this.stream = this.client.openRunEvents(runId, undefined, (frame) => this.onEvent(generation, frame), (error) => this.onStreamError(generation, error));
     this.patch({ connected: true });
     this.calibrationTimer = this.timers.setInterval(() => { void this.refreshRun(generation); }, 2_000);
@@ -129,6 +140,10 @@ export class RunViewController {
     this.patch({ pendingCommand: 'confirmation', notice: null });
     try {
       await this.client.decideConfirmation(runId, input);
+      // Every decision mutates the checkpoint but the harness is paused at the
+      // HITL boundary. Approval, rejection, and expiry all require an explicit
+      // resume command before the next reasoning step may run.
+      this.patch({ resumeRequired: true });
       await this.refreshRun(this.generation);
     } catch (error) {
       this.patch({ notice: errorMessage(error) });
@@ -144,6 +159,7 @@ export class RunViewController {
     this.patch({ pendingCommand: 'resume', notice: null });
     try {
       await this.client.resumeRun(runId);
+      this.patch({ resumeRequired: false });
       await this.refreshRun(this.generation);
     } catch (error) {
       this.patch({ notice: errorMessage(error) });
@@ -161,6 +177,11 @@ export class RunViewController {
 
   private onEvent(generation: number, frame: PublicEventFrame): void {
     if (generation !== this.generation) return;
+    // Native EventSource retries the same connection after a transient error;
+    // the first accepted frame is the authoritative reconnect signal.
+    if (!this.state.connected) this.patch({ connected: true });
+    const activity = toolActivityForEvent(frame, this.state.toolActivity);
+    if (activity !== undefined) this.patch({ toolActivity: activity });
     if (frame.event === 'stream_error') {
       this.patch({ notice: '实时连接需要重新同步，正在刷新公开快照。' });
       this.closeStream();
@@ -234,6 +255,39 @@ export class RunViewController {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener();
   }
+}
+
+function toolActivityForEvent(frame: PublicEventFrame, previous: PublicToolActivity | null): PublicToolActivity | undefined {
+  const envelope = record(frame.data);
+  const data = record(envelope?.payload) ?? envelope;
+  if (frame.event === 'TOOL_STARTED') {
+    const toolName = stringValue(data?.toolName);
+    return toolName === undefined ? undefined : { toolName, status: 'running' };
+  }
+  if (frame.event === 'TOOL_RESULT') {
+    const result = record(data?.result);
+    const toolName = stringValue(result?.toolName) ?? previous?.toolName;
+    if (toolName === undefined) return undefined;
+    return { toolName, status: toolStatus(stringValue(result?.status)) };
+  }
+  if (frame.event === 'TOOL_FAILED') {
+    return previous === null ? undefined : { toolName: previous.toolName, status: 'failed' };
+  }
+  return undefined;
+}
+
+function toolStatus(value: string | undefined): PublicToolActivityStatus {
+  return value === 'success' || value === 'failed' || value === 'aborted' || value === 'timeout'
+    || value === 'skipped' || value === 'interrupted' || value === 'awaiting_external'
+    ? value : 'unknown';
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
 const defaultTimers: TimerPort = {

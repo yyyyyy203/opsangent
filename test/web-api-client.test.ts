@@ -42,4 +42,20 @@ describe('browser API client', () => {
     })).rejects.toEqual(expect.objectContaining({ code: 'REVISION_CONFLICT', status: 409 }));
     expect(calls).toBe(1);
   });
+
+  it('binds the default browser fetch to the global object', async () => {
+    const originalFetch = globalThis.fetch;
+    let invokedWithGlobal = false;
+    globalThis.fetch = function (this: unknown): Promise<Response> {
+      if (this !== globalThis) return Promise.reject(new Error('fetch receiver was not globalThis'));
+      invokedWithGlobal = true;
+      return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
+    };
+    try {
+      await new ApiClient({ baseUrl: 'http://127.0.0.1:4100' }).listProfiles();
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    expect(invokedWithGlobal).toBe(true);
+  });
 });

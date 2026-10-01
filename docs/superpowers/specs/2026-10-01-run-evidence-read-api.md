@@ -35,6 +35,12 @@ SQLite 查询 Evidence 列表时只选择摘要列，不选择 `evidence_records
 - 摘要字符串和 JSON 递归执行长度、深度、数组数量和敏感字段限制；Token、Cookie、密码、storage key、内部地址被过滤或替换。
 - HTTP 默认继续监听 loopback。部署到远程地址时必须配置 `allowedOrigins` 并在宿主层增加认证授权；未配置查询服务时查询接口返回 503。
 
+## Agent Web 实现链接与兼容说明
+
+当前本地工作台的组装入口是 `src/bootstrap/agent-web-runtime.ts`，浏览器代码位于 `apps/agent-web/`，本地操作说明见 `docs/guides/agent-web-local.md`。页面只消费本文定义的公开读模型和命令接口；它不直接导入 Node 运行时，不读取 API Key，也不把 SSE delta 当作消息正文追加。
+
+HTTP/SSE 增量保持本文既有接口兼容：`snapshots=none` 只关闭兼容快照帧，不改变 Public V2 事件；安全的工具生命周期状态（包括拒绝后的终态结果）可进入 Public V2 SSE，但工具输出正文仍由投影器移除；确认仍通过显式 POST，并携带 `toolCallId` 与 `expectedRevision`；任何确认结果都不会隐式调用 resume。当前宿主的 Run 协调和不透明消息 cursor 是单进程本地实现，不等同于公网认证、分布式锁或跨进程 cursor。
+
 ## 验收
 
 - 内存与 SQLite 查询都覆盖分页、同时间戳稳定游标、重启恢复和跨 Run 隔离；内存实现不得为一个公开页面加载全量 evidence。

@@ -3,6 +3,7 @@ import { CheckpointConflictError, checkpointChecksum } from '../contracts/index.
 import type { AgentMessage } from '../contracts/message.js';
 import type { Toolkit } from '../tool/toolkit.js';
 import { toolInputDigest } from '../tool/schema.js';
+import { visibilityForV2Event } from '../event/v2/visibility.js';
 
 export type HitlDecisionOutcome = 'approved' | 'rejected' | 'expired';
 
@@ -253,7 +254,7 @@ export class HitlService {
       ...(context.replyId === undefined ? {} : { replyId: context.replyId }),
       ...(context.streamId === undefined ? {} : { streamId: context.streamId }),
       correlationId: this.v2Events.correlationId(context.runId),
-      visibility: 'audit',
+      visibility: visibilityForV2Event(type),
       durability: 'durable',
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
