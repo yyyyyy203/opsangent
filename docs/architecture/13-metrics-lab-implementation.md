@@ -42,6 +42,8 @@ Prometheus 使用 prom/prometheus:v3.5.0，HTTP 仅映射到 127.0.0.1:19090；�
 
 2026-09-09：默认质量门 `pnpm lint`、`pnpm typecheck`、`pnpm test`、`pnpm build` 全部通过；全量测试为 44 个测试文件通过、1 个真实 Prometheus 测试文件按默认配置跳过，222 项测试通过、1 项跳过。默认验证未连接真实 Prometheus，真实后端验收需显式设置 `AGENTOPS_REAL_PROMETHEUS=1` 并具备 Docker；未连接真实业务系统或真实模型。
 
+2026-10-02：完成 Agent Web 增量的默认质量门复验：`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 通过；`pnpm test` 为 112 个测试文件通过、2 个真实 Prometheus opt-in 文件跳过，613 项测试通过、3 项跳过；`pnpm e2e` 的固定工具项目 4/4 通过。`pnpm lint` 已排除本增量新增的 E2E fixture 脚本边界问题，但仍受未被本增量修改的 `src/application/create-runtime.ts:322` `@typescript-eslint/unbound-method` 阻断。真实 Prometheus Web 验收未运行，因为 `127.0.0.1:19090` 无监听服务；因此本次结果不宣称真实 Prometheus Web 链路已通过，也不宣称已接入业务目标系统。
+
 ## 下一步
 
 MCP 服务、Manifest Tool、原文保存与 Harness 取证联调已在下一增量完成，见第 14 篇；独立管理 API、统一 Metrics Lab 启动入口、持久化 EvidenceStore/Checkpoint、共享 child Run 和 Agent Web simulation 组装均已完成。真实模型烟测、业务目标系统 Profile 和更多遥测后端仍待独立规格与验收。

@@ -82,3 +82,12 @@ pnpm e2e
 ```
 
 fixture 不代表真实模型、Prometheus 或 ELK 已接通。真实数据源烟测必须另行配置并明确记录未验证项；当前 `D:\xfg\group-buy-market` 仍按只读目标处理。
+
+## 当前验证状态（2026-10-02）
+
+- `pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`：通过。
+- `pnpm test`：112 个测试文件通过、2 个显式 opt-in 真实 Prometheus 文件跳过；613 个测试通过、3 个跳过。
+- `pnpm e2e`：固定工具项目 4/4 通过；默认流程未连接 Docker、Prometheus 或外部凭据。
+- `pnpm lint`：新增的真实指标 E2E fixture 已纳入脚本忽略边界；当前仍有一个未被本增量修改的既有错误：`src/application/create-runtime.ts:322` 的 `@typescript-eslint/unbound-method`。
+- 真实 Prometheus Web 验收尚未运行：`127.0.0.1:19090` 当前没有监听服务。具备本地 Prometheus 后，显式执行 `AGENTOPS_REAL_PROMETHEUS_WEB=1` 的 Vitest 与 Playwright 命令，并单独记录结果。
+- 本次实现仍只验证 `simulation` Profile；没有连接 `D:\xfg\group-buy-market`、生产 Prometheus、真实模型或 ELK。
