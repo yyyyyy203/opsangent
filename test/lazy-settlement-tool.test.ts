@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import type { Clock, Tool, ToolCallOptions, ToolResponse, ToolResponseChunk } from '../src/contracts/index.js';
 import { DefaultEvidenceRecorder } from '../src/application/evidence-recorder.js';
 import { createLazySettlementEvidenceTool } from '../src/bootstrap/lazy-settlement-tool.js';
+import { HttpMcpConnection } from '../src/infrastructure/mcp/http-connection.js';
 import { startSettlementMcpServer } from '../src/infrastructure/mcp/settlement-server.js';
 import type { SettlementSnapshot } from '../src/infrastructure/prometheus/settlement-source.js';
 import { ResilientExecutor, SourceCircuitBreaker } from '../src/mcp/resilience.js';
+import { settlementInput, settlementInputSchema, settlementRemoteName } from '../src/mcp/settlement-protocol.js';
 import { InMemoryEvidenceStore } from '../src/storage/in-memory-evidence-store.js';
 
 const snapshot: SettlementSnapshot = {
@@ -56,7 +58,10 @@ describe('lazy settlement evidence tool', () => {
     expect(lazy.tool.name).toBe('metrics.settlement');
     expect(lazy.tool.kind).toBe('evidence');
     expect(lazy.tool.source).toBe('mcp');
-    expect(lazy.tool.inputSchema).toMatchObject({ _def: { typeName: 'ZodObject' } });
+    expect(lazy.tool.inputSchema).toBe(settlementInput);
+    expect(settlementInput.safeParse({ service: 'checkout' }).success).toBe(true);
+    expect(settlementInput.safeParse({ service: 'checkout', extra: 'denied' }).success).toBe(false);
+    expect(settlementInput.safeParse({ service: 'other' }).success).toBe(false);
     expect(fetchSpy).not.toHaveBeenCalled();
     await lazy.close();
     fetchSpy.mockRestore();
@@ -157,9 +162,105 @@ describe('lazy settlement evidence tool', () => {
     }
   });
 
+  it.each([
+    { name: 'missing remote tool', descriptors: [] },
+    { name: 'schema-mismatched remote tool', descriptors: [{ name: settlementRemoteName, inputSchema: { type: 'object' } }] },
+  ])('$name returns a safe protocol error without widening the local schema', async ({ descriptors }) => {
+    const connect = vi.spyOn(HttpMcpConnection.prototype, 'connect').mockResolvedValue(undefined);
+    const listTools = vi.spyOn(HttpMcpConnection.prototype, 'listTools').mockResolvedValue(descriptors);
+    const close = vi.spyOn(HttpMcpConnection.prototype, 'close').mockResolvedValue(undefined);
+    const lazy = createLazySettlementEvidenceTool({
+      mcpUrl: 'http://metrics.example.test/mcp',
+      recorder: new DefaultEvidenceRecorder({ evidence: new InMemoryEvidenceStore() }),
+      executor: executor(),
+      clock,
+    });
+    try {
+      await expect(invoke(lazy.tool, {
+        runId: 'run-1', stepId: 'step-1', toolCallId: 'call-1', signal: new AbortController().signal, mode: 'dry_run',
+      })).rejects.toMatchObject({ code: 'MCP_PROTOCOL_ERROR' });
+      expect(lazy.tool.inputSchema).toBe(settlementInput);
+      expect(settlementInput.safeParse({ service: 'checkout', extra: 'denied' }).success).toBe(false);
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(listTools).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      await lazy.close();
+      connect.mockRestore();
+      listTools.mockRestore();
+      close.mockRestore();
+    }
+  });
+
+  it('propagates a hanging manifest lookup as MCP_TIMEOUT', async () => {
+    const connect = vi.spyOn(HttpMcpConnection.prototype, 'connect').mockResolvedValue(undefined);
+    const listTools = vi.spyOn(HttpMcpConnection.prototype, 'listTools').mockImplementation(() => new Promise(() => {}));
+    const close = vi.spyOn(HttpMcpConnection.prototype, 'close').mockResolvedValue(undefined);
+    const lazy = createLazySettlementEvidenceTool({
+      mcpUrl: 'http://metrics.example.test/mcp',
+      recorder: new DefaultEvidenceRecorder({ evidence: new InMemoryEvidenceStore() }),
+      executor: new ResilientExecutor(new SourceCircuitBreaker({ now: () => clock.now().getTime() }), {
+        maxRetries: 0, timeoutMs: 10, now: () => clock.now().getTime(), sleep: () => Promise.resolve(),
+      }),
+      clock,
+    });
+    try {
+      await expect(invoke(lazy.tool, {
+        runId: 'run-1', stepId: 'step-1', toolCallId: 'call-1', signal: new AbortController().signal, mode: 'dry_run',
+      })).rejects.toMatchObject({ code: 'MCP_TIMEOUT' });
+      expect(close).toHaveBeenCalledTimes(1);
+    } finally {
+      await lazy.close();
+      connect.mockRestore();
+      listTools.mockRestore();
+      close.mockRestore();
+    }
+  });
+
+  it('does not return a bound tool when close races an in-flight connect', async () => {
+    let started!: () => void;
+    let release!: () => void;
+    const connectStarted = new Promise<void>((resolve) => { started = resolve; });
+    const connect = vi.spyOn(HttpMcpConnection.prototype, 'connect').mockImplementation(async (signal) => {
+      started();
+      await new Promise<void>((resolve, reject) => {
+        release = resolve;
+        signal.addEventListener('abort', () => reject(new Error('connect aborted')), { once: true });
+      });
+    });
+    const listTools = vi.spyOn(HttpMcpConnection.prototype, 'listTools').mockResolvedValue([{
+      name: settlementRemoteName, inputSchema: settlementInputSchema,
+    }]);
+    const close = vi.spyOn(HttpMcpConnection.prototype, 'close').mockResolvedValue(undefined);
+    const lazy = createLazySettlementEvidenceTool({
+      mcpUrl: 'http://metrics.example.test/mcp',
+      recorder: new DefaultEvidenceRecorder({ evidence: new InMemoryEvidenceStore() }),
+      executor: executor(),
+      clock,
+    });
+    const call = invoke(lazy.tool, {
+      runId: 'run-1', stepId: 'step-1', toolCallId: 'call-1', signal: new AbortController().signal, mode: 'dry_run',
+    });
+    try {
+      await connectStarted;
+      const closing = lazy.close();
+      release();
+      await expect(call).rejects.toMatchObject({ code: 'ABORTED' });
+      await closing;
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(listTools).not.toHaveBeenCalled();
+    } finally {
+      await lazy.close();
+      connect.mockRestore();
+      listTools.mockRestore();
+      close.mockRestore();
+    }
+  });
+
   it('closes the connection once through direct and registered shutdown cleanup', async () => {
     const cleanup: Array<() => void | Promise<void>> = [];
     const f = await fixture();
+    const close = vi.spyOn(HttpMcpConnection.prototype, 'close').mockResolvedValue(undefined);
     const lazy = createLazySettlementEvidenceTool({
       mcpUrl: f.server.url,
       recorder: new DefaultEvidenceRecorder({ evidence: f.evidence }),
@@ -171,7 +272,9 @@ describe('lazy settlement evidence tool', () => {
       await invoke(lazy.tool, { runId: 'run-1', stepId: 'step-1', toolCallId: 'call-1', signal: new AbortController().signal, mode: 'dry_run' });
       await Promise.all([lazy.close(), lazy.close(), ...cleanup.map((callback) => callback())]);
       expect(cleanup).toHaveLength(1);
+      expect(close).toHaveBeenCalledTimes(1);
     } finally {
+      close.mockRestore();
       await f.lazy.close();
       await f.server.close();
     }

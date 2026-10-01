@@ -22,11 +22,17 @@ export function createLazySettlementEvidenceTool(options: LazySettlementToolOpti
   let binding: Promise<Tool> | undefined;
   let closed = false;
   let closePromise: Promise<void> | undefined;
+  const lifecycleController = new AbortController();
 
   const close = async (): Promise<void> => {
     if (closePromise !== undefined) return closePromise;
     closed = true;
-    closePromise = connection.close();
+    lifecycleController.abort();
+    const pendingBinding = binding;
+    closePromise = (async () => {
+      await pendingBinding?.catch(() => undefined);
+      await connection.close();
+    })();
     await closePromise;
   };
 
@@ -35,16 +41,17 @@ export function createLazySettlementEvidenceTool(options: LazySettlementToolOpti
     if (bound !== undefined) return Promise.resolve(bound);
     if (binding !== undefined) return binding;
 
-    const signal = callOptions.signal;
+    const signal = AbortSignal.any([callOptions.signal, lifecycleController.signal]);
     const deadline = callOptions.deadline ?? options.clock.now().getTime() + 30_000;
     const attemptBudget = callOptions.networkAttemptBudget;
     const attempt = (async (): Promise<Tool> => {
-      await options.executor.execute((attemptSignal) => connection.connect(attemptSignal), {
-        signal,
-        deadline,
-        ...(attemptBudget === undefined ? {} : { attemptBudget }),
-      });
       try {
+        await options.executor.execute((attemptSignal) => connection.connect(attemptSignal), {
+          signal,
+          deadline,
+          ...(attemptBudget === undefined ? {} : { attemptBudget }),
+        });
+        if (closed) throw new SourceFailure('ABORTED');
         const candidate = await bindSettlementEvidenceTool({
           connection,
           recorder: options.recorder,
@@ -54,13 +61,13 @@ export function createLazySettlementEvidenceTool(options: LazySettlementToolOpti
           deadline,
           ...(attemptBudget === undefined ? {} : { networkAttemptBudget: attemptBudget }),
         });
-        if (candidate.name !== 'metrics.settlement' || candidate.kind !== 'evidence' || candidate.source !== 'mcp') {
+        if (closed || candidate.name !== 'metrics.settlement' || candidate.kind !== 'evidence' || candidate.source !== 'mcp') {
           throw new SourceFailure('MCP_PROTOCOL_ERROR');
         }
         bound = candidate;
         return candidate;
       } catch (error) {
-        await connection.close().catch(() => undefined);
+        if (!closed) await connection.close().catch(() => undefined);
         throw safeFailure(error);
       }
     })();
