@@ -49,6 +49,7 @@ export async function bindSettlementEvidenceTool(options: {
   }], {
     signal: options.signal,
     executor: options.executor,
+    now,
     ...(options.deadline === undefined ? {} : { deadline: options.deadline }),
     ...(options.networkAttemptBudget === undefined ? {} : { attemptBudget: options.networkAttemptBudget }),
   });

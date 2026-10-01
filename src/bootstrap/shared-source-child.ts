@@ -1,4 +1,4 @@
-import type { ChatModel, CheckpointStore, EvidenceStore, Tool } from '../contracts/index.js';
+import type { ChatModel, CheckpointStore, Clock, EvidenceStore, IdGenerator, Tool } from '../contracts/index.js';
 import type { EvidenceRecorder } from '../application/evidence-recorder.js';
 import type { SharedRuntimeEventPorts } from '../application/runtime-ports.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
@@ -11,6 +11,9 @@ export interface SharedSourceChildFactoryOptions {
   evidence: EvidenceStore;
   evidenceRecorder: EvidenceRecorder;
   sharedEvents: SharedRuntimeEventPorts;
+  /** Keep child deadlines and event/message identities on the parent runtime clock. */
+  clock?: Clock;
+  ids?: IdGenerator;
 }
 
 export function createSharedSourceChildAgentFactory(
@@ -29,6 +32,8 @@ export function createSharedSourceChildAgentFactory(
         evidenceRecorder: options.evidenceRecorder,
         eventMessageStore: options.sharedEvents.store,
         sharedEvents: options.sharedEvents,
+        ...(options.clock === undefined ? {} : { clock: options.clock }),
+        ...(options.ids === undefined ? {} : { ids: options.ids }),
         includeExternalBash: false,
         actionMode: 'dry_run',
       });

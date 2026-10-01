@@ -41,6 +41,8 @@ export function createMetricsWebSource(
     evidence: ports.evidence,
     evidenceRecorder: ports.evidenceRecorder,
     sharedEvents: ports.sharedEvents,
+    clock: ports.clock,
+    ids: ports.ids,
   });
   const metricsSubagent = createMetricsSubagentTool({
     profile: settlementMetricsLabProfile,
