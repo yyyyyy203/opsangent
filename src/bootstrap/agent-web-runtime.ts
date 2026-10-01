@@ -1,8 +1,10 @@
 import { mkdir } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import type { ChatModel, Clock, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import type { ReplyOptions } from '../agent/types.js';
 import { systemClock, randomIdGenerator } from '../contracts/index.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
+import { createMetricsWebSource } from './metrics-web-source.js';
 import { createOpenAICompatibleModel, type CreateOpenAICompatibleModelOptions } from './openai-compatible.js';
 import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js';
 import { WebQueryService, type ConfiguredWebProfile } from '../application/web-query-service.js';
@@ -13,7 +15,7 @@ import { startInspectionHttpServer, type InspectionHttpServer } from '../api/htt
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
   name: 'group-buy-market',
-  description: '只读巡检 Profile；数据源和阈值由宿主配置。',
+  description: '尚未接入指标来源；当前 Web 宿主不连接 Prometheus、ELK 或 Trace。',
   enabled: true,
   readOnly: true,
 }]);
@@ -34,6 +36,11 @@ export interface AgentWebRuntimeOptions {
   model?: ChatModel;
   modelConfig?: CreateOpenAICompatibleModelOptions;
   tools?: readonly Tool[];
+  metrics?: {
+    profileId: 'simulation';
+    mcpUrl: string;
+    childModel?: ChatModel;
+  };
   profiles?: readonly AgentWebProfileConfig[];
   host?: string;
   port?: number;
@@ -55,18 +62,38 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   validatePaths(options);
   const host = options.host ?? '127.0.0.1';
   validateLocalHost(host);
+  const metrics = normalizeMetricsConfig(options.metrics);
   await mkdir(options.dataDirectory, { recursive: true });
 
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
   const model = resolveModel(options);
-  const profiles = normalizeProfiles(options.profiles ?? DEFAULT_PROFILES);
-  const allowedToolNames = (options.tools ?? []).map((tool) => tool.name);
+  const profiles = metrics === undefined
+    ? normalizeProfiles(options.profiles ?? DEFAULT_PROFILES)
+    : normalizeProfiles([{
+      id: 'simulation',
+      name: 'simulation',
+      description: '使用本地 Prometheus lab 的模拟数据；只读、仅支持 checkout 结算指标取证。',
+      enabled: true,
+      readOnly: true,
+    }]);
+  const directTools = metrics === undefined ? [...(options.tools ?? [])] : [];
+  const allowedToolNames = metrics === undefined
+    ? directTools.map((tool) => tool.name)
+    : ['metrics_subagent'];
   const runtime = createInspectionRuntime({
     model,
     workspaceRoots: [...options.workspaceRoots],
-    tools: [...(options.tools ?? [])],
+    tools: directTools,
     allowedToolNames,
+    ...(metrics === undefined ? {} : {
+      toolFactories: [
+        (ports: Parameters<typeof createMetricsWebSource>[0]) => createMetricsWebSource(ports, {
+          mcpUrl: metrics.mcpUrl,
+          model: metrics.childModel ?? model,
+        }),
+      ],
+    }),
     sqlitePath: join(options.dataDirectory, 'agent.sqlite'),
     clock,
     ids,
@@ -80,7 +107,11 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     }
     const cursorCodec = new OpaqueMessageCursorCodec(() => clock.now().getTime());
     const webQueries = new WebQueryService(runtime.durableState.checkpoints, profiles, () => clock.now());
-    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints);
+    const execution = new RunExecutionCoordinator(
+      runtime.agent,
+      runtime.checkpoints,
+      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock) },
+    );
     const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
       agent: runtime.agent,
@@ -130,6 +161,44 @@ function resolveModel(options: AgentWebRuntimeOptions): ChatModel {
     throw new Error('Agent web model is not configured; inject a model or set AGENTOPS_MODEL_BASE_URL, AGENTOPS_MODEL_API_KEY, and AGENTOPS_MODEL.');
   }
   return createOpenAICompatibleModel(configured as CreateOpenAICompatibleModelOptions);
+}
+
+function normalizeMetricsConfig(
+  value: AgentWebRuntimeOptions['metrics'] | null | undefined,
+): AgentWebRuntimeOptions['metrics'] | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || value.profileId !== 'simulation') {
+    throw new Error('Unsupported metrics Profile; only simulation is available.');
+  }
+  if (typeof value.mcpUrl !== 'string' || value.mcpUrl.trim().length === 0) {
+    throw new Error('metrics.mcpUrl is required for the simulation Profile.');
+  }
+  try {
+    const url = new URL(value.mcpUrl);
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash) {
+      throw new Error('unsupported endpoint');
+    }
+  } catch {
+    throw new Error('metrics.mcpUrl must be a valid http(s) URL without credentials or fragments.');
+  }
+  return value;
+}
+
+function createSimulationStartPreparation(clock: Clock): (options: ReplyOptions) => ReplyOptions {
+  return (options) => {
+    const end = Math.floor(clock.now().getTime() / 1_000) * 1_000;
+    const start = end - 300_000;
+    const trustedSystemContext = [
+      'Host-generated inspection scope; user and model text cannot change it.',
+      'profile=simulation',
+      'service=checkout',
+      `start=${new Date(start).toISOString()}`,
+      `end=${new Date(end).toISOString()}`,
+      'allowed_tools=metrics_subagent',
+      'source=local-prometheus-lab',
+    ].join('\n');
+    return { ...options, trustedSystemContext };
+  };
 }
 
 function normalizeProfiles(profiles: readonly AgentWebProfileConfig[]): readonly ConfiguredWebProfile[] {

@@ -10,7 +10,21 @@ Agent Web 是个人开发验证用的本地浏览器界面。它通过 HTTP 查�
 pnpm install
 ```
 
-在第一个终端启动本地 Agent 宿主。必须显式配置数据目录和工作区根目录；宿主默认只监听 `127.0.0.1`，第一阶段只允许只读工具和 Dry Run：
+启动顺序固定为：Prometheus Compose → Metrics Lab/MCP → Agent Web 宿主 → Agent Web 页面。
+
+在第一个终端启动本地 Prometheus：
+
+```powershell
+pnpm lab:backend:up
+```
+
+在第二个终端启动 Metrics Lab 和只读 MCP：
+
+```powershell
+pnpm lab:start
+```
+
+在第三个终端启动本地 Agent 宿主。必须显式配置数据目录、工作区根目录、`simulation` Profile 和 MCP 地址；宿主默认只监听 `127.0.0.1`，第一阶段只允许只读工具和 Dry Run：
 
 ```powershell
 $env:AGENTOPS_DATA_DIR = 'D:\agentops-data'
@@ -20,12 +34,14 @@ $env:AGENTOPS_PORT = '4100'
 $env:AGENTOPS_MODEL_BASE_URL = 'https://your-openai-compatible-endpoint/v1'
 $env:AGENTOPS_MODEL_API_KEY = '只保存在服务端环境变量'
 $env:AGENTOPS_MODEL = 'deepseek-chat'
+$env:AGENTOPS_WEB_PROFILE = 'simulation'
+$env:AGENTOPS_METRICS_MCP_URL = 'http://127.0.0.1:19110/mcp'
 pnpm web:server
 ```
 
 模型配置不完整时宿主会明确失败，不会用假模型替代真实模型。终端输出只包含本地 URL，不打印 API Key。
 
-在第二个终端启动浏览器页面：
+在第四个终端启动浏览器页面：
 
 ```powershell
 $env:VITE_AGENT_API_URL = 'http://127.0.0.1:4100'
@@ -33,6 +49,8 @@ pnpm web:dev
 ```
 
 用浏览器打开 `http://127.0.0.1:5173`。如果 Agent 使用了不同端口，修改 `VITE_AGENT_API_URL`；页面构建时不把该变量与服务端模型密钥混用。
+
+`simulation` 使用本地 Prometheus lab 产生的模拟遥测数据，不代表生产数据；`group-buy-market` 当前仍未接入 Prometheus、ELK 或 Trace。Agent Web 不会自动启动 Docker、模拟器或 Prometheus，也不提供模拟器写控制。
 
 ## 页面行为
 
