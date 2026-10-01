@@ -4,6 +4,8 @@ import type { AgentMessage } from '../contracts/message.js';
 import type { Toolkit } from '../tool/toolkit.js';
 import { toolInputDigest } from '../tool/schema.js';
 
+export type HitlDecisionOutcome = 'approved' | 'rejected' | 'expired';
+
 export class HitlService {
   public constructor(
     private readonly checkpoints: CheckpointStore,
@@ -15,8 +17,17 @@ export class HitlService {
   ) {}
 
   public async decide(decision: ConfirmationDecision): Promise<void> {
+    await this.decideWithResult(decision);
+  }
+
+  /** Applies a decision and reports expiration explicitly for API callers. */
+  public async decideWithResult(decision: ConfirmationDecision): Promise<HitlDecisionOutcome> {
     const stored = await this.loadCheckpoint(decision.runId);
     if (stored === null) throw new Error(`Checkpoint not found: ${decision.runId}`);
+    if (decision.expectedRevision !== undefined
+      && stored.revision !== decision.expectedRevision) {
+      throw new CheckpointConflictError(decision.runId, decision.expectedRevision, stored.revision ?? null);
+    }
     const { context } = stored;
     const interrupt = context.pendingInterrupt;
     if (context.status !== 'awaiting_confirmation' || interrupt === undefined) {
@@ -65,7 +76,7 @@ export class HitlService {
         this.createPendingV2('TOOL_RESULT', context, { result: replacement, durationMs: 0, evidenceIds: [] }, decision.toolCallId),
       ];
       await this.persistTransition(context, stored.revision, events);
-      return;
+      return 'expired';
     }
 
     if (decision.confirmed) {
@@ -108,6 +119,7 @@ export class HitlService {
       }
     }
     await this.persistTransition(context, stored.revision, events);
+    return decision.confirmed ? 'approved' : 'rejected';
   }
 
   private replaceInterruptedResult(

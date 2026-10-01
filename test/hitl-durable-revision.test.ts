@@ -22,10 +22,12 @@ describe('durable HITL revision control', () => {
     try {
       const run = await runtime.agent.reply({ runId: 'run-confirm', message: 'inspect', profileId: 'group-buy-market' });
       expect(run.status).toBe('awaiting_confirmation');
+      const pending = await runtime.durableState?.checkpoints.load(run.runId);
+      if (pending === undefined || pending === null) throw new Error('Expected a durable checkpoint revision.');
 
       const outcomes = await Promise.allSettled([
-        runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: true, actor: 'approved', decidedAt: timestamp }),
-        runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: false, actor: 'rejected', decidedAt: timestamp, reason: 'do not run' }),
+        runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: true, actor: 'approved', decidedAt: timestamp, expectedRevision: pending.revision }),
+        runtime.hitl.decide({ runId: run.runId, toolCallId: 'bash-1', confirmed: false, actor: 'rejected', decidedAt: timestamp, reason: 'do not run', expectedRevision: pending.revision }),
       ]);
       const checkpoint = await runtime.durableState?.checkpoints.load(run.runId);
 

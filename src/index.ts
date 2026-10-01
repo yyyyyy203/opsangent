@@ -5,6 +5,8 @@ export * from './api/sse-encoder.js';
 export * from './agent/types.js';
 export * from './agent/loop-detection/index.js';
 export * from './application/hitl-service.js';
+export * from './application/run-execution-coordinator.js';
+export * from './application/web-confirmation-service.js';
 export * from './application/external-tool-result-service.js';
 export * from './application/create-runtime.js';
 export * from './application/streaming-evidence-recorder.js';

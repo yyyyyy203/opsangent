@@ -6,6 +6,8 @@ import type { RunStatus } from '../contracts/context.js';
 import type { PublicConfirmation, PublicProfile, WebMessageQueries } from '../contracts/web-read-model.js';
 import { encodeSseFrame } from './sse-encoder.js';
 import { EventStreamCursorError, type EventStreamService } from './event-stream-service.js';
+import type { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
+import type { WebConfirmationDecisionInput, WebConfirmationService } from '../application/web-confirmation-service.js';
 
 export interface InspectionHttpServerOptions {
   agent: DiagnosisAgent;
@@ -16,6 +18,8 @@ export interface InspectionHttpServerOptions {
   queries?: InspectionQueryService;
   messageQueries?: WebMessageQueries;
   webQueries?: { listProfiles(): readonly PublicProfile[]; getConfirmation(runId: string): Promise<PublicConfirmation | null> };
+  execution?: RunExecutionCoordinator;
+  confirmation?: Pick<WebConfirmationService, 'decide'>;
   allowedOrigins?: readonly string[];
   heartbeatTimer?: {
     set(callback: () => void, ms: number): unknown;
@@ -45,7 +49,7 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
       const status = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
       const clientVisible = status >= 400 && status < 500;
       writeJson(response, status, {
-        error: status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
+        error: errorCode(error, status, clientVisible),
         message: clientVisible ? (error instanceof Error ? error.message : 'Invalid request.') : status === 503 ? 'Run query service is unavailable.' : 'Internal server error.',
       });
     });
@@ -98,7 +102,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     const body = await readJson(request, maxBodyBytes);
     const run = toReplyOptions(body);
     const runId = run.runId ?? randomUUID();
-    void consume(options.agent.replyStream({ ...run, runId }));
+    const requestOptions = { ...run, runId };
+    if (options.execution === undefined) void consume(options.agent.replyStream(requestOptions));
+    else void options.execution.start(requestOptions).catch(() => undefined);
     writeJson(response, 202, { runId, status: 'started', eventsUrl: `/runs/${encodeURIComponent(runId)}/events` });
     return;
   }
@@ -106,7 +112,8 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   const resumeMatch = method === 'POST' ? /^\/runs\/([^/]+)\/resume$/u.exec(parsed.pathname) : null;
   if (resumeMatch?.[1] !== undefined) {
     const runId = decodePath(resumeMatch[1]);
-    void consume(options.agent.resumeStream(runId));
+    if (options.execution === undefined) void consume(options.agent.resumeStream(runId));
+    else void options.execution.resume(runId).catch(() => undefined);
     writeJson(response, 202, { runId, status: 'resuming', eventsUrl: `/runs/${encodeURIComponent(runId)}/events` });
     return;
   }
@@ -139,6 +146,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       if (error instanceof RangeError) throw Object.assign(new Error(error.message), { statusCode: 400 });
       throw error;
     }
+    return;
+  }
+
+  const confirmationCommandMatch = method === 'POST' ? /^\/runs\/([^/]+)\/confirmation$/u.exec(parsed.pathname) : null;
+  if (confirmationCommandMatch?.[1] !== undefined) {
+    if (options.confirmation === undefined) throw unavailable();
+    const body = await readJson(request, maxBodyBytes);
+    const result = await options.confirmation.decide(decodePath(confirmationCommandMatch[1]), toConfirmationInput(body));
+    writeJson(response, 200, result);
     return;
   }
 
@@ -328,10 +344,36 @@ function toReplyOptions(body: Record<string, unknown>): ReplyOptions {
   return result;
 }
 
+function toConfirmationInput(body: Record<string, unknown>): WebConfirmationDecisionInput {
+  if (typeof body.toolCallId !== 'string' || body.toolCallId.length === 0) {
+    throw Object.assign(new Error('toolCallId is required.'), { statusCode: 400 });
+  }
+  if (typeof body.confirmed !== 'boolean') {
+    throw Object.assign(new Error('confirmed must be a boolean.'), { statusCode: 400 });
+  }
+  if (typeof body.expectedRevision !== 'number' || !Number.isSafeInteger(body.expectedRevision) || body.expectedRevision < 0) {
+    throw Object.assign(new Error('expectedRevision must be a non-negative integer.'), { statusCode: 400 });
+  }
+  if (body.reason !== undefined && (typeof body.reason !== 'string' || body.reason.length > 2_000)) {
+    throw Object.assign(new Error('reason must be a string no longer than 2000 characters.'), { statusCode: 400 });
+  }
+  return {
+    toolCallId: body.toolCallId,
+    confirmed: body.confirmed,
+    expectedRevision: body.expectedRevision,
+    ...(body.reason === undefined ? {} : { reason: body.reason }),
+  };
+}
+
 function writeJson(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   response.end(body);
+}
+
+function errorCode(error: unknown, status: number, clientVisible: boolean): string {
+  if (typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string') return error.code;
+  return status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED';
 }
 
 function decodePath(value: string): string {

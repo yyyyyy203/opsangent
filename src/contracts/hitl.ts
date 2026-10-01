@@ -14,4 +14,6 @@ export interface ConfirmationDecision {
   actor: string;
   reason?: string;
   decidedAt: string;
+  /** Optional CAS token used by web/API confirmation commands. */
+  expectedRevision?: number;
 }
