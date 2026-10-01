@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { AgentContext, Clock, StoredRunCheckpoint } from '../src/index.js';
 import { WebConfirmationService } from '../src/application/web-confirmation-service.js';
-import { HitlService } from '../src/application/hitl-service.js';
+import type { HitlService } from '../src/application/hitl-service.js';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { startInspectionHttpServer } from '../src/api/http-server.js';
@@ -28,24 +28,26 @@ describe('WebConfirmationService', () => {
     const before = stored(7);
     const after = stored(8, 'running');
     const checkpoints = { load: vi.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after), save: vi.fn() };
-    const hitl = { decideWithResult: vi.fn().mockResolvedValue('approved') } as unknown as HitlService;
+    const decideWithResult = vi.fn().mockResolvedValue('approved');
+    const hitl = { decideWithResult } as unknown as HitlService;
     const service = new WebConfirmationService(hitl, checkpoints, clock, 'browser-operator');
 
     await expect(service.decide('run-1', { toolCallId: 'call-1', confirmed: true, expectedRevision: 7 }))
       .resolves.toEqual({ outcome: 'approved', revision: 8 });
-    expect(hitl.decideWithResult).toHaveBeenCalledWith({
+    expect(decideWithResult).toHaveBeenCalledWith({
       runId: 'run-1', toolCallId: 'call-1', confirmed: true, expectedRevision: 7,
       actor: 'browser-operator', decidedAt: timestamp,
     });
   });
 
   it('rejects stale revisions before invoking the HITL mutation', async () => {
-    const hitl = { decideWithResult: vi.fn() } as unknown as HitlService;
+    const decideWithResult = vi.fn();
+    const hitl = { decideWithResult } as unknown as HitlService;
     const service = new WebConfirmationService(hitl, { load: vi.fn().mockResolvedValue(stored(8)), save: vi.fn() }, clock);
 
     await expect(service.decide('run-1', { toolCallId: 'call-1', confirmed: true, expectedRevision: 7 }))
       .rejects.toMatchObject({ code: 'REVISION_CONFLICT', statusCode: 409 });
-    expect(hitl.decideWithResult).not.toHaveBeenCalled();
+    expect(decideWithResult).not.toHaveBeenCalled();
   });
 
   it('preserves expired as a result state rather than reporting approval', async () => {

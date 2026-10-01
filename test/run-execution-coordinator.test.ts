@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentContext, CheckpointStore, DiagnosisRunResult, DiagnosisAgent, ReplyOptions } from '../src/index.js';
+import type { AgentContext, CheckpointStore, DiagnosisRunResult, DiagnosisAgent, ReplyOptions, AgentEvent } from '../src/index.js';
 import { RunExecutionCoordinator } from '../src/application/run-execution-coordinator.js';
 
 function result(runId: string, status: AgentContext['status'] = 'completed'): DiagnosisRunResult {
@@ -8,25 +8,22 @@ function result(runId: string, status: AgentContext['status'] = 'completed'): Di
 
 function checkpointStore(contexts: Map<string, AgentContext>): CheckpointStore {
   return {
-    load: vi.fn(async (runId: string) => {
+    load: vi.fn((runId: string) => {
       const context = contexts.get(runId);
-      return context === undefined ? null : structuredClone(context);
+      return Promise.resolve(context === undefined ? null : structuredClone(context));
     }),
-    save: vi.fn(async () => undefined),
-    hasExecuted: vi.fn(async () => false),
-    recordExecuted: vi.fn(async () => undefined),
+    save: vi.fn(() => Promise.resolve()),
+    hasExecuted: vi.fn(() => Promise.resolve(false)),
+    recordExecuted: vi.fn(() => Promise.resolve()),
   };
 }
 
 function fakeAgent(
-  onReply: (options: ReplyOptions) => AsyncGenerator<never, DiagnosisRunResult>,
-  onResume: (runId: string) => AsyncGenerator<never, DiagnosisRunResult>,
+  onReply: (options: ReplyOptions) => AsyncGenerator<AgentEvent, DiagnosisRunResult>,
+  onResume: (runId: string) => AsyncGenerator<AgentEvent, DiagnosisRunResult>,
 ): DiagnosisAgent {
   return {
-    reply: vi.fn(async (options) => {
-      const stream = onReply(options);
-      return (await stream.next()).value!;
-    }),
+    reply: vi.fn((options: ReplyOptions) => Promise.resolve(result(options.runId ?? 'reply'))),
     replyStream: vi.fn(onReply),
     resumeStream: vi.fn(onResume),
   };
@@ -38,8 +35,8 @@ describe('RunExecutionCoordinator', () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const calls: ReplyOptions[] = [];
     const agent = fakeAgent(
-      async function* (options) { calls.push(options); await gate; return result(options.runId!); },
-      async function* (runId) { return result(runId); },
+      async function* (options) { calls.push(options); await gate; yield* []; return result(options.runId!); },
+      async function* (runId) { await Promise.resolve(); yield* []; return result(runId); },
     );
     const coordinator = new RunExecutionCoordinator(agent, checkpointStore(new Map()));
     const options: ReplyOptions = { runId: 'run-1', message: 'inspect', profileId: 'group-buy-market' };
@@ -62,8 +59,8 @@ describe('RunExecutionCoordinator', () => {
     const contexts = new Map<string, AgentContext>([['paused', { status: 'paused' } as AgentContext]]);
     let resumeCalls = 0;
     const agent = fakeAgent(
-      async function* (options) { return result(options.runId!); },
-      async function* (runId) { resumeCalls += 1; await gate; return result(runId); },
+      async function* (options) { await Promise.resolve(); yield* []; return result(options.runId!); },
+      async function* (runId) { resumeCalls += 1; await gate; yield* []; return result(runId); },
     );
     const coordinator = new RunExecutionCoordinator(agent, checkpointStore(contexts));
 
@@ -84,8 +81,8 @@ describe('RunExecutionCoordinator', () => {
       ['done', { status: 'completed' } as AgentContext],
     ]);
     const agent = fakeAgent(
-      async function* (options) { return result(options.runId!); },
-      async function* (runId) { return result(runId); },
+      async function* (options) { await Promise.resolve(); yield* []; return result(options.runId!); },
+      async function* (runId) { await Promise.resolve(); yield* []; return result(runId); },
     );
     const coordinator = new RunExecutionCoordinator(agent, checkpointStore(contexts));
 

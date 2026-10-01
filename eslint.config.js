@@ -2,13 +2,13 @@ import js from '@eslint/js';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist/**', 'node_modules/**', 'eslint.config.js'] },
+  { ignores: ['dist/**', 'apps/agent-web/dist/**', 'apps/agent-server/**', 'node_modules/**', 'eslint.config.js'] },
   js.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   {
     languageOptions: {
       parserOptions: {
-        projectService: { allowDefaultProject: ['apps/metrics-lab/*.mjs'] },
+        projectService: { allowDefaultProject: ['apps/metrics-lab/*.mjs', 'apps/agent-server/*.mjs', 'apps/agent-web/vite.config.ts'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },

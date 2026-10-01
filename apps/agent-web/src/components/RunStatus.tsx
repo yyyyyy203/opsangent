@@ -1,0 +1,15 @@
+import type { PublicRunDetail } from '../api/types.js';
+import type { ReactElement } from 'react';
+
+export function RunStatus({ detail, connected, pending, onResume }: { detail: PublicRunDetail | null; connected: boolean; pending: boolean; onResume: () => void }): ReactElement {
+  return <section className="panel status-panel"><div className="panel-heading"><div><p className="eyebrow">RUN STATUS</p><h2>运行状态</h2></div>{connected && <span className="live-label">LIVE</span>}</div>
+    {detail === null ? <div className="list-empty">打开一个 Run 查看状态。</div> : <>
+      <div className="status-hero"><span className={`status-dot status-${detail.status}`} /><strong>{statusLabel(detail.status)}</strong><span>{detail.stage}</span></div>
+      <dl className="detail-list"><div><dt>Run ID</dt><dd><code>{detail.runId}</code></dd></div><div><dt>上下文版本</dt><dd>{detail.contextVersion}</dd></div><div><dt>证据数量</dt><dd>{detail.evidenceIds.length}</dd></div></dl>
+      {(detail.status === 'paused' || detail.status === 'awaiting_confirmation') && <button className="secondary-button full-width" onClick={onResume} disabled={pending}>{pending ? '恢复中…' : '显式恢复 Run'}</button>}
+      {detail.failure !== undefined && <div className="error-block"><strong>{detail.failure.code}</strong><p>{detail.failure.message}</p></div>}
+    </>}
+  </section>;
+}
+
+function statusLabel(status: string): string { return ({ running: '运行中', awaiting_confirmation: '等待确认', paused: '已暂停', completed: '已完成', failed: '失败', cancelled: '已取消' } as Record<string, string>)[status] ?? status; }

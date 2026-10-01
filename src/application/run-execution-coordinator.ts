@@ -71,14 +71,15 @@ export class RunExecutionCoordinator {
   private claim(runId: string, action: () => Promise<void>): Promise<void> {
     const current = this.active.get(runId);
     if (current !== undefined) return current;
-    let task!: Promise<void>;
-    task = (async () => {
+    const taskRef: { value?: Promise<void> } = {};
+    const task = (async () => {
       try {
         await action();
       } finally {
-        if (this.active.get(runId) === task) this.active.delete(runId);
+        if (this.active.get(runId) === taskRef.value) this.active.delete(runId);
       }
     })();
+    taskRef.value = task;
     this.active.set(runId, task);
     return task;
   }
