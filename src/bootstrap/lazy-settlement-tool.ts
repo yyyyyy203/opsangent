@@ -49,6 +49,7 @@ export function createLazySettlementEvidenceTool(options: LazySettlementToolOpti
         await options.executor.execute((attemptSignal) => connection.connect(attemptSignal), {
           signal,
           deadline,
+          now: () => options.clock.now().getTime(),
           ...(attemptBudget === undefined ? {} : { attemptBudget }),
         });
         if (closed) throw new SourceFailure('ABORTED');

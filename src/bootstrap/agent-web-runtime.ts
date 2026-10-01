@@ -136,6 +136,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
         if (closed) return;
         closed = true;
         try {
+          await execution.close();
           await server.close();
         } finally {
           await runtime.close();

@@ -20,6 +20,7 @@ export class RunExecutionCoordinator {
   private readonly active = new Map<string, Promise<void>>();
   /** Retained after completion so an uncertain accepted request cannot be replayed by another tab. */
   private readonly accepted = new Set<string>();
+  private closing = false;
 
   public constructor(
     private readonly agent: DiagnosisAgent,
@@ -28,6 +29,7 @@ export class RunExecutionCoordinator {
   ) {}
 
   public start(options: ReplyOptions): Promise<void> {
+    if (this.closing) return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Runtime is shutting down.', 409));
     const runId = options.runId;
     if (runId === undefined || runId.length === 0) {
       return Promise.reject(new RunExecutionError('RUN_ID_REQUIRED', 'runId is required.', 400));
@@ -49,6 +51,7 @@ export class RunExecutionCoordinator {
   }
 
   public resume(runId: string, signal?: AbortSignal): Promise<void> {
+    if (this.closing) return Promise.reject(new RunExecutionError('RUN_CONFLICT', 'Runtime is shutting down.', 409));
     const existing = this.active.get(runId);
     if (existing !== undefined) return existing;
     return this.claim(runId, async () => {
@@ -68,6 +71,14 @@ export class RunExecutionCoordinator {
 
   public isActive(runId: string): boolean {
     return this.active.has(runId);
+  }
+
+  /** Stop accepting new work and wait until accepted Runs have reached a checkpoint or terminal state. */
+  public async close(): Promise<void> {
+    this.closing = true;
+    while (this.active.size > 0) {
+      await Promise.allSettled([...this.active.values()]);
+    }
   }
 
   private prepareStart(options: ReplyOptions): ReplyOptions {

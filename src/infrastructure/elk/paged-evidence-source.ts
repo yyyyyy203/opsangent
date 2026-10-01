@@ -199,6 +199,7 @@ export class ResilientElkPageClient implements ElkPageClient {
       {
         signal: input.signal,
         deadline: this.now() + this.deadlineMs,
+        now: this.now,
         ...(this.options.attemptBudget === undefined ? {} : { attemptBudget: this.options.attemptBudget }),
         ...(this.options.onEvent === undefined ? {} : { onEvent: this.options.onEvent }),
       },

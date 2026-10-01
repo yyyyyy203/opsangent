@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import Database from 'better-sqlite3';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import type {
@@ -93,6 +94,9 @@ describe('durable Web Metrics integration', () => {
       const child = await getJson(runtime.url, `/runs/${encodeURIComponent(childRunId)}`);
       expect(child).toMatchObject({ runId: childRunId, parentRunId: runId, status: 'completed', evidenceIds: [evidenceId] });
 
+      expect(JSON.stringify(readCheckpointContext(root, runId))).not.toContain(rawMarker);
+      expect(JSON.stringify(readCheckpointContext(root, childRunId))).not.toContain(rawMarker);
+
       const evidence = await getJson(runtime.url, `/runs/${encodeURIComponent(childRunId)}/evidence`);
       expect(JSON.stringify(evidence)).toContain(evidenceId);
       expect(JSON.stringify(evidence)).not.toContain(rawMarker);
@@ -176,10 +180,12 @@ describe('durable Web Metrics integration', () => {
           await startRun(runtime.url, runId);
           await waitForStatus(runtime.url, runId, 'completed');
           const parent = await getJson(runtime.url, `/runs/${runId}`);
+          const checkpointContext = readCheckpointContext(root, runId);
           const messages = await getJson(runtime.url, `/runs/${runId}/messages?limit=50`);
           const evidence = await getJson(runtime.url, `/runs/${runId}/evidence`);
           expect(parent).toMatchObject({ status: 'completed', evidenceIds: [] });
           expect(parent.childRunIds).toHaveLength(1);
+          expect(JSON.stringify(checkpointContext)).toContain('"status":"unavailable"');
           expect(JSON.stringify(messages)).not.toContain('healthy');
           expect(JSON.stringify(messages)).not.toContain('正常');
           expect(evidence.items).toEqual([]);
@@ -247,16 +253,28 @@ describe('durable Web Metrics integration', () => {
       await waitForStatus(runtime.url, parentB, 'completed');
       const detailA = await getJson(runtime.url, `/runs/${parentA}`);
       const detailB = await getJson(runtime.url, `/runs/${parentB}`);
+      const childDetailA = await getJson(runtime.url, `/runs/${childA}`);
+      const childDetailB = await getJson(runtime.url, `/runs/${childB}`);
       const messagesA = await getJson(runtime.url, `/runs/${parentA}/messages?limit=50`);
       const messagesB = await getJson(runtime.url, `/runs/${parentB}/messages?limit=50`);
+      const childMessagesA = await getJson(runtime.url, `/runs/${childA}/messages?limit=50`);
+      const childMessagesB = await getJson(runtime.url, `/runs/${childB}/messages?limit=50`);
+      const childEvidenceA = await getJson(runtime.url, `/runs/${childA}/evidence?limit=50`);
+      const childEvidenceB = await getJson(runtime.url, `/runs/${childB}/evidence?limit=50`);
       expect(detailA).toMatchObject({ childRunIds: [childA], evidenceIds: [evidenceA] });
       expect(detailB).toMatchObject({ childRunIds: [childB], evidenceIds: [evidenceB] });
+      expect(childDetailA).toMatchObject({ parentRunId: parentA, evidenceIds: [evidenceA] });
+      expect(childDetailB).toMatchObject({ parentRunId: parentB, evidenceIds: [evidenceB] });
       expect(childA).not.toBe(childB);
       expect(evidenceA).not.toBe(evidenceB);
       expect(JSON.stringify(messagesA)).not.toContain(evidenceB);
       expect(JSON.stringify(messagesA)).not.toContain('private-isolation-raw');
       expect(JSON.stringify(messagesB)).not.toContain(evidenceA);
       expect(JSON.stringify(messagesB)).not.toContain('private-isolation-raw');
+      expect(JSON.stringify(childMessagesA)).not.toContain(evidenceB);
+      expect(JSON.stringify(childMessagesB)).not.toContain(evidenceA);
+      expect(JSON.stringify(childEvidenceA)).not.toContain(evidenceB);
+      expect(JSON.stringify(childEvidenceB)).not.toContain(evidenceA);
     } finally {
       await runtime.close();
       await mcp.close();
@@ -304,9 +322,12 @@ describe('durable Web Metrics integration', () => {
       const parent = await getJson(runtime.url, `/runs/${runId}`);
       const child = await getJson(runtime.url, `/runs/${encodeURIComponent(childRunId)}`);
       const evidence = await getJson(runtime.url, `/runs/${encodeURIComponent(childRunId)}/evidence?limit=50`);
+      const checkpointContext = readCheckpointContext(root, runId);
       expect(parent.evidenceIds).toEqual([evidenceId]);
       expect(child).toMatchObject({ runId: childRunId, evidenceIds: [evidenceId] });
       expect(evidence.items).toHaveLength(1);
+      expect(JSON.stringify(checkpointContext)).toContain('"status":"partial"');
+      expect(readCaptureKey(root, evidenceId)).toBe(`metric:${childRunId}:${metricToolCallId}:0`);
       expect(JSON.stringify(evidence)).not.toContain('private-partial-raw');
       expect(sourceCalls).toBe(1);
     } finally {
@@ -363,6 +384,27 @@ class FailAfterMetricModel implements ChatModel {
 
 function fixedClock() {
   return { now: () => new Date('2026-10-02T12:34:56.789Z') };
+}
+
+function readCheckpointContext(root: string, runId: string): unknown {
+  const database = new Database(join(root, 'agent.sqlite'), { readonly: true });
+  try {
+    const row = database.prepare('SELECT checkpoint_json FROM agent_checkpoints WHERE run_id = ?').get(runId) as { checkpoint_json?: unknown } | undefined;
+    if (typeof row?.checkpoint_json !== 'string') throw new Error(`Checkpoint ${runId} was not persisted.`);
+    return JSON.parse(row.checkpoint_json) as unknown;
+  } finally {
+    database.close();
+  }
+}
+
+function readCaptureKey(root: string, evidenceId: string): string | null {
+  const database = new Database(join(root, 'agent.sqlite'), { readonly: true });
+  try {
+    const row = database.prepare('SELECT capture_key FROM evidence_records WHERE evidence_id = ?').get(evidenceId) as { capture_key?: unknown } | undefined;
+    return typeof row?.capture_key === 'string' ? row.capture_key : null;
+  } finally {
+    database.close();
+  }
 }
 
 function metricsRequest(

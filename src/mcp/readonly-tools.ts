@@ -38,6 +38,7 @@ export async function bindReadonlyMcpTools(
   const descriptors = await options.executor.execute((signal) => connection.listTools(signal), {
     signal: options.signal,
     deadline: options.deadline ?? now() + 30_000,
+    now,
     ...(options.attemptBudget === undefined ? {} : { attemptBudget: options.attemptBudget }),
   });
   const names = new Set<string>();
@@ -74,6 +75,7 @@ async function* invoke(
   let failure: unknown;
   const pending = executor.execute((attemptSignal) => connection.call(remoteName, validation.value ?? input, attemptSignal), {
     signal, deadline: Math.min(options.deadline ?? Infinity, now() + 30_000),
+    now,
     ...(options.networkAttemptBudget ? { attemptBudget: options.networkAttemptBudget } : {}),
     onEvent: (event) => { onEvent?.(sourceId, event); queue.push(event); wake(); },
   }).then((value) => { response = value; }).catch((error: unknown) => { failure = error; }).finally(() => { complete = true; wake(); });

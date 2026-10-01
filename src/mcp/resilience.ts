@@ -74,6 +74,8 @@ export interface ResilienceOptions {
 export interface ExecutionDeadline {
   signal: AbortSignal;
   deadline: number;
+  /** Optional per-call clock for injected runtimes and deterministic tests. */
+  now?: () => number;
   attemptBudget?: { remaining: number };
   onEvent?: (event: RetryEvent) => void;
 }
@@ -95,19 +97,20 @@ export class ResilientExecutor {
   }
 
   public async execute<T>(operation: (signal: AbortSignal) => Promise<T>, options: ExecutionDeadline): Promise<T> {
-    this.check(options);
+    const now = options.now ?? this.now;
+    this.check(options, now);
     const permit = this.circuit.acquire();
     let sawSourceFailure = false;
     try {
       for (let attempt = 1; attempt <= this.maxRetries + 1; attempt += 1) {
-        this.check(options);
+        this.check(options, now);
         if (options.attemptBudget) {
           if (options.attemptBudget.remaining <= 0) throw new SourceFailure('BUDGET_EXCEEDED');
           options.attemptBudget.remaining -= 1;
         }
         options.onEvent?.({ type: 'attempt', attempt });
         try {
-          const result = await bounded(operation, options.signal, Math.min(this.timeoutMs, options.deadline - this.now()));
+          const result = await bounded(operation, options.signal, Math.min(this.timeoutMs, options.deadline - now()));
           this.circuit.finish(permit, 'success');
           options.onEvent?.({ type: 'success', attempt });
           return result;
@@ -122,7 +125,7 @@ export class ResilientExecutor {
           // Do not truncate a server's lower bound and retry earlier than requested.
           if ((failure.retryAfterMs ?? 0) > 2_000) throw failure;
           const delayMs = Math.min(2_000, Math.max(200 * 2 ** (attempt - 1) * jitter, failure.retryAfterMs ?? 0));
-          if (this.now() + delayMs >= options.deadline) throw new SourceFailure('BUDGET_EXCEEDED');
+          if (now() + delayMs >= options.deadline) throw new SourceFailure('BUDGET_EXCEEDED');
           options.onEvent?.({ type: 'retry', attempt, code: failure.code, delayMs });
           await this.sleep(delayMs, options.signal);
         }
@@ -135,9 +138,9 @@ export class ResilientExecutor {
     }
   }
 
-  private check(options: ExecutionDeadline): void {
+  private check(options: ExecutionDeadline, now: () => number): void {
     if (options.signal.aborted) throw new SourceFailure('ABORTED');
-    if (!Number.isFinite(options.deadline) || this.now() >= options.deadline) throw new SourceFailure('BUDGET_EXCEEDED');
+    if (!Number.isFinite(options.deadline) || now() >= options.deadline) throw new SourceFailure('BUDGET_EXCEEDED');
   }
 }
 

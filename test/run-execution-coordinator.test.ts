@@ -91,4 +91,29 @@ describe('RunExecutionCoordinator', () => {
     await expect(coordinator.start({ runId: 'done', message: 'inspect', profileId: 'group-buy-market' }))
       .rejects.toMatchObject({ code: 'RUN_CONFLICT', statusCode: 409 });
   });
+
+  it('waits for active Runs before close and rejects new work after shutdown starts', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const agent = fakeAgent(
+      async function* (options) { await gate; yield* []; return result(options.runId!); },
+      async function* (runId) { await Promise.resolve(); yield* []; return result(runId); },
+    );
+    const coordinator = new RunExecutionCoordinator(agent, checkpointStore(new Map()));
+    const active = coordinator.start({ runId: 'active', message: 'inspect', profileId: 'simulation' });
+    await Promise.resolve();
+
+    let closed = false;
+    const closing = coordinator.close().then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    await expect(coordinator.start({ runId: 'late', message: 'inspect', profileId: 'simulation' }))
+      .rejects.toMatchObject({ code: 'RUN_CONFLICT', statusCode: 409 });
+
+    release();
+    await active;
+    await closing;
+    expect(closed).toBe(true);
+    expect(coordinator.isActive('active')).toBe(false);
+  });
 });
