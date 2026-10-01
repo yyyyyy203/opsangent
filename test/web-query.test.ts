@@ -28,6 +28,28 @@ describe('web message read model', () => {
     expect(third.nextCursor).toBeUndefined();
   });
 
+  it('paginates mixed-case IDs in the same deterministic order as its cursor', async () => {
+    const query = new InMemoryWebMessageQuery();
+    for (const id of ['A', 'a', 'Z', 'z']) query.upsert({ message: message(id), version: 1 });
+    const first = await query.listMessages('run-1', { limit: 2 });
+    if (!first.nextCursor) throw new Error('first page lacked a cursor');
+    const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
+    expect([...first.items, ...second.items].map((item) => item.message.id)).toEqual(['z', 'a', 'Z', 'A']);
+  });
+
+  it('sanitizes unsafe identifiers deterministically at the public boundary', async () => {
+    const query = new InMemoryWebMessageQuery();
+    const unsafe = message('id-http://10.1.2.3:9090', 'run-1');
+    unsafe.blocks[0]!.blockId = 'block-http://10.1.2.3:9090';
+    query.upsert({ message: unsafe, version: 1 });
+    const first = await query.listMessages('run-1');
+    const again = await query.listMessages('run-1');
+    expect(JSON.stringify(first)).not.toContain('10.1.2.3');
+    expect(first.items[0]?.message.id).toBe(again.items[0]?.message.id);
+    expect(first.items[0]?.message.blocks[0]?.blockId).toBe(again.items[0]?.message.blocks[0]?.blockId);
+    expect(first.items[0]?.message.id).not.toBe(unsafe.id);
+  });
+
   it('excludes audit and cross-Run messages, and keeps the latest version', async () => {
     const query = new InMemoryWebMessageQuery();
     query.upsert({ message: message('audit', 'run-1', 'private', 'audit'), version: 1 });
@@ -65,6 +87,25 @@ describe('web message read model', () => {
     expect(second.items[0]?.message.id).not.toBe(first.items.at(-1)?.message.id);
     expect(Buffer.byteLength(JSON.stringify(second), 'utf8')).toBeLessThanOrEqual(512 * 1024);
     expect(first.items.length + second.items.length).toBeLessThanOrEqual(40);
+  });
+
+  it('retains confirmation safety notices and message identity under extreme size fallback', () => {
+    const draft = message('oversized-confirmation');
+    draft.blocks = Array.from({ length: 600 }, (_, index) => ({
+      type: 'confirmation_request' as const,
+      blockId: `confirm-block-${index}`,
+      confirmationId: `confirm-${index}`,
+      toolCallIds: [`call-${index}`],
+      riskSummary: 'x'.repeat(2_000),
+      expiresAt: '2026-10-02T00:00:00.000Z',
+    }));
+    const page = makePublicMessagePage([{ message: draft, version: 3 }], 1, false);
+    const item = page.items[0];
+    expect(item?.truncated).toBe(true);
+    expect(item?.message.id).toBe('oversized-confirmation');
+    expect(item?.message.status).toBe('completed');
+    expect(item?.message.blocks.some((block) => block.type === 'confirmation_request')).toBe(true);
+    expect(Buffer.byteLength(JSON.stringify(item?.message), 'utf8')).toBeLessThanOrEqual(64 * 1024);
   });
 
   it('projects an unexpired confirmation and distinguishes no confirmation from missing Run', async () => {

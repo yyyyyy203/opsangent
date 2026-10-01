@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { AgentError } from '../../contracts/errors.js';
 import type {
   AgentMessageV2,
@@ -27,12 +28,12 @@ export class PublicMessageProjectorV2 {
     });
     return {
       schemaVersion: 2,
-      id: message.id,
-      runId: message.runId,
-      ...(message.sessionId === undefined ? {} : { sessionId: message.sessionId }),
-      ...(message.replyId === undefined ? {} : { replyId: message.replyId }),
-      ...(message.stepId === undefined ? {} : { stepId: message.stepId }),
-      ...(message.parentMessageId === undefined ? {} : { parentMessageId: message.parentMessageId }),
+      id: safeIdentifier(message.id),
+      runId: safeIdentifier(message.runId),
+      ...(message.sessionId === undefined ? {} : { sessionId: safeIdentifier(message.sessionId) }),
+      ...(message.replyId === undefined ? {} : { replyId: safeIdentifier(message.replyId) }),
+      ...(message.stepId === undefined ? {} : { stepId: safeIdentifier(message.stepId) }),
+      ...(message.parentMessageId === undefined ? {} : { parentMessageId: safeIdentifier(message.parentMessageId) }),
       role: message.role,
       status: message.status,
       visibility: message.visibility,
@@ -46,11 +47,11 @@ export class PublicMessageProjectorV2 {
 function projectBlock(block: MessageBlockV2): MessageBlockV2 | null {
   switch (block.type) {
     case 'text':
-      return { type: 'text', blockId: block.blockId, text: safeText(block.text) };
+      return { type: 'text', blockId: safeIdentifier(block.blockId), text: safeText(block.text) };
     case 'reasoning_summary':
-      return { type: 'reasoning_summary', blockId: block.blockId, summary: safeText(block.summary) };
+      return { type: 'reasoning_summary', blockId: safeIdentifier(block.blockId), summary: safeText(block.summary) };
     case 'tool_call':
-      return { type: 'tool_call', blockId: block.blockId, call: { id: block.call.id, name: block.call.name, input: {} } };
+      return { type: 'tool_call', blockId: safeIdentifier(block.blockId), call: { id: safeIdentifier(block.call.id), name: safeIdentifier(block.call.name), input: {} } };
     case 'raw_tool_call':
       return null;
     case 'tool_result':
@@ -58,8 +59,8 @@ function projectBlock(block: MessageBlockV2): MessageBlockV2 | null {
     case 'evidence_ref':
       return {
         type: 'evidence_ref',
-        blockId: block.blockId,
-        evidenceId: block.evidenceId,
+        blockId: safeIdentifier(block.blockId),
+        evidenceId: safeIdentifier(block.evidenceId),
         summary: safeText(block.summary),
         source: safeText(block.source),
         retrievable: block.retrievable,
@@ -71,49 +72,49 @@ function projectBlock(block: MessageBlockV2): MessageBlockV2 | null {
       return projectContextSummary(block);
     case 'confirmation_request':
       return {
-        type: 'confirmation_request', blockId: block.blockId, confirmationId: block.confirmationId,
-        toolCallIds: [...block.toolCallIds], riskSummary: safeText(block.riskSummary), expiresAt: block.expiresAt,
+        type: 'confirmation_request', blockId: safeIdentifier(block.blockId), confirmationId: safeIdentifier(block.confirmationId),
+        toolCallIds: block.toolCallIds.map(safeIdentifier), riskSummary: safeText(block.riskSummary), expiresAt: block.expiresAt,
       };
     case 'confirmation_result':
       return {
-        type: 'confirmation_result', blockId: block.blockId, confirmationId: block.confirmationId,
-        decision: block.decision, actor: safeText(block.actor), toolCallIds: [...block.toolCallIds], decidedAt: block.decidedAt,
+        type: 'confirmation_result', blockId: safeIdentifier(block.blockId), confirmationId: safeIdentifier(block.confirmationId),
+        decision: block.decision, actor: safeText(block.actor), toolCallIds: block.toolCallIds.map(safeIdentifier), decidedAt: block.decidedAt,
       };
     case 'diagnosis':
       return {
-        type: 'diagnosis', blockId: block.blockId, outcome: block.outcome,
+        type: 'diagnosis', blockId: safeIdentifier(block.blockId), outcome: block.outcome,
         rootCauseCandidates: block.rootCauseCandidates.map((candidate) => ({ summary: safeText(candidate.summary), confidence: candidate.confidence })),
-        evidenceIds: [...block.evidenceIds], missingEvidence: block.missingEvidence.map(safeText), limitations: block.limitations.map(safeText),
+        evidenceIds: block.evidenceIds.map(safeIdentifier), missingEvidence: block.missingEvidence.map(safeText), limitations: block.limitations.map(safeText),
       };
     case 'action_proposal':
       return {
-        type: 'action_proposal', blockId: block.blockId, actionId: block.actionId, toolCallId: block.toolCallId,
+        type: 'action_proposal', blockId: safeIdentifier(block.blockId), actionId: safeIdentifier(block.actionId), toolCallId: safeIdentifier(block.toolCallId),
         risk: block.risk, expectedEffect: safeText(block.expectedEffect), verificationPlan: safeText(block.verificationPlan),
       };
     case 'action_result':
       return {
-        type: 'action_result', blockId: block.blockId, actionId: block.actionId, toolCallId: block.toolCallId,
-        result: sanitizeJson(block.result), idempotencyKey: block.idempotencyKey,
-        verificationEvidenceIds: [...block.verificationEvidenceIds], uncertainty: block.uncertainty,
+        type: 'action_result', blockId: safeIdentifier(block.blockId), actionId: safeIdentifier(block.actionId), toolCallId: safeIdentifier(block.toolCallId),
+        result: sanitizeJson(block.result), idempotencyKey: safeIdentifier(block.idempotencyKey),
+        verificationEvidenceIds: block.verificationEvidenceIds.map(safeIdentifier), uncertainty: block.uncertainty,
       };
     case 'error':
-      return { type: 'error', blockId: block.blockId, error: projectError(block.error) };
+      return { type: 'error', blockId: safeIdentifier(block.blockId), error: projectError(block.error) };
   }
 }
 
 function projectToolResult(block: ToolResultMessageBlockV2): ToolResultMessageBlockV2 {
   const result: ToolExecutionResult = {
-    toolCallId: block.result.toolCallId,
-    toolName: block.result.toolName,
+    toolCallId: safeIdentifier(block.result.toolCallId),
+    toolName: safeIdentifier(block.result.toolName),
     status: block.result.status,
     ...(block.result.error === undefined ? {} : { error: projectError(block.result.error) }),
     startedAt: block.result.startedAt,
     ...(block.result.finishedAt === undefined ? {} : { finishedAt: block.result.finishedAt }),
   };
   return {
-    type: 'tool_result', blockId: block.blockId, result,
-    attempt: { attemptId: block.attempt.attemptId, number: block.attempt.number },
-    evidenceIds: [...block.evidenceIds],
+    type: 'tool_result', blockId: safeIdentifier(block.blockId), result,
+    attempt: { attemptId: safeIdentifier(block.attempt.attemptId), number: block.attempt.number },
+    evidenceIds: block.evidenceIds.map(safeIdentifier),
   };
 }
 
@@ -121,19 +122,19 @@ function projectContextSummary(block: ContextSummaryMessageBlockV2): ContextSumm
   const summary: ContextSummary = block.summary;
   return {
     type: 'context_summary',
-    blockId: block.blockId,
+    blockId: safeIdentifier(block.blockId),
     summary: {
       confirmedFacts: summary.confirmedFacts.map(safeText),
       hypotheses: summary.hypotheses.map(safeText),
       missingEvidence: summary.missingEvidence.map(safeText),
-      pendingActionIds: [...summary.pendingActionIds],
-      executedActionIds: [...summary.executedActionIds],
+      pendingActionIds: summary.pendingActionIds.map(safeIdentifier),
+      executedActionIds: summary.executedActionIds.map(safeIdentifier),
       unresolvedRisks: summary.unresolvedRisks.map(safeText),
-      ...(summary.sourceMessageIds === undefined ? {} : { sourceMessageIds: [...summary.sourceMessageIds] }),
-      ...(summary.keyToolCalls === undefined ? {} : { keyToolCalls: [...summary.keyToolCalls] }),
-      ...(summary.evidenceIds === undefined ? {} : { evidenceIds: [...summary.evidenceIds] }),
-      ...(summary.confirmationIds === undefined ? {} : { confirmationIds: [...summary.confirmationIds] }),
-      ...(summary.riskRuleIds === undefined ? {} : { riskRuleIds: [...summary.riskRuleIds] }),
+      ...(summary.sourceMessageIds === undefined ? {} : { sourceMessageIds: summary.sourceMessageIds.map(safeIdentifier) }),
+      ...(summary.keyToolCalls === undefined ? {} : { keyToolCalls: summary.keyToolCalls.map(safeIdentifier) }),
+      ...(summary.evidenceIds === undefined ? {} : { evidenceIds: summary.evidenceIds.map(safeIdentifier) }),
+      ...(summary.confirmationIds === undefined ? {} : { confirmationIds: summary.confirmationIds.map(safeIdentifier) }),
+      ...(summary.riskRuleIds === undefined ? {} : { riskRuleIds: summary.riskRuleIds.map(safeIdentifier) }),
       ...(summary.summaryVersion === undefined ? {} : { summaryVersion: summary.summaryVersion }),
     },
   };
@@ -149,6 +150,14 @@ function projectError(error: AgentError): AgentError {
 
 function safeText(value: string): string {
   return FORBIDDEN_VALUE.test(value) || INTERNAL_ADDRESS.test(value) ? '[REDACTED]' : value.slice(0, 4_000);
+}
+
+function safeIdentifier(value: string): string {
+  return FORBIDDEN_VALUE.test(value) || INTERNAL_ADDRESS.test(value)
+    ? `redacted-${createHash('sha256').update(value).digest('hex').slice(0, 24)}`
+    : value.length > 256
+      ? `identifier-${createHash('sha256').update(value).digest('hex').slice(0, 24)}`
+      : value;
 }
 
 function sanitizeJson(value: JsonValue): JsonValue {

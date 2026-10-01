@@ -20,11 +20,13 @@ export class SqliteWebMessageQuery implements WebMessageQueries {
       ORDER BY json_extract(message_json, '$.createdAt') DESC, message_id DESC
       LIMIT ?
     `).all(runId, cursor?.createdAt ?? null, cursor?.createdAt ?? null, cursor?.createdAt ?? null, cursor?.id ?? null, limit + 1) as Row[];
-    const records = rows.slice(0, limit).flatMap((row): Array<StoredAgentMessageV2 & { truncated: boolean }> => {
+    const records = rows.slice(0, limit).flatMap((row): Array<StoredAgentMessageV2 & { truncated: boolean; cursorRunId: string; cursorMessageId: string }> => {
       try {
-        const prepared = preparePublicProjection(parseAgentMessageV2(JSON.parse(row.message_json)));
+        const source = parseAgentMessageV2(JSON.parse(row.message_json));
+        const prepared = preparePublicProjection(source);
         const message = this.projector.project(prepared.message);
-        return message === null ? [] : [{ message, version: row.version, truncated: prepared.truncated }];
+        return message === null ? [] : [{ message, version: row.version, truncated: prepared.truncated,
+          cursorRunId: source.runId, cursorMessageId: source.id }];
       } catch { throw new StoredDataCorruptionError('message', row.message_id); }
     });
     return Promise.resolve(makePublicMessagePage(records, limit, rows.length > limit));

@@ -22,7 +22,8 @@ export class InMemoryWebMessageQuery implements WebMessageQueries {
     const projected = rows.slice(0, limit).flatMap((row) => {
       const prepared = preparePublicProjection(row.message);
       const message = this.projector.project(prepared.message);
-      return message === null ? [] : [{ message, version: row.version, truncated: prepared.truncated }];
+      return message === null ? [] : [{ message, version: row.version, truncated: prepared.truncated,
+        cursorRunId: row.message.runId, cursorMessageId: row.message.id }];
     });
     return Promise.resolve(makePublicMessagePage(projected, limit, rows.length > limit));
   }

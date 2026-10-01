@@ -21,4 +21,24 @@ describe('SQLite web message query', () => {
       expect(statements.some((sql) => /\bLIMIT\b/i.test(sql))).toBe(true);
     } finally { database.close(); }
   });
+
+  it('sanitizes address-like message and block IDs while preserving SQLite cursor pagination', async () => {
+    const database = SqliteDatabase.open(':memory:');
+    try {
+      const store = new SqliteEventMessageStore(database);
+      const createdAt = '2026-10-01T00:00:00.000Z';
+      await store.saveMessage({ schemaVersion: 2, id: 'z-http://10.1.2.3:9090', runId: 'run-1', role: 'assistant',
+        status: 'completed', visibility: 'user', blocks: [{ type: 'text', blockId: 'block-http://10.1.2.3:9090', text: 'safe' }], createdAt }, null);
+      await store.saveMessage({ schemaVersion: 2, id: 'a-safe', runId: 'run-1', role: 'assistant',
+        status: 'completed', visibility: 'user', blocks: [], createdAt }, null);
+      const query = new SqliteWebMessageQuery(database);
+      const first = await query.listMessages('run-1', { limit: 1 });
+      expect(first.items[0]?.message.id).not.toContain('10.1.2.3');
+      expect(first.items[0]?.message.blocks[0]?.blockId).not.toContain('10.1.2.3');
+      expect(JSON.stringify(first)).not.toContain('10.1.2.3');
+      if (!first.nextCursor) throw new Error('first page lacked a cursor');
+      const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 1 });
+      expect(second.items.map((item) => item.message.id)).toEqual(['a-safe']);
+    } finally { database.close(); }
+  });
 });
