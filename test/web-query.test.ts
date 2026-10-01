@@ -6,6 +6,7 @@ import { makePublicMessagePage } from '../src/contracts/web-read-model.js';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import { startInspectionHttpServer } from '../src/api/http-server.js';
+import { OpaqueMessageCursorCodec } from '../src/application/message-cursor-codec.js';
 
 const timestamp = '2026-10-01T00:00:00.000Z';
 function message(id: string, runId = 'run-1', text = id, visibility: AgentMessageV2['visibility'] = 'user'): AgentMessageV2 {
@@ -42,9 +43,12 @@ describe('web message read model', () => {
     const unsafe = message('id-http://10.1.2.3:9090', 'run-1');
     unsafe.blocks[0]!.blockId = 'block-http://10.1.2.3:9090';
     query.upsert({ message: unsafe, version: 1 });
-    const first = await query.listMessages('run-1');
+    query.upsert({ message: message('safe-next'), version: 1 });
+    const first = await query.listMessages('run-1', { limit: 1 });
     const again = await query.listMessages('run-1');
     expect(JSON.stringify(first)).not.toContain('10.1.2.3');
+    expect(first.nextCursor).toBeDefined();
+    expect(first.nextCursor).not.toContain('10.1.2.3');
     expect(first.items[0]?.message.id).toBe(again.items[0]?.message.id);
     expect(first.items[0]?.message.blocks[0]?.blockId).toBe(again.items[0]?.message.blocks[0]?.blockId);
     expect(first.items[0]?.message.id).not.toBe(unsafe.id);
@@ -74,16 +78,17 @@ describe('web message read model', () => {
   });
 
   it('stops a page at 512 KiB and resumes at the next message', () => {
+    const codec = new OpaqueMessageCursorCodec();
     const records = Array.from({ length: 40 }, (_, n) => {
       const draft = message(`page-${String(n).padStart(2, '0')}`);
       draft.blocks = Array.from({ length: 20 }, (_, index) => ({ type: 'text' as const, blockId: `part-${index}`, text: 'x'.repeat(2_000) }));
       return { message: draft, version: 1 };
     });
-    const first = makePublicMessagePage(records, 50, false);
+    const first = makePublicMessagePage(records, 50, false, codec);
     expect(first.items.length).toBeLessThan(40);
     expect(Buffer.byteLength(JSON.stringify(first), 'utf8')).toBeLessThanOrEqual(512 * 1024);
     if (!first.nextCursor) throw new Error('bounded page lacked a cursor');
-    const second = makePublicMessagePage(records.slice(first.items.length), 50, false);
+    const second = makePublicMessagePage(records.slice(first.items.length), 50, false, codec);
     expect(second.items[0]?.message.id).not.toBe(first.items.at(-1)?.message.id);
     expect(Buffer.byteLength(JSON.stringify(second), 'utf8')).toBeLessThanOrEqual(512 * 1024);
     expect(first.items.length + second.items.length).toBeLessThanOrEqual(40);
@@ -99,7 +104,7 @@ describe('web message read model', () => {
       riskSummary: 'x'.repeat(2_000),
       expiresAt: '2026-10-02T00:00:00.000Z',
     }));
-    const page = makePublicMessagePage([{ message: draft, version: 3 }], 1, false);
+    const page = makePublicMessagePage([{ message: draft, version: 3 }], 1, false, new OpaqueMessageCursorCodec());
     const item = page.items[0];
     expect(item?.truncated).toBe(true);
     expect(item?.message.id).toBe('oversized-confirmation');

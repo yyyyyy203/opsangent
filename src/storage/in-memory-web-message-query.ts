@@ -1,10 +1,12 @@
 import type { StoredAgentMessageV2 } from '../contracts/event-store.js';
 import { afterMessageCursor, compareMessages, makePublicMessagePage, messageLimit, parseMessageCursor, preparePublicProjection, type MessagePageOptions, type PublicMessagePage, type WebMessageQueries } from '../contracts/web-read-model.js';
 import { PublicMessageProjectorV2 } from '../event/projectors/public-message-projector.js';
+import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js';
 
 export class InMemoryWebMessageQuery implements WebMessageQueries {
   private readonly byRun = new Map<string, Map<string, StoredAgentMessageV2>>();
   private readonly projector = new PublicMessageProjectorV2();
+  private readonly cursorCodec = new OpaqueMessageCursorCodec();
 
   public upsert(record: StoredAgentMessageV2): void {
     const run = this.byRun.get(record.message.runId) ?? new Map<string, StoredAgentMessageV2>();
@@ -15,7 +17,7 @@ export class InMemoryWebMessageQuery implements WebMessageQueries {
 
   public listMessages(runId: string, options: MessagePageOptions = {}): Promise<PublicMessagePage> {
     const limit = messageLimit(options.limit);
-    const cursor = parseMessageCursor(options.cursor, runId);
+    const cursor = parseMessageCursor(options.cursor, runId, this.cursorCodec);
     const rows = [...(this.byRun.get(runId)?.values() ?? [])]
       .filter((row) => row.message.visibility !== 'audit' && (cursor === undefined || afterMessageCursor(row, cursor)))
       .sort(compareMessages).slice(0, limit + 1);
@@ -25,6 +27,6 @@ export class InMemoryWebMessageQuery implements WebMessageQueries {
       return message === null ? [] : [{ message, version: row.version, truncated: prepared.truncated,
         cursorRunId: row.message.runId, cursorMessageId: row.message.id }];
     });
-    return Promise.resolve(makePublicMessagePage(projected, limit, rows.length > limit));
+    return Promise.resolve(makePublicMessagePage(projected, limit, rows.length > limit, this.cursorCodec));
   }
 }

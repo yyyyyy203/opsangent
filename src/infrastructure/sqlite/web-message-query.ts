@@ -3,15 +3,17 @@ import { makePublicMessagePage, messageLimit, parseMessageCursor, preparePublicP
 import { parseAgentMessageV2 } from '../../contracts/message-v2/schema.js';
 import { PublicMessageProjectorV2 } from '../../event/projectors/public-message-projector.js';
 import type { SqliteDatabase } from './database.js';
+import { OpaqueMessageCursorCodec } from '../../application/message-cursor-codec.js';
 
 interface Row { message_id: string; version: number; message_json: string }
 export class SqliteWebMessageQuery implements WebMessageQueries {
   private readonly projector = new PublicMessageProjectorV2();
+  private readonly cursorCodec = new OpaqueMessageCursorCodec();
   public constructor(private readonly database: SqliteDatabase) {}
 
   public listMessages(runId: string, options: MessagePageOptions = {}): Promise<PublicMessagePage> {
     const limit = messageLimit(options.limit);
-    const cursor = parseMessageCursor(options.cursor, runId);
+    const cursor = parseMessageCursor(options.cursor, runId, this.cursorCodec);
     const rows = this.database.raw.prepare(`
       SELECT message_id, version, message_json FROM agent_messages
       WHERE run_id = ? AND json_extract(message_json, '$.visibility') <> 'audit'
@@ -29,6 +31,6 @@ export class SqliteWebMessageQuery implements WebMessageQueries {
           cursorRunId: source.runId, cursorMessageId: source.id }];
       } catch { throw new StoredDataCorruptionError('message', row.message_id); }
     });
-    return Promise.resolve(makePublicMessagePage(records, limit, rows.length > limit));
+    return Promise.resolve(makePublicMessagePage(records, limit, rows.length > limit, this.cursorCodec));
   }
 }

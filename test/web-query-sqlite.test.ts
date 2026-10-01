@@ -36,6 +36,8 @@ describe('SQLite web message query', () => {
       expect(first.items[0]?.message.id).not.toContain('10.1.2.3');
       expect(first.items[0]?.message.blocks[0]?.blockId).not.toContain('10.1.2.3');
       expect(JSON.stringify(first)).not.toContain('10.1.2.3');
+      expect(first.nextCursor).toBeDefined();
+      expect(first.nextCursor).not.toContain('10.1.2.3');
       if (!first.nextCursor) throw new Error('first page lacked a cursor');
       const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 1 });
       expect(second.items.map((item) => item.message.id)).toEqual(['a-safe']);

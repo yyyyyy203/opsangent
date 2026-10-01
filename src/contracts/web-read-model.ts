@@ -9,23 +9,22 @@ export interface PublicConfirmation { runId: string; toolCallId: string; expecte
 export interface PublicProfile { id: string; name: string; description: string; capabilities: { readOnly: boolean } }
 
 export interface MessageCursor { runId: string; createdAt: string; id: string }
+export interface MessageCursorCodec {
+  encode(cursor: MessageCursor): string;
+  decode(token: string, runId: string): MessageCursor;
+}
 export function messageLimit(limit: number | undefined): number {
   const value = limit ?? 20;
   if (!Number.isSafeInteger(value) || value < 1 || value > 50) throw new RangeError('limit must be between 1 and 50.');
   return value;
 }
-export function parseMessageCursor(cursor: string | undefined, runId: string): MessageCursor | undefined {
+export function parseMessageCursor(cursor: string | undefined, runId: string, codec: MessageCursorCodec): MessageCursor | undefined {
   if (cursor === undefined) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-    if (typeof parsed !== 'object' || parsed === null || !('runId' in parsed) || !('createdAt' in parsed) || !('id' in parsed)
-      || parsed.runId !== runId || typeof parsed.createdAt !== 'string' || typeof parsed.id !== 'string'
-      || parsed.createdAt.length === 0 || parsed.id.length === 0) throw new Error('invalid');
-    return { runId, createdAt: parsed.createdAt, id: parsed.id };
-  } catch { throw new RangeError('cursor is invalid.'); }
+  try { return codec.decode(cursor, runId); }
+  catch { throw new RangeError('cursor is invalid.'); }
 }
-export function encodeMessageCursor(message: AgentMessageV2, identity?: { runId: string; id: string }): string {
-  return Buffer.from(JSON.stringify({ runId: identity?.runId ?? message.runId, createdAt: message.createdAt, id: identity?.id ?? message.id })).toString('base64url');
+export function encodeMessageCursor(message: AgentMessageV2, codec: MessageCursorCodec, identity?: { runId: string; id: string }): string {
+  return codec.encode({ runId: identity?.runId ?? message.runId, createdAt: message.createdAt, id: identity?.id ?? message.id });
 }
 export function compareMessages(left: StoredAgentMessageV2, right: StoredAgentMessageV2): number {
   return compareUtf8(right.message.createdAt, left.message.createdAt) || compareUtf8(right.message.id, left.message.id);
@@ -84,7 +83,7 @@ export function boundPublicMessage(message: AgentMessageV2): { message: AgentMes
 }
 function shorten(value: string, max: number): string { return value.length <= max ? value : `${value.slice(0, max)}[TRUNCATED]`; }
 
-export function makePublicMessagePage(records: readonly (StoredAgentMessageV2 & { truncated?: boolean; cursorRunId?: string; cursorMessageId?: string })[], limit: number, hasMore: boolean): PublicMessagePage {
+export function makePublicMessagePage(records: readonly (StoredAgentMessageV2 & { truncated?: boolean; cursorRunId?: string; cursorMessageId?: string })[], limit: number, hasMore: boolean, codec: MessageCursorCodec): PublicMessagePage {
   const items: PublicMessageItem[] = [];
   for (const record of records.slice(0, limit)) {
     const bounded = boundPublicMessage(record.message);
@@ -95,7 +94,7 @@ export function makePublicMessagePage(records: readonly (StoredAgentMessageV2 & 
   }
   const more = hasMore || items.length < Math.min(records.length, limit);
   return more && items.length > 0
-    ? { items, nextCursor: encodeMessageCursor(items[items.length - 1]!.message, {
+    ? { items, nextCursor: encodeMessageCursor(items[items.length - 1]!.message, codec, {
       runId: records[items.length - 1]!.cursorRunId ?? items[items.length - 1]!.message.runId,
       id: records[items.length - 1]!.cursorMessageId ?? items[items.length - 1]!.message.id,
     }) }
