@@ -1,12 +1,12 @@
 import type { StoredAgentMessageV2 } from '../contracts/event-store.js';
 import { afterMessageCursor, compareMessages, makePublicMessagePage, messageLimit, parseMessageCursor, preparePublicProjection, type MessagePageOptions, type PublicMessagePage, type WebMessageQueries } from '../contracts/web-read-model.js';
 import { PublicMessageProjectorV2 } from '../event/projectors/public-message-projector.js';
-import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js';
+import type { MessageCursorCodec } from '../contracts/web-read-model.js';
 
 export class InMemoryWebMessageQuery implements WebMessageQueries {
   private readonly byRun = new Map<string, Map<string, StoredAgentMessageV2>>();
   private readonly projector = new PublicMessageProjectorV2();
-  private readonly cursorCodec = new OpaqueMessageCursorCodec();
+  public constructor(private readonly cursorCodec: MessageCursorCodec) {}
 
   public upsert(record: StoredAgentMessageV2): void {
     const run = this.byRun.get(record.message.runId) ?? new Map<string, StoredAgentMessageV2>();

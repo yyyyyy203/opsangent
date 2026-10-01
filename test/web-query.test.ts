@@ -14,15 +14,17 @@ function message(id: string, runId = 'run-1', text = id, visibility: AgentMessag
     createdAt: timestamp, blocks: [{ type: 'text', blockId: `block-${id}`, text }] };
 }
 
+function query(): InMemoryWebMessageQuery { return new InMemoryWebMessageQuery(new OpaqueMessageCursorCodec()); }
+
 describe('web message read model', () => {
   it('paginates equal timestamps without duplicate or omitted messages', async () => {
-    const query = new InMemoryWebMessageQuery();
-    for (const id of ['a', 'b', 'c', 'd', 'e']) query.upsert({ message: message(id), version: 1 });
-    const first = await query.listMessages('run-1', { limit: 2 });
+    const messages = query();
+    for (const id of ['a', 'b', 'c', 'd', 'e']) messages.upsert({ message: message(id), version: 1 });
+    const first = await messages.listMessages('run-1', { limit: 2 });
     if (!first.nextCursor) throw new Error('first page lacked a cursor');
-    const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
+    const second = await messages.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
     if (!second.nextCursor) throw new Error('second page lacked a cursor');
-    const third = await query.listMessages('run-1', { cursor: second.nextCursor, limit: 2 });
+    const third = await messages.listMessages('run-1', { cursor: second.nextCursor, limit: 2 });
     const firstIds = new Set(first.items.map((x) => x.message.id));
     expect(second.items.map((x) => x.message.id).some((id) => firstIds.has(id))).toBe(false);
     expect([...first.items, ...second.items, ...third.items].map((x) => x.message.id)).toEqual(['e', 'd', 'c', 'b', 'a']);
@@ -30,22 +32,22 @@ describe('web message read model', () => {
   });
 
   it('paginates mixed-case IDs in the same deterministic order as its cursor', async () => {
-    const query = new InMemoryWebMessageQuery();
-    for (const id of ['A', 'a', 'Z', 'z']) query.upsert({ message: message(id), version: 1 });
-    const first = await query.listMessages('run-1', { limit: 2 });
+    const messages = query();
+    for (const id of ['A', 'a', 'Z', 'z']) messages.upsert({ message: message(id), version: 1 });
+    const first = await messages.listMessages('run-1', { limit: 2 });
     if (!first.nextCursor) throw new Error('first page lacked a cursor');
-    const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
+    const second = await messages.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
     expect([...first.items, ...second.items].map((item) => item.message.id)).toEqual(['z', 'a', 'Z', 'A']);
   });
 
   it('sanitizes unsafe identifiers deterministically at the public boundary', async () => {
-    const query = new InMemoryWebMessageQuery();
+    const messages = query();
     const unsafe = message('id-http://10.1.2.3:9090', 'run-1');
     unsafe.blocks[0]!.blockId = 'block-http://10.1.2.3:9090';
-    query.upsert({ message: unsafe, version: 1 });
-    query.upsert({ message: message('safe-next'), version: 1 });
-    const first = await query.listMessages('run-1', { limit: 1 });
-    const again = await query.listMessages('run-1');
+    messages.upsert({ message: unsafe, version: 1 });
+    messages.upsert({ message: message('safe-next'), version: 1 });
+    const first = await messages.listMessages('run-1', { limit: 1 });
+    const again = await messages.listMessages('run-1');
     expect(JSON.stringify(first)).not.toContain('10.1.2.3');
     expect(first.nextCursor).toBeDefined();
     expect(first.nextCursor).not.toContain('10.1.2.3');
@@ -55,21 +57,21 @@ describe('web message read model', () => {
   });
 
   it('excludes audit and cross-Run messages, and keeps the latest version', async () => {
-    const query = new InMemoryWebMessageQuery();
-    query.upsert({ message: message('audit', 'run-1', 'private', 'audit'), version: 1 });
-    query.upsert({ message: message('other', 'run-2'), version: 1 });
-    query.upsert({ message: message('versioned', 'run-1', 'new'), version: 2 });
-    query.upsert({ message: message('versioned', 'run-1', 'old'), version: 1 });
-    const page = await query.listMessages('run-1');
+    const messages = query();
+    messages.upsert({ message: message('audit', 'run-1', 'private', 'audit'), version: 1 });
+    messages.upsert({ message: message('other', 'run-2'), version: 1 });
+    messages.upsert({ message: message('versioned', 'run-1', 'new'), version: 2 });
+    messages.upsert({ message: message('versioned', 'run-1', 'old'), version: 1 });
+    const page = await messages.listMessages('run-1');
     expect(page.items).toHaveLength(1);
     expect(page.items[0]).toMatchObject({ version: 2, message: { id: 'versioned', blocks: [{ text: 'new' }] } });
   });
 
   it('redacts secrets and internal addresses, bounds message and page bytes with explicit truncation', async () => {
-    const query = new InMemoryWebMessageQuery();
-    for (let n = 0; n < 10; n++) query.upsert({ message: message(`big-${n}`, 'run-1', 'x'.repeat(90_000)), version: 1 });
-    query.upsert({ message: message('secret', 'run-1', 'fixture-secret http://10.1.2.3:9090'), version: 1 });
-    const page = await query.listMessages('run-1', { limit: 50 });
+    const messages = query();
+    for (let n = 0; n < 10; n++) messages.upsert({ message: message(`big-${n}`, 'run-1', 'x'.repeat(90_000)), version: 1 });
+    messages.upsert({ message: message('secret', 'run-1', 'fixture-secret http://10.1.2.3:9090'), version: 1 });
+    const page = await messages.listMessages('run-1', { limit: 50 });
     expect(JSON.stringify(page)).not.toContain('fixture-secret');
     expect(JSON.stringify(page)).not.toContain('10.1.2.3');
     expect(Buffer.byteLength(JSON.stringify(page), 'utf8')).toBeLessThanOrEqual(512 * 1024);
@@ -128,7 +130,7 @@ describe('web message read model', () => {
 
   it('serves safe profiles, messages, and confirmation with stable HTTP errors', async () => {
     const runtime = createAgentRuntime({ model: new ScriptedModel([]), workspaceRoots: [] });
-    const messages = new InMemoryWebMessageQuery();
+    const messages = query();
     messages.upsert({ message: message('one', 'known', 'fixture-secret 10.1.2.3'), version: 1 });
     const web = new WebQueryService({ load: (runId) => Promise.resolve(runId === 'known' ? { revision: 3, context: { status: 'completed' as const } } : null) },
       [{ id: 'safe', name: 'Safe', description: 'Read only', enabled: true, capabilities: { readOnly: true } },

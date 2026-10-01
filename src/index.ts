@@ -8,6 +8,7 @@ export * from './application/hitl-service.js';
 export * from './application/external-tool-result-service.js';
 export * from './application/create-runtime.js';
 export * from './application/streaming-evidence-recorder.js';
+export * from './application/message-cursor-codec.js';
 export * from './context-compressor/rule-based-compressor.js';
 export * from './context-compressor/l1-structure-pruner.js';
 export * from './context-compressor/compression-validator.js';

@@ -3,13 +3,12 @@ import { makePublicMessagePage, messageLimit, parseMessageCursor, preparePublicP
 import { parseAgentMessageV2 } from '../../contracts/message-v2/schema.js';
 import { PublicMessageProjectorV2 } from '../../event/projectors/public-message-projector.js';
 import type { SqliteDatabase } from './database.js';
-import { OpaqueMessageCursorCodec } from '../../application/message-cursor-codec.js';
+import type { MessageCursorCodec } from '../../contracts/web-read-model.js';
 
 interface Row { message_id: string; version: number; message_json: string }
 export class SqliteWebMessageQuery implements WebMessageQueries {
   private readonly projector = new PublicMessageProjectorV2();
-  private readonly cursorCodec = new OpaqueMessageCursorCodec();
-  public constructor(private readonly database: SqliteDatabase) {}
+  public constructor(private readonly database: SqliteDatabase, private readonly cursorCodec: MessageCursorCodec) {}
 
   public listMessages(runId: string, options: MessagePageOptions = {}): Promise<PublicMessagePage> {
     const limit = messageLimit(options.limit);

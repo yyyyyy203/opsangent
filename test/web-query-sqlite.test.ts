@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SqliteDatabase, SqliteEventMessageStore } from '../src/infrastructure/sqlite/index.js';
 import { SqliteWebMessageQuery } from '../src/infrastructure/sqlite/web-message-query.js';
+import { OpaqueMessageCursorCodec } from '../src/application/message-cursor-codec.js';
 
 describe('SQLite web message query', () => {
   it('uses bounded SQL keyset pages without invoking a full MessageStore scan', async () => {
@@ -13,7 +14,7 @@ describe('SQLite web message query', () => {
         if (!/\bLIMIT\b/i.test(sql)) throw new Error('unbounded SQL query forbidden');
         statements.push(sql);
         return database.raw.prepare(sql);
-      } } } as unknown as SqliteDatabase);
+      } } } as unknown as SqliteDatabase, new OpaqueMessageCursorCodec());
       const first = await query.listMessages('run-1', { limit: 2 });
       if (!first.nextCursor) throw new Error('first page lacked a cursor');
       const second = await query.listMessages('run-1', { cursor: first.nextCursor, limit: 2 });
@@ -31,7 +32,7 @@ describe('SQLite web message query', () => {
         status: 'completed', visibility: 'user', blocks: [{ type: 'text', blockId: 'block-http://10.1.2.3:9090', text: 'safe' }], createdAt }, null);
       await store.saveMessage({ schemaVersion: 2, id: 'a-safe', runId: 'run-1', role: 'assistant',
         status: 'completed', visibility: 'user', blocks: [], createdAt }, null);
-      const query = new SqliteWebMessageQuery(database);
+      const query = new SqliteWebMessageQuery(database, new OpaqueMessageCursorCodec());
       const first = await query.listMessages('run-1', { limit: 1 });
       expect(first.items[0]?.message.id).not.toContain('10.1.2.3');
       expect(first.items[0]?.message.blocks[0]?.blockId).not.toContain('10.1.2.3');
