@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type { DiagnosisAgent, ReplyOptions } from '../agent/types.js';
 import type { InspectionQueryService, RunListOptions } from '../contracts/read-model.js';
 import type { RunStatus } from '../contracts/context.js';
+import type { PublicConfirmation, PublicProfile, WebMessageQueries } from '../contracts/web-read-model.js';
 import { encodeSseFrame } from './sse-encoder.js';
 import { EventStreamCursorError, type EventStreamService } from './event-stream-service.js';
 
@@ -13,6 +14,8 @@ export interface InspectionHttpServerOptions {
   port?: number;
   maxBodyBytes?: number;
   queries?: InspectionQueryService;
+  messageQueries?: WebMessageQueries;
+  webQueries?: { listProfiles(): readonly PublicProfile[]; getConfirmation(runId: string): Promise<PublicConfirmation | null> };
   allowedOrigins?: readonly string[];
 }
 
@@ -38,7 +41,7 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
       const status = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
       const clientVisible = status >= 400 && status < 500;
       writeJson(response, status, {
-        error: status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
+        error: status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : status === 404 ? 'NOT_FOUND' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
         message: clientVisible ? (error instanceof Error ? error.message : 'Invalid request.') : status === 503 ? 'Run query service is unavailable.' : 'Internal server error.',
       });
     });
@@ -63,6 +66,11 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
   if (method === 'GET' && parsed.pathname === '/health') { writeJson(response, 200, { status: 'ok' }); return; }
+  if (method === 'GET' && parsed.pathname === '/profiles') {
+    if (options.webQueries === undefined) throw unavailable();
+    writeJson(response, 200, options.webQueries.listProfiles());
+    return;
+  }
 
   const eventMatch = method === 'GET' ? /^\/runs\/([^/]+)\/events$/u.exec(parsed.pathname) : null;
   const headerLastEventId = request.headers['last-event-id'];
@@ -94,7 +102,35 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
       ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
     };
-    writeJson(response, 200, await queries.listRuns(query) as unknown as Record<string, unknown>);
+    writeJson(response, 200, await queries.listRuns(query));
+    return;
+  }
+
+  const messagesMatch = method === 'GET' ? /^\/runs\/([^/]+)\/messages$/u.exec(parsed.pathname) : null;
+  if (messagesMatch?.[1] !== undefined) {
+    if (options.messageQueries === undefined) throw unavailable();
+    const queries = requireQueries(options.queries);
+    const runId = decodePath(messagesMatch[1]);
+    if (await queries.getRun(runId) === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    const rawLimit = parsed.searchParams.get('limit');
+    const limit = rawLimit === null ? 20 : parseWebPageLimit(rawLimit);
+    const cursor = parsed.searchParams.get('cursor') ?? undefined;
+    try {
+      const page = await options.messageQueries.listMessages(runId, { limit, ...(cursor === undefined ? {} : { cursor }) });
+      writeJson(response, 200, page);
+    } catch (error) {
+      if (error instanceof RangeError) throw Object.assign(new Error(error.message), { statusCode: 400 });
+      throw error;
+    }
+    return;
+  }
+
+  const confirmationMatch = method === 'GET' ? /^\/runs\/([^/]+)\/confirmation$/u.exec(parsed.pathname) : null;
+  if (confirmationMatch?.[1] !== undefined) {
+    if (options.webQueries === undefined) throw unavailable();
+    const runId = decodePath(confirmationMatch[1]);
+    const confirmation = await options.webQueries.getConfirmation(runId);
+    writeJson(response, 200, confirmation);
     return;
   }
 
@@ -107,7 +143,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     const evidenceId = decodePath(evidenceDetailMatch[2]);
     const evidence = await queries.getEvidence(runId, evidenceId);
     if (evidence === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Evidence not found.' }); return; }
-    writeJson(response, 200, evidence as unknown as Record<string, unknown>);
+    writeJson(response, 200, evidence);
     return;
   }
 
@@ -120,7 +156,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
       ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
     });
-    writeJson(response, 200, result as unknown as Record<string, unknown>);
+    writeJson(response, 200, result);
     return;
   }
 
@@ -129,7 +165,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     const queries = requireQueries(options.queries);
     const run = await queries.getRun(decodePath(runDetailMatch[1]));
     if (run === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
-    writeJson(response, 200, run as unknown as Record<string, unknown>);
+    writeJson(response, 200, run);
     return;
   }
   writeJson(response, 404, { error: 'NOT_FOUND', message: 'Route not found.' });
@@ -173,8 +209,17 @@ async function streamEvents(request: IncomingMessage, response: ServerResponse, 
 }
 
 function requireQueries(value: InspectionQueryService | undefined): InspectionQueryService {
-  if (value === undefined) throw Object.assign(new Error('Run query service is unavailable.'), { statusCode: 503 });
+  if (value === undefined) throw unavailable();
   return value;
+}
+
+function unavailable(): Error { return Object.assign(new Error('Run query service is unavailable.'), { statusCode: 503 }); }
+
+function parseWebPageLimit(value: string): number {
+  if (!/^\d+$/u.test(value)) throw Object.assign(new Error('limit must be a positive integer.'), { statusCode: 400 });
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 50) throw Object.assign(new Error('limit must be between 1 and 50.'), { statusCode: 400 });
+  return parsed;
 }
 
 function parsePageLimit(value: string, name: string): number {
@@ -235,7 +280,7 @@ function toReplyOptions(body: Record<string, unknown>): ReplyOptions {
   return result;
 }
 
-function writeJson(response: ServerResponse, status: number, value: Record<string, unknown>): void {
+function writeJson(response: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value);
   response.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   response.end(body);
