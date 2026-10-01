@@ -7,10 +7,24 @@ const fixtureEnv = {
   AGENTOPS_E2E_AGENT_PORT: agentPort,
   AGENTOPS_E2E_WEB_PORT: webPort,
 } as Record<string, string>;
+const realMetrics = process.env.AGENTOPS_REAL_PROMETHEUS_WEB === '1';
+const controlPort = process.env.AGENTOPS_E2E_CONTROL_PORT ?? '45101';
+const fixtureCommand = realMetrics ? 'node test/e2e/metrics-fixture-server.mjs' : 'node test/e2e/fixture-server.mjs';
+const realFixtureEnv = {
+  ...fixtureEnv,
+  AGENTOPS_E2E_CONTROL_PORT: controlPort,
+} as Record<string, string>;
 const webEnv = {
   ...fixtureEnv,
   VITE_AGENT_API_URL: `http://127.0.0.1:${agentPort}`,
 };
+
+const projects = realMetrics
+  ? [
+      { name: 'fixed-tools', testIgnore: /metrics-web\.spec\.ts/ },
+      { name: 'real-metrics', testMatch: /metrics-web\.spec\.ts/ },
+    ]
+  : [{ name: 'fixed-tools', testIgnore: /metrics-web\.spec\.ts/ }];
 
 export default defineConfig({
   testDir: './test/e2e',
@@ -18,6 +32,7 @@ export default defineConfig({
   expect: { timeout: 10_000 },
   fullyParallel: false,
   reporter: 'list',
+  projects,
   use: {
     baseURL: `http://127.0.0.1:${webPort}`,
     trace: 'retain-on-failure',
@@ -25,9 +40,9 @@ export default defineConfig({
   },
   webServer: [
     {
-      command: 'node test/e2e/fixture-server.mjs',
+      command: fixtureCommand,
       url: `http://127.0.0.1:${agentPort}/health`,
-      env: fixtureEnv,
+      env: realMetrics ? realFixtureEnv : fixtureEnv,
       timeout: 120_000,
       reuseExistingServer: false,
     },

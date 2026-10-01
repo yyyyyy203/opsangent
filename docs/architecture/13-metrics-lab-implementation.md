@@ -44,4 +44,22 @@ Prometheus 使用 prom/prometheus:v3.5.0，HTTP 仅映射到 127.0.0.1:19090；�
 
 ## 下一步
 
-MCP 服务、Manifest Tool、原文保存与 Harness 取证联调已在下一增量完成，见第 14 篇；独立管理 API 和统一 Metrics Lab 启动入口也已完成。来源 Subagent 自治、真实模型、持久化 EvidenceStore/Checkpoint、Simulator Web、Agent Web 与更多遥测后端仍待实施。
+MCP 服务、Manifest Tool、原文保存与 Harness 取证联调已在下一增量完成，见第 14 篇；独立管理 API、统一 Metrics Lab 启动入口、持久化 EvidenceStore/Checkpoint、共享 child Run 和 Agent Web simulation 组装均已完成。真实模型烟测、业务目标系统 Profile 和更多遥测后端仍待独立规格与验收。
+
+## Agent Web 真实 Prometheus 验收边界
+
+Agent Web 的真实数据验收是显式 opt-in 的独立链路，不改变默认本地固定 Tool E2E：
+
+```powershell
+pnpm build
+pnpm lab:backend:up
+$env:AGENTOPS_REAL_PROMETHEUS_WEB = '1'
+pnpm exec vitest run test/metrics-web-real-prometheus.test.ts
+pnpm exec playwright test test/e2e/metrics-web.spec.ts
+Remove-Item Env:AGENTOPS_REAL_PROMETHEUS_WEB
+pnpm lab:backend:stop
+```
+
+该验收由 `metrics-fixture-server.mjs` 启动本地模拟器、真实 Prometheus 查询适配器、HTTP MCP 和 Agent Web；浏览器项目会检查结算失败场景的确定性证据摘要、Source Subagent 子 Run、原始 exposition 不出现在公共结果中，并通过 loopback 控制端口关闭/重启 Web Runtime 后重新读取同一 Run。Vitest 还覆盖正常、失败率超阈值、样本不足和 MCP 已断开的结果映射。
+
+未显式设置 `AGENTOPS_REAL_PROMETHEUS_WEB=1` 时，Playwright 只运行现有固定工具项目，默认命令不依赖 Docker、Prometheus 或外部凭据。该链路仍只验证 simulation Profile，不代表已经连接 `D:\xfg\group-buy-market` 或生产 Prometheus；真实业务系统接入必须另行完成 Profile、权限和数据源验收。
