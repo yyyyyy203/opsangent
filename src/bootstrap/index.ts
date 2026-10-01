@@ -8,3 +8,4 @@ export * from './metrics-subagent.js';
 export * from './agent-web-runtime.js';
 export * from './source-report-tool.js';
 export * from './source-subagent-identity.js';
+export * from './shared-source-child.js';

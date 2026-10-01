@@ -24,6 +24,7 @@ export class RunExecutionCoordinator {
   public constructor(
     private readonly agent: DiagnosisAgent,
     private readonly checkpoints: Pick<CheckpointStore, 'load'>,
+    private readonly options: { prepareStart?: (options: ReplyOptions) => ReplyOptions } = {},
   ) {}
 
   public start(options: ReplyOptions): Promise<void> {
@@ -42,7 +43,8 @@ export class RunExecutionCoordinator {
       if (checkpoint !== null) {
         throw new RunExecutionError('RUN_CONFLICT', 'Run already exists and cannot be started again.', 409);
       }
-      await this.drain(this.agent.replyStream(options));
+      const preparedOptions = this.options.prepareStart?.({ ...options }) ?? options;
+      await this.drain(this.agent.replyStream(preparedOptions));
     });
   }
 

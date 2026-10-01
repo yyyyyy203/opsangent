@@ -8,6 +8,8 @@ import type { Tool } from '../contracts/index.js';
 
 export interface InspectionRuntimeOptions extends Omit<AgentRuntimeOptions, 'includeExternalBash' | 'actionMode'> {
   allowedToolNames: readonly string[];
+  includeExternalBash?: false;
+  actionMode?: 'dry_run';
 }
 
 /** A local allowlist is an operator decision; remote tool annotations cannot grant access. */

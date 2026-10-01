@@ -40,6 +40,8 @@ import { toolInputDigest } from '../tool/schema.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
 
+const MAX_TRUSTED_SYSTEM_CONTEXT_CHARS = 8_192;
+
 export interface AgentHarnessDependencies {
   model: ChatModel;
   toolkit: Toolkit;
@@ -1110,6 +1112,14 @@ export class AgentHarness implements DiagnosisAgent {
   private createContext(options: ReplyOptions): AgentContext {
     const now = this.dependencies.clock.now().toISOString();
     const runId = options.runId ?? this.dependencies.ids.next('run');
+    const trustedSystemMessage: AgentMessage | undefined = options.trustedSystemContext === undefined
+      ? undefined
+      : {
+        id: this.dependencies.ids.next('msg'),
+        role: 'system',
+        createdAt: now,
+        blocks: [{ type: 'text', text: options.trustedSystemContext.slice(0, MAX_TRUSTED_SYSTEM_CONTEXT_CHARS) }],
+      };
     const maxToolCalls = options.maxToolCalls ?? 20;
     const userMessage: AgentMessage = {
       id: this.dependencies.ids.next('msg'), role: 'user', createdAt: now,
@@ -1123,7 +1133,7 @@ export class AgentHarness implements DiagnosisAgent {
       status: 'running',
       stage: 'triage',
       profileId: options.profileId,
-      messages: [userMessage],
+      messages: trustedSystemMessage === undefined ? [userMessage] : [trustedSystemMessage, userMessage],
       pendingToolCalls: [],
       confirmedToolCallIds: [],
       rejectedToolCallIds: [],
