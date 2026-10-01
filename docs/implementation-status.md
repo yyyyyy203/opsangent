@@ -1,5 +1,15 @@
 # 实现进度与验证记录
 
+## 最新增量：Run / Evidence 只读查询 API 与公共消息投影
+
+2026-10-01：按 [Run / Evidence 只读查询 API](./superpowers/specs/2026-10-01-run-evidence-read-api.md) 完成第一轮查询面。新增稳定的 `InspectionQueryService` 公开读模型、内存和 SQLite 实现，支持 Run/Evidence keyset 分页、SQLite 重启恢复、跨 Run evidence 隔离，以及 inline evidence 与已提交/partial Manifest 的统一目录。SQLite 公开查询只读取证据摘要列，不读取 `raw_json`；pending/failed/deleting Manifest 不可见。
+
+SSE message snapshot 改为独立的 `PublicMessageProjectorV2`：删除内部 metadata、原始工具参数、ToolResult.response、artifact/image URI，并对文本、错误、诊断和动作摘要做有界脱敏。HTTP 新增 Run/Evidence 四个只读接口；无效 SSE 游标在响应头发送前返回 400，查询服务未组装时返回 503。没有新增 Event/Message 类型，也没有开放真实动作。
+
+本轮补充查询面收口：公开最大 `limit=100` 与 Manifest 目录可组合使用；SQLite 仅检索 `SUBAGENT_STARTED` 的关联字段，不再扫描每个 Run 的前 250 条事件；默认内存查询也按页读取，不再为了一个页面加载全量 evidence；SSE durable catch-up 改为按批 yield，重连时先投递安全消息快照，再继续事件流。
+
+本轮聚焦验证覆盖 3 个测试文件、15 项测试；`pnpm lint`、`pnpm typecheck`、`pnpm test` 和 `pnpm build` 已在本轮收尾通过。Agent Web、真实 group-buy-market Prometheus Profile、生产 ELK/Trace 和动作执行仍属于后续增量。
+
 本页按时间倒序记录实现增量；带日期的旧条目是历史快照，不覆盖顶部最新状态。
 
 ## 最新增量：Metrics Subagent 组合与真实 Prometheus 验收边界

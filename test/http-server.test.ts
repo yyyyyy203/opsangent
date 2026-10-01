@@ -6,7 +6,8 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 describe('inspection HTTP/SSE bootstrap', () => {
   it('starts a run over HTTP and streams its V2 events with AsyncGenerator semantics', async () => {
     const runtime = createAgentRuntime({ model: new ScriptedModel([{ text: '完成', toolCalls: [] }]), workspaceRoots: [] });
-    const server = await startInspectionHttpServer({ agent: runtime.agent, events: runtime.eventStreamV2 });
+    if (runtime.queries === undefined) throw new Error('runtime query service is not configured');
+    const server = await startInspectionHttpServer({ agent: runtime.agent, events: runtime.eventStreamV2, queries: runtime.queries });
     try {
       expect((await fetch(`${server.url}/health`)).status).toBe(200);
       const started = await fetch(`${server.url}/runs`, {
@@ -30,6 +31,26 @@ describe('inspection HTTP/SSE bootstrap', () => {
       expect(body).toContain('event: RUN_STARTED');
       expect(body).toContain('event: RUN_FINISHED');
       await reader.cancel();
+      await runtime.evidence.save({
+        evidenceId: 'http-evidence-1', runId, source: 'metric',
+        summary: { status: 'breached', privateToken: 'do-not-return' },
+        raw: { privateMarker: 'http-raw-marker' }, businessTraceIds: [], capturedAt: '2026-09-30T10:00:00.000Z',
+      });
+
+      const runs = await fetch(`${server.url}/runs?limit=10`);
+      expect(runs.status).toBe(200);
+      expect(await runs.json()).toMatchObject({ items: [{ runId, profileId: 'group-buy-market', status: 'completed' }] });
+      const detail = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}`);
+      expect(detail.status).toBe(200);
+      expect(await detail.json()).toMatchObject({ runId, evidenceIds: [], missingEvidence: [] });
+      const evidence = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/evidence`);
+      expect(evidence.status).toBe(200);
+      expect(await evidence.json()).toMatchObject({ items: [{ evidenceId: 'http-evidence-1', summary: { status: 'breached' } }] });
+      const evidenceDetail = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/evidence/http-evidence-1`);
+      expect(evidenceDetail.status).toBe(200);
+      expect(JSON.stringify(await evidenceDetail.json())).not.toContain('http-raw-marker');
+      expect((await fetch(`${server.url}/runs/unknown-run`)).status).toBe(404);
+      expect((await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events?lastEventId=missing-event`)).status).toBe(400);
       expect((await fetch(`${server.url}/runs`, { method: 'POST', body: '{bad' })).status).toBe(400);
     } finally {
       await server.close();

@@ -7,6 +7,7 @@ import type {
   EventStore,
   EventPublisherV2Dependencies,
   EvidenceStore,
+  EvidenceQueryStore,
   EvidenceBlobStore,
   EvidenceManifestStore,
   StreamingEvidenceRecorder,
@@ -82,6 +83,8 @@ import { InMemoryProjectionCheckpointStore, ProjectionRunnerV2 } from '../event/
 import { createSqlitePersistence } from '../infrastructure/sqlite/persistence-bundle.js';
 import { UnavailableImpactSurfaceProvider } from '../profiles/unavailable-impact-surface-provider.js';
 import { DefaultStreamingEvidenceRecorder } from './streaming-evidence-recorder.js';
+import { InMemoryInspectionQueryService } from '../storage/in-memory-inspection-query.js';
+import type { InspectionQueryService } from '../contracts/read-model.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -225,6 +228,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   });
   const evidenceBlobs = options.l0?.blobStore ?? persistence?.evidenceBlobs;
   const evidenceManifests = options.l0?.manifests ?? persistence?.evidenceManifests;
+  const evidenceQuery = isEvidenceQueryStore(evidence) ? evidence : undefined;
+  const queries: InspectionQueryService | undefined = persistence?.queries
+    ?? (evidenceQuery === undefined
+      ? undefined
+      : new InMemoryInspectionQueryService(eventStoreV2, checkpoints, evidenceQuery, evidenceManifests));
   const toolResultCompactor = options.l0?.toolResultCompactor ?? new DefaultToolResultCompactor();
   const l0DataPlaneRequested = options.evidenceBlobRootPath !== undefined
     || options.l0?.blobStore !== undefined
@@ -407,6 +415,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     evidence,
     evidenceBlobs,
     evidenceManifests,
+    queries,
     streamingEvidenceRecorder,
     toolResultCompactor,
     evidenceRecorder,
@@ -451,4 +460,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       }
     },
   };
+}
+
+function isEvidenceQueryStore(value: EvidenceStore): value is EvidenceStore & EvidenceQueryStore {
+  return typeof (value as Partial<EvidenceQueryStore>).listByRun === 'function';
 }

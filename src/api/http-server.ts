@@ -1,8 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import type { DiagnosisAgent, ReplyOptions } from '../agent/types.js';
+import type { InspectionQueryService, RunListOptions } from '../contracts/read-model.js';
+import type { RunStatus } from '../contracts/context.js';
 import { encodeSseFrame } from './sse-encoder.js';
-import type { EventStreamService } from './event-stream-service.js';
+import { EventStreamCursorError, type EventStreamService } from './event-stream-service.js';
 
 export interface InspectionHttpServerOptions {
   agent: DiagnosisAgent;
@@ -10,6 +12,8 @@ export interface InspectionHttpServerOptions {
   host?: string;
   port?: number;
   maxBodyBytes?: number;
+  queries?: InspectionQueryService;
+  allowedOrigins?: readonly string[];
 }
 
 export interface InspectionHttpServer {
@@ -32,7 +36,11 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
     void handleRequest(request, response, options, maxBodyBytes).catch((error: unknown) => {
       if (response.headersSent) { response.destroy(); return; }
       const status = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
-      writeJson(response, status, { error: status === 500 ? 'INTERNAL_ERROR' : 'INVALID_REQUEST', message: error instanceof Error ? error.message : 'Internal server error.' });
+      const clientVisible = status >= 400 && status < 500;
+      writeJson(response, status, {
+        error: status === 500 ? 'INTERNAL_ERROR' : status === 503 ? 'QUERY_UNAVAILABLE' : clientVisible ? 'INVALID_REQUEST' : 'REQUEST_FAILED',
+        message: clientVisible ? (error instanceof Error ? error.message : 'Invalid request.') : status === 503 ? 'Run query service is unavailable.' : 'Internal server error.',
+      });
     });
   });
   await listen(server, port, host);
@@ -50,8 +58,9 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
 async function handleRequest(request: IncomingMessage, response: ServerResponse, options: InspectionHttpServerOptions, maxBodyBytes: number): Promise<void> {
   const method = request.method ?? 'GET';
   const parsed = new URL(request.url ?? '/', 'http://localhost');
-  response.setHeader('Access-Control-Allow-Origin', '*');
+  if (!applyCors(request, response, options.allowedOrigins)) return;
   response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
+  response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   if (method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
   if (method === 'GET' && parsed.pathname === '/health') { writeJson(response, 200, { status: 'ok' }); return; }
 
@@ -76,29 +85,122 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     writeJson(response, 202, { runId, status: 'resuming', eventsUrl: `/runs/${encodeURIComponent(runId)}/events` });
     return;
   }
+
+  if (method === 'GET' && parsed.pathname === '/runs') {
+    const queries = requireQueries(options.queries);
+    const query: RunListOptions = {
+      ...(parsed.searchParams.get('profileId') === null ? {} : { profileId: parsed.searchParams.get('profileId')! }),
+      ...(parsed.searchParams.get('status') === null ? {} : { status: parseRunStatus(parsed.searchParams.get('status')!) }),
+      ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
+      ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
+    };
+    writeJson(response, 200, await queries.listRuns(query) as unknown as Record<string, unknown>);
+    return;
+  }
+
+  const evidenceDetailMatch = method === 'GET'
+    ? /^\/runs\/([^/]+)\/evidence\/([^/]+)$/u.exec(parsed.pathname)
+    : null;
+  if (evidenceDetailMatch?.[1] !== undefined && evidenceDetailMatch[2] !== undefined) {
+    const queries = requireQueries(options.queries);
+    const runId = decodePath(evidenceDetailMatch[1]);
+    const evidenceId = decodePath(evidenceDetailMatch[2]);
+    const evidence = await queries.getEvidence(runId, evidenceId);
+    if (evidence === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Evidence not found.' }); return; }
+    writeJson(response, 200, evidence as unknown as Record<string, unknown>);
+    return;
+  }
+
+  const evidenceListMatch = method === 'GET' ? /^\/runs\/([^/]+)\/evidence$/u.exec(parsed.pathname) : null;
+  if (evidenceListMatch?.[1] !== undefined) {
+    const queries = requireQueries(options.queries);
+    const runId = decodePath(evidenceListMatch[1]);
+    if (await queries.getRun(runId) === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    const result = await queries.listEvidence(runId, {
+      ...(parsed.searchParams.get('cursor') === null ? {} : { cursor: parsed.searchParams.get('cursor')! }),
+      ...(parsed.searchParams.get('limit') === null ? {} : { limit: parsePageLimit(parsed.searchParams.get('limit')!, 'limit') }),
+    });
+    writeJson(response, 200, result as unknown as Record<string, unknown>);
+    return;
+  }
+
+  const runDetailMatch = method === 'GET' ? /^\/runs\/([^/]+)$/u.exec(parsed.pathname) : null;
+  if (runDetailMatch?.[1] !== undefined) {
+    const queries = requireQueries(options.queries);
+    const run = await queries.getRun(decodePath(runDetailMatch[1]));
+    if (run === null) { writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' }); return; }
+    writeJson(response, 200, run as unknown as Record<string, unknown>);
+    return;
+  }
   writeJson(response, 404, { error: 'NOT_FOUND', message: 'Route not found.' });
 }
 
 async function streamEvents(request: IncomingMessage, response: ServerResponse, events: EventStreamService, runId: string, lastEventId: string | undefined): Promise<void> {
+  try {
+    await events.validateCursor(runId, lastEventId);
+  } catch (error) {
+    if (error instanceof EventStreamCursorError) throw Object.assign(new Error('Event stream cursor is invalid.'), { statusCode: 400 });
+    throw error;
+  }
   const controller = new AbortController();
   const abort = () => controller.abort();
   request.on('close', abort);
-  response.writeHead(200, {
-    'Content-Type': 'text/event-stream; charset=utf-8',
-    'Cache-Control': 'no-cache, no-transform',
-    Connection: 'keep-alive',
-    'X-Accel-Buffering': 'no',
-  });
+  const iterator = events.open({ runId, signal: controller.signal, ...(lastEventId === undefined ? {} : { lastEventId }) });
   try {
-    const openOptions = { runId, signal: controller.signal, ...(lastEventId === undefined ? {} : { lastEventId }) };
-    for await (const frame of events.open(openOptions)) {
+    let first: IteratorResult<Awaited<ReturnType<typeof events.open>> extends AsyncIterable<infer Frame> ? Frame : never, void>;
+    try {
+      first = await iterator.next();
+    } catch (error) {
+      if (error instanceof EventStreamCursorError) throw Object.assign(new Error('Event stream cursor is invalid.'), { statusCode: 400 });
+      throw error;
+    }
+    response.writeHead(200, {
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    });
+    if (!first.done && !response.destroyed) response.write(encodeSseFrame(first.value));
+    for await (const frame of iterator) {
       if (response.destroyed) break;
       response.write(encodeSseFrame(frame));
     }
   } finally {
+    await iterator.return?.(undefined);
     request.off('close', abort);
     if (!response.writableEnded) response.end();
   }
+}
+
+function requireQueries(value: InspectionQueryService | undefined): InspectionQueryService {
+  if (value === undefined) throw Object.assign(new Error('Run query service is unavailable.'), { statusCode: 503 });
+  return value;
+}
+
+function parsePageLimit(value: string, name: string): number {
+  if (!/^\d+$/u.test(value)) throw Object.assign(new Error(`${name} must be a positive integer.`), { statusCode: 400 });
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0 || parsed > 100) throw Object.assign(new Error(`${name} must be between 1 and 100.`), { statusCode: 400 });
+  return parsed;
+}
+
+function parseRunStatus(value: string): RunStatus {
+  if (!['running', 'awaiting_confirmation', 'paused', 'completed', 'failed', 'cancelled'].includes(value)) {
+    throw Object.assign(new Error('status is invalid.'), { statusCode: 400 });
+  }
+  return value as RunStatus;
+}
+
+function applyCors(request: IncomingMessage, response: ServerResponse, allowedOrigins: readonly string[] | undefined): boolean {
+  const origin = request.headers.origin;
+  if (origin !== undefined && allowedOrigins !== undefined && !allowedOrigins.includes(origin)) {
+    writeJson(response, 403, { error: 'FORBIDDEN_ORIGIN', message: 'Origin is not allowed.' });
+    return false;
+  }
+  if (origin !== undefined && allowedOrigins !== undefined) response.setHeader('Access-Control-Allow-Origin', origin);
+  else if (allowedOrigins === undefined) response.setHeader('Access-Control-Allow-Origin', '*');
+  if (allowedOrigins !== undefined) response.setHeader('Vary', 'Origin');
+  return true;
 }
 
 async function consume(stream: AsyncGenerator<unknown, unknown>): Promise<void> {

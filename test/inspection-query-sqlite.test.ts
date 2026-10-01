@@ -1,0 +1,189 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
+import type { AgentContext, Clock, EvidenceRecord } from '../src/contracts/index.js';
+import { createSqlitePersistence } from '../src/infrastructure/sqlite/index.js';
+import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
+
+const roots: string[] = [];
+const now = '2026-09-30T10:00:00.000Z';
+const clock: Clock = { now: () => new Date(now) };
+
+afterEach(async () => {
+  await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
+});
+
+function context(runId: string, profileId: string): AgentContext {
+  return {
+    runId,
+    status: 'completed',
+    stage: 'postmortem',
+    profileId,
+    messages: [],
+    pendingToolCalls: [],
+    confirmedToolCallIds: [],
+    rejectedToolCallIds: [],
+    executedActions: [],
+    evidenceIds: ['evidence-1'],
+    missingEvidence: ['logs'],
+    budget: { startedAt: now, maxIterations: 8, iteration: 1, maxToolCalls: 16, toolCallsUsed: 1, maxDurationMs: 60_000 },
+    contextVersion: 1,
+  };
+}
+
+function evidence(): EvidenceRecord {
+  return {
+    evidenceId: 'evidence-1',
+    runId: 'run-1',
+    source: 'metric',
+    summary: { failureRate: 0.15, endpoint: 'http://10.0.0.2:9090' },
+    raw: { privateMarker: 'sqlite-raw-marker' },
+    businessTraceIds: ['trace-1'],
+    capturedAt: '2026-09-30T10:00:01.000Z',
+  };
+}
+
+function ids() {
+  let value = 0;
+  return { next: (prefix: string) => `${prefix}-${++value}` };
+}
+
+async function commitManifest(
+  persistence: ReturnType<typeof createSqlitePersistence>,
+  input: { evidenceId: string; manifestId: string; runId: string; capturedAt: string },
+): Promise<void> {
+  await persistence.evidenceManifests.createPending({
+    manifestId: input.manifestId,
+    evidenceId: input.evidenceId,
+    runId: input.runId,
+    stepId: 'step-1',
+    toolCallId: 'tool-1',
+    captureKey: `capture-${input.evidenceId}`,
+    source: 'log',
+    queryDigest: 'query-digest',
+    timeRange: { start: input.capturedAt, end: input.capturedAt },
+    compression: 'gzip_ndjson',
+    redactionPolicyVersion: 'v1',
+    createdAt: input.capturedAt,
+  });
+  await persistence.evidenceManifests.commit({
+    evidenceId: input.evidenceId,
+    descriptor: {
+      manifestId: input.manifestId,
+      evidenceId: input.evidenceId,
+      captureKey: `capture-${input.evidenceId}`,
+      compression: 'gzip_ndjson',
+      sourceBytes: 0,
+      storedBytes: 0,
+      rawSha256: 'a'.repeat(64),
+      chunks: [],
+    },
+    summary: { recordCount: 0, sourceBytes: 0, levels: [], services: [], exceptionSignatures: [], traceIds: [], samples: [] },
+    coverage: 1,
+    truncated: false,
+    missingEvidence: [],
+    updatedAt: input.capturedAt,
+    committedAt: input.capturedAt,
+  });
+}
+
+describe('SQLite inspection query read model', () => {
+  it('accepts the public maximum page size when Run evidence includes manifests', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-page-limit-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      await persistence.checkpoints.save(context('run-1', 'profile-a'), null);
+      for (let index = 0; index < 100; index += 1) {
+        const suffix = String(index).padStart(3, '0');
+        await commitManifest(persistence, {
+          evidenceId: `evidence-${suffix}`,
+          manifestId: `manifest-${suffix}`,
+          runId: 'run-1',
+          capturedAt: now,
+        });
+      }
+
+      const page = await persistence.queries.listEvidence('run-1', { limit: 100 });
+
+      expect(page.items).toHaveLength(100);
+      expect(page.nextCursor).toBeUndefined();
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('finds a Subagent relationship after more than 250 lifecycle-unrelated events', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-subagent-relation-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      await persistence.checkpoints.save(context('parent-run', 'profile-a'), null);
+      await persistence.checkpoints.save(context('child-run', 'profile-a'), null);
+      const factory = new EventFactoryV2(clock, ids());
+      const filler = Array.from({ length: 250 }, () => factory.create('RUN_STARTED', {
+        runId: 'child-run', correlationId: 'corr-child', visibility: 'public', durability: 'durable',
+      }, {
+        profile: 'profile-a', trigger: 'manual', deadline: now, versionSnapshot: {},
+      }));
+      const started = factory.create('SUBAGENT_STARTED', {
+        runId: 'child-run', correlationId: 'corr-child', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      });
+      await persistence.eventMessages.append('child-run', 0, [...filler, started]);
+
+      const detail = await persistence.queries.getRun('parent-run');
+
+      expect(detail?.childRunIds).toEqual(['child-run']);
+      expect((await persistence.queries.getRun('child-run'))?.parentRunId).toBe('parent-run');
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('paginates and reopens safe Run and Evidence views without selecting raw payloads', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-query-'));
+    roots.push(root);
+    const path = join(root, 'runtime.sqlite');
+    const first = createSqlitePersistence({ path, clock });
+    await first.checkpoints.save(context('run-1', 'profile-a'), null);
+    await first.checkpoints.save(context('run-2', 'profile-a'), null);
+    await first.evidence.save(evidence());
+    await first.evidenceManifests.createPending({
+      manifestId: 'manifest-1', evidenceId: 'log-evidence-1', runId: 'run-1', stepId: 'step-1', toolCallId: 'tool-1',
+      captureKey: 'capture-log-1', source: 'log', queryDigest: 'query-digest',
+      timeRange: { start: now, end: now }, compression: 'gzip_ndjson', redactionPolicyVersion: 'v1', createdAt: now,
+    });
+    expect((await first.queries.listEvidence('run-1')).items.map((item) => item.evidenceId)).toEqual(['evidence-1']);
+    await first.evidenceManifests.commit({
+      evidenceId: 'log-evidence-1',
+      descriptor: {
+        manifestId: 'manifest-1', evidenceId: 'log-evidence-1', captureKey: 'capture-log-1', compression: 'gzip_ndjson',
+        sourceBytes: 0, storedBytes: 0, rawSha256: 'a'.repeat(64), chunks: [],
+      },
+      summary: { recordCount: 0, sourceBytes: 0, levels: [], services: [], exceptionSignatures: [], traceIds: [], samples: [] },
+      coverage: 1, truncated: false, missingEvidence: [], updatedAt: now, committedAt: now,
+    });
+    const page = await first.queries.listRuns({ profileId: 'profile-a', limit: 1 });
+    expect(page.items).toHaveLength(1);
+    expect(page.nextCursor).toBeTypeOf('string');
+    const evidencePage = await first.queries.listEvidence('run-1');
+    expect(evidencePage.items.map((item) => item.evidenceId)).toEqual(['log-evidence-1', 'evidence-1']);
+    expect(evidencePage.items[1]).toMatchObject({ evidenceId: 'evidence-1', traceIdCount: 1 });
+    expect(JSON.stringify(evidencePage)).not.toContain('sqlite-raw-marker');
+    first.close();
+
+    const second = createSqlitePersistence({ path, clock });
+    try {
+      const detail = await second.queries.getRun('run-1');
+      expect(detail).toMatchObject({ runId: 'run-1', status: 'completed', missingEvidence: ['logs'] });
+      expect(await second.queries.getEvidence('other-run', 'evidence-1')).toBeNull();
+      expect((await second.queries.getEvidence('run-1', 'evidence-1'))?.summary).toEqual({ failureRate: 0.15, endpoint: '[REDACTED]' });
+    } finally {
+      second.close();
+    }
+  });
+});

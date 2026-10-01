@@ -5,6 +5,7 @@ import type {
   EvidenceManifest,
   EvidenceManifestSummary,
   EvidenceManifestStore,
+  EvidenceManifestQueryStore,
   EvidenceSummary,
   FailEvidenceManifestInput,
   RecordEvidenceManifestChunkInput,
@@ -88,7 +89,7 @@ interface ChunkRow {
   committed_at: string;
 }
 
-export class SqliteEvidenceManifestStore implements EvidenceManifestStore {
+export class SqliteEvidenceManifestStore implements EvidenceManifestStore, EvidenceManifestQueryStore {
   public constructor(private readonly database: SqliteDatabase) {}
 
   public createPending(input: CreateEvidenceManifestInput): Promise<EvidenceManifest> {
@@ -249,6 +250,30 @@ export class SqliteEvidenceManifestStore implements EvidenceManifestStore {
     return toVisibleSummary(manifest);
   }
 
+  public listVisibleByRun(runId: string, options: { cursor?: string; limit?: number } = {}): Promise<{ items: EvidenceManifestSummary[]; nextCursor?: string }> {
+    return Promise.resolve().then(() => {
+      const limit = manifestPageLimit(options.limit);
+      const cursor = options.cursor === undefined ? undefined : decodeManifestCursor(options.cursor);
+      if (cursor !== undefined && cursor.runId !== runId) throw new Error('manifest cursor does not belong to this Run');
+      const rows = cursor === undefined
+        ? this.database.raw.prepare(`
+          SELECT ${MANIFEST_COLUMNS} FROM evidence_blob_manifests
+          WHERE run_id = ? AND state IN ('committed', 'partial')
+          ORDER BY range_start, evidence_id LIMIT ?
+        `).all(runId, limit + 1) as ManifestRow[]
+        : this.database.raw.prepare(`
+          SELECT ${MANIFEST_COLUMNS} FROM evidence_blob_manifests
+          WHERE run_id = ? AND state IN ('committed', 'partial')
+            AND (range_start > ? OR (range_start = ? AND evidence_id > ?))
+          ORDER BY range_start, evidence_id LIMIT ?
+        `).all(runId, cursor.capturedAt, cursor.capturedAt, cursor.evidenceId, limit + 1) as ManifestRow[];
+      const hasMore = rows.length > limit;
+      const items = rows.slice(0, limit).map((row) => toVisibleSummary(this.readManifest(row)));
+      const last = items.at(-1);
+      return { items, ...(hasMore && last !== undefined ? { nextCursor: encodeManifestCursor(last) } : {}) };
+    });
+  }
+
   private requireManifest(evidenceId: string): EvidenceManifest {
     return this.readManifest(this.requireManifestRow(evidenceId));
   }
@@ -351,6 +376,30 @@ function toVisibleSummary(manifest: EvidenceManifest): EvidenceManifestSummary {
     ...(manifest.retentionUntil === undefined ? {} : { retentionUntil: manifest.retentionUntil }),
     ...(manifest.committedAt === undefined ? {} : { committedAt: manifest.committedAt }),
   };
+}
+
+function manifestPageLimit(value: number | undefined): number {
+  if (value === undefined) return 50;
+  if (!Number.isSafeInteger(value) || value <= 0 || value > 100) throw new RangeError('manifest page limit must be between 1 and 100');
+  return value;
+}
+
+interface ManifestCursor { runId: string; capturedAt: string; evidenceId: string }
+
+function encodeManifestCursor(manifest: EvidenceManifestSummary): string {
+  return Buffer.from(JSON.stringify({ runId: manifest.runId, capturedAt: manifest.timeRange.start, evidenceId: manifest.evidenceId }), 'utf8').toString('base64url');
+}
+
+function decodeManifestCursor(value: string): ManifestCursor {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as unknown;
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw new Error('invalid');
+    const candidate = parsed as Partial<ManifestCursor>;
+    if (typeof candidate.runId !== 'string' || typeof candidate.capturedAt !== 'string' || typeof candidate.evidenceId !== 'string') throw new Error('invalid');
+    return candidate as ManifestCursor;
+  } catch {
+    throw new Error('manifest cursor is invalid');
+  }
 }
 
 function chunkFromRow(row: ChunkRow, evidenceId: string): EvidenceChunkRef {

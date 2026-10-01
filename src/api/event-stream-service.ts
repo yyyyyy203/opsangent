@@ -1,5 +1,4 @@
 import type {
-  AgentEventEnvelopeV2,
   AgentMessageV2,
   EventStore,
   JsonObject,
@@ -7,6 +6,7 @@ import type {
 } from '../contracts/index.js';
 import { isJsonValue } from '../contracts/message-v2/common.js';
 import type { PublicAgentEventV2, PublicEventProjectorV2 } from '../event/projectors/public-projector.js';
+import { PublicMessageProjectorV2 } from '../event/projectors/public-message-projector.js';
 import type { EventProjectorV2 } from '../event/v2/event-publisher.js';
 import type { ReplayBufferV2 } from '../event/v2/replay-buffer.js';
 import type { SseFrame } from './sse-encoder.js';
@@ -47,6 +47,11 @@ export class EventStreamService {
     }
   }
 
+  /** Validate a reconnect cursor before an HTTP transport commits response headers. */
+  public async validateCursor(runId: string, lastEventId: string | undefined): Promise<void> {
+    await this.resolveCursor(runId, lastEventId);
+  }
+
   public async *open(options: EventStreamOpenOptionsV2): AsyncGenerator<SseFrame, void> {
     if (isAborted(options.signal)) return;
     const cursor = await this.resolveCursor(options.runId, options.lastEventId);
@@ -76,14 +81,42 @@ export class EventStreamService {
     options.signal?.addEventListener('abort', close, { once: true });
 
     try {
-      const catchup = await this.readAvailableAfter(options.runId, cursor.sequence);
-      if (await this.needsSnapshot(options.runId, cursor.sequence, catchup)) {
-        yield this.messageSnapshotFrame(options.runId, await this.publicMessages(options.runId));
+      const catchupUpperBound = await this.options.store.currentSequence(options.runId);
+      const transient = this.options.replay.readAfter(options.runId, cursor.sequence)
+        .filter((event) => event.sequence <= catchupUpperBound);
+      if (cursor.sequence > 0) {
+        const messages = await this.publicMessages(options.runId);
+        if (messages.length > 0) yield this.messageSnapshotFrame(options.runId, messages);
       }
-      for (const event of catchup) {
-        const projected = this.options.projector.project(event);
+      let transientIndex = 0;
+      let afterSequence = cursor.sequence;
+      for (;;) {
+        const durable = await this.options.store.readRun(options.runId, afterSequence, this.readBatchSize);
+        if (durable.length === 0) break;
+        let reachedCatchupUpperBound = false;
+        for (const event of durable) {
+          if (event.sequence > catchupUpperBound) {
+            reachedCatchupUpperBound = true;
+            break;
+          }
+          while (transient[transientIndex]?.sequence !== undefined && transient[transientIndex]!.sequence < event.sequence) {
+            const projectedTransient = this.options.projector.project(transient[transientIndex]!);
+            const transientFrame = projectedTransient === null ? null : this.toFrame(projectedTransient, seenSequences);
+            if (transientFrame !== null) yield transientFrame;
+            transientIndex += 1;
+          }
+          afterSequence = event.sequence;
+          const projected = this.options.projector.project(event);
+          const frame = projected === null ? null : this.toFrame(projected, seenSequences);
+          if (frame !== null) yield frame;
+        }
+        if (reachedCatchupUpperBound || durable.length < this.readBatchSize || afterSequence >= catchupUpperBound) break;
+      }
+      while (transient[transientIndex] !== undefined) {
+        const projected = this.options.projector.project(transient[transientIndex]!);
         const frame = projected === null ? null : this.toFrame(projected, seenSequences);
         if (frame !== null) yield frame;
+        transientIndex += 1;
       }
 
       while (!closed && !isAborted(options.signal)) {
@@ -109,42 +142,13 @@ export class EventStreamService {
     return { sequence: event.sequence };
   }
 
-  private async readAvailableAfter(runId: string, sequence: number): Promise<AgentEventEnvelopeV2[]> {
-    const durable = await this.readAllDurableAfter(runId, sequence);
-    const transient = this.options.replay.readAfter(runId, sequence);
-    return [...durable, ...transient]
-      .sort((left, right) => left.sequence - right.sequence)
-      .filter((event, index, events) => index === 0 || event.sequence !== events[index - 1]?.sequence);
-  }
-
-  private async readAllDurableAfter(runId: string, sequence: number): Promise<AgentEventEnvelopeV2[]> {
-    const events: AgentEventEnvelopeV2[] = [];
-    let after = sequence;
-    for (;;) {
-      const batch = await this.options.store.readRun(runId, after, this.readBatchSize);
-      if (batch.length === 0) return events;
-      events.push(...batch);
-      after = batch[batch.length - 1]?.sequence ?? after;
-      if (batch.length < this.readBatchSize) return events;
-    }
-  }
-
-  private async needsSnapshot(runId: string, cursorSequence: number, available: readonly AgentEventEnvelopeV2[]): Promise<boolean> {
-    const currentSequence = await this.options.store.currentSequence(runId);
-    if (currentSequence <= cursorSequence) return false;
-    const availableSequences = new Set(available.map((event) => event.sequence));
-    for (let sequence = cursorSequence + 1; sequence <= currentSequence; sequence += 1) {
-      if (!availableSequences.has(sequence) && (await this.publicMessages(runId)).length > 0) return true;
-    }
-    return false;
-  }
-
   private async publicMessages(runId: string): Promise<AgentMessageV2[]> {
+    const projector = new PublicMessageProjectorV2();
     const stored = await this.options.messages.listMessagesByRun(runId);
     return stored
       .map(({ message }) => message)
-      .filter((message) => message.visibility !== 'audit')
-      .map((message) => publicMessageSnapshot(message));
+      .map((message) => projector.project(message))
+      .filter((message): message is AgentMessageV2 => message !== null);
   }
 
   private messageSnapshotFrame(runId: string, messages: AgentMessageV2[]): SseFrame {
@@ -158,18 +162,6 @@ export class EventStreamService {
     seenSequences.add(event.sequence);
     return { id: event.eventId, event: event.type, data: event as unknown as JsonObject };
   }
-}
-
-function publicMessageSnapshot(message: AgentMessageV2): AgentMessageV2 {
-  const snapshot = structuredClone(message);
-  delete snapshot.metadata;
-  snapshot.blocks = snapshot.blocks
-    .filter((block) => block.type !== 'raw_tool_call')
-    .map((block) => {
-      delete block.metadata;
-      return block;
-    });
-  return snapshot;
 }
 
 function isAborted(signal: AbortSignal | undefined): boolean {

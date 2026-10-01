@@ -27,6 +27,33 @@ function runtime(replay = new ReplayBufferV2({ maxEvents: 20, maxBytes: 100_000 
   return { store, publisher, service, factory: new EventFactoryV2(clock, ids()) };
 }
 
+function runtimeWithReadCounter() {
+  const store = new InMemoryEventMessageStore();
+  let reads = 0;
+  const trackedStore = {
+    append: store.append.bind(store),
+    reserveSequence: store.reserveSequence.bind(store),
+    readRun: async (...input: Parameters<InMemoryEventMessageStore['readRun']>) => {
+      reads += 1;
+      return store.readRun(...input);
+    },
+    findById: store.findById.bind(store),
+    currentSequence: store.currentSequence.bind(store),
+    listRunIds: store.listRunIds.bind(store),
+  };
+  const replay = new ReplayBufferV2({ maxEvents: 20, maxBytes: 100_000 });
+  const publisher = new EventPublisherV2(trackedStore, replay, new InMemoryProjectionFailureSink());
+  const service = new EventStreamService({
+    store: trackedStore,
+    replay,
+    messages: store,
+    source: publisher,
+    projector: new PublicEventProjectorV2(),
+    readBatchSize: 1,
+  });
+  return { publisher, service, factory: new EventFactoryV2(clock, ids()), readCount: () => reads };
+}
+
 async function readFrames(iterator: AsyncIterator<SseFrame>, count: number): Promise<SseFrame[]> {
   const frames: SseFrame[] = [];
   while (frames.length < count) {
@@ -45,6 +72,21 @@ function publicEventData(frame: SseFrame): { sequence: number; runId: string } {
 }
 
 describe('EventStreamService', () => {
+  it('yields the first durable catch-up frame without loading the entire Run history', async () => {
+    const { publisher, service, factory, readCount } = runtimeWithReadCounter();
+    for (let index = 0; index < 3; index += 1) {
+      await publisher.publish(factory.create('RUN_STARTED', {
+        runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'durable',
+      }, { profile: 'group-buy-market', trigger: 'manual', deadline: clock.now().toISOString(), versionSnapshot: {} }));
+    }
+
+    const stream = service.open({ runId: 'run-1' });
+    await expect(stream.next()).resolves.toMatchObject({ done: false });
+    await stream.return(undefined);
+
+    expect(readCount()).toBe(1);
+  });
+
   it('replays stored public events from the start of a run', async () => {
     const { publisher, service, factory } = runtime();
     const first = await publisher.publish(factory.create('RUN_STARTED', {
@@ -180,5 +222,83 @@ describe('EventStreamService', () => {
         }],
       },
     });
+  });
+
+  it('projects tool results without exposing raw response content or audit-only blocks', async () => {
+    const replay = new ReplayBufferV2({ maxEvents: 1, maxBytes: 100_000 });
+    const { store, publisher, service, factory } = runtime(replay);
+    const first = await publisher.publish(factory.create('RUN_STARTED', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'durable',
+    }, { profile: 'group-buy-market', trigger: 'manual', deadline: clock.now().toISOString(), versionSnapshot: {} }));
+    await publisher.publish(factory.create('CONTENT_BLOCK_DELTA', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'transient',
+    }, { messageId: 'message-1', blockId: 'block-1', delta: 'progress', index: 0 }));
+    await publisher.publish(factory.create('CONTENT_BLOCK_DELTA', {
+      runId: 'run-1', correlationId: 'corr-1', visibility: 'public', durability: 'transient',
+    }, { messageId: 'message-1', blockId: 'block-1', delta: 'done', index: 1 }));
+    await store.saveMessage({
+      schemaVersion: 2,
+      id: 'message-1',
+      runId: 'run-1',
+      role: 'tool',
+      status: 'completed',
+      visibility: 'user',
+      blocks: [
+        { type: 'tool_call', blockId: 'call-1', call: { id: 'call-1', name: 'logs.search', input: { token: 'sk-secret-value' } } },
+        {
+          type: 'tool_result',
+          blockId: 'result-1',
+          result: {
+            toolCallId: 'call-1',
+            toolName: 'logs.search',
+            status: 'success',
+            response: { blocks: [{ type: 'text', text: 'internal response marker' }] },
+            startedAt: clock.now().toISOString(),
+          },
+          attempt: { attemptId: 'attempt-1', number: 1 },
+          evidenceIds: ['evidence-1'],
+        },
+      ],
+      createdAt: clock.now().toISOString(),
+    }, null);
+
+    const stream = service.open({ runId: 'run-1', lastEventId: first.eventId });
+    const frames = await readFrames(stream, 1);
+    await stream.return(undefined);
+
+    expect(frames[0]).toEqual({
+      event: 'message_snapshot',
+      data: {
+        schemaVersion: 2,
+        runId: 'run-1',
+        messages: [{
+          schemaVersion: 2,
+          id: 'message-1',
+          runId: 'run-1',
+          role: 'tool',
+          status: 'completed',
+          visibility: 'user',
+          blocks: [{
+            type: 'tool_call',
+            blockId: 'call-1',
+            call: { id: 'call-1', name: 'logs.search', input: {} },
+          }, {
+            type: 'tool_result',
+            blockId: 'result-1',
+            result: {
+              toolCallId: 'call-1',
+              toolName: 'logs.search',
+              status: 'success',
+              startedAt: clock.now().toISOString(),
+            },
+            attempt: { attemptId: 'attempt-1', number: 1 },
+            evidenceIds: ['evidence-1'],
+          }],
+          createdAt: clock.now().toISOString(),
+        }],
+      },
+    });
+    expect(JSON.stringify(frames[0])).not.toContain('sk-secret-value');
+    expect(JSON.stringify(frames[0])).not.toContain('internal response marker');
   });
 });

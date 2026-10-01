@@ -323,6 +323,14 @@ export interface EvidenceManifestStore {
   getVisible(evidenceId: string): Promise<EvidenceManifestSummary | null>;
 }
 
+/** Optional read-side extension; pending/failed manifests must not be returned. */
+export interface EvidenceManifestQueryStore {
+  listVisibleByRun(runId: string, options?: { cursor?: string; limit?: number }): Promise<{
+    items: EvidenceManifestSummary[];
+    nextCursor?: string;
+  }>;
+}
+
 export interface StreamingEvidenceCaptureRequest {
   evidenceId: string;
   runId: string;
