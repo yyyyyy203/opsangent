@@ -16,7 +16,8 @@
     "lab:start": "pnpm build && node apps/metrics-lab/index.mjs",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "web:server": "pnpm build && node apps/agent-server/index.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

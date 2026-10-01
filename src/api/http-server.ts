@@ -21,6 +21,8 @@ export interface InspectionHttpServerOptions {
   execution?: RunExecutionCoordinator;
   confirmation?: Pick<WebConfirmationService, 'decide'>;
   allowedOrigins?: readonly string[];
+  allowedHosts?: readonly string[];
+  allowedProfileIds?: readonly string[];
   heartbeatTimer?: {
     set(callback: () => void, ms: number): unknown;
     clear(handle: unknown): void;
@@ -69,6 +71,7 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
 async function handleRequest(request: IncomingMessage, response: ServerResponse, options: InspectionHttpServerOptions, maxBodyBytes: number): Promise<void> {
   const method = request.method ?? 'GET';
   const parsed = new URL(request.url ?? '/', 'http://localhost');
+  if (!applyHost(request, response, options.allowedHosts)) return;
   if (!applyCors(request, response, options.allowedOrigins)) return;
   response.setHeader('Access-Control-Allow-Headers', 'Content-Type, Last-Event-ID');
   response.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
@@ -101,6 +104,9 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
   if (method === 'POST' && parsed.pathname === '/runs') {
     const body = await readJson(request, maxBodyBytes);
     const run = toReplyOptions(body);
+    if (options.allowedProfileIds !== undefined && !options.allowedProfileIds.includes(run.profileId)) {
+      throw Object.assign(new Error('profileId is not enabled.'), { code: 'PROFILE_NOT_ALLOWED', statusCode: 400 });
+    }
     const runId = run.runId ?? randomUUID();
     const requestOptions = { ...run, runId };
     if (options.execution === undefined) void consume(options.agent.replyStream(requestOptions));
@@ -310,6 +316,18 @@ function applyCors(request: IncomingMessage, response: ServerResponse, allowedOr
   else if (allowedOrigins === undefined) response.setHeader('Access-Control-Allow-Origin', '*');
   if (allowedOrigins !== undefined) response.setHeader('Vary', 'Origin');
   return true;
+}
+
+function applyHost(request: IncomingMessage, response: ServerResponse, allowedHosts: readonly string[] | undefined): boolean {
+  if (allowedHosts === undefined) return true;
+  const actual = request.headers.host?.toLowerCase();
+  if (actual !== undefined && allowedHosts.some((allowed) => hostMatches(actual, allowed.toLowerCase()))) return true;
+  writeJson(response, 403, { error: 'FORBIDDEN_HOST', message: 'Host is not allowed.' });
+  return false;
+}
+
+function hostMatches(actual: string, allowed: string): boolean {
+  return actual === allowed || actual.startsWith(`${allowed}:`);
 }
 
 async function consume(stream: AsyncGenerator<unknown, unknown>): Promise<void> {

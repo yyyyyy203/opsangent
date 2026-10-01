@@ -14,6 +14,7 @@ import type {
 import type { ProjectionCheckpointStoreV2 } from '../../event/v2/projection-runner.js';
 import type { ProjectionFailureSinkV2 } from '../../event/v2/event-publisher.js';
 import type { InspectionQueryService } from '../../contracts/read-model.js';
+import type { MessageCursorCodec, WebMessageQueries } from '../../contracts/web-read-model.js';
 import { SqliteDatabase } from './database.js';
 import { SqliteDurableStateStore } from './durable-state-store.js';
 import { SqliteEventOutboxStore } from './event-outbox-store.js';
@@ -23,6 +24,7 @@ import { SqliteEvidenceStore } from './sqlite-evidence-store.js';
 import { SqliteEvidenceManifestStore } from './blob-manifest-store.js';
 import { LocalEvidenceBlobStore } from '../blob/local-evidence-blob-store.js';
 import { SqliteInspectionQueryService } from './inspection-query-service.js';
+import { SqliteWebMessageQuery } from './web-message-query.js';
 
 export interface SqlitePersistenceLimits {
   maxEvidenceRawBytes?: number;
@@ -47,6 +49,7 @@ export interface SqlitePersistenceBundle {
   evidenceManifests: EvidenceManifestStore;
   evidenceBlobs?: EvidenceBlobStore;
   eventMessages: EventStore & MessageStore;
+  webMessages(cursorCodec: MessageCursorCodec): WebMessageQueries;
   queries: InspectionQueryService;
   projectionCheckpoints: ProjectionCheckpointStoreV2;
   projectionFailures: ProjectionFailureSinkV2;
@@ -82,6 +85,7 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       evidenceManifests,
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
       eventMessages,
+      webMessages: (cursorCodec) => new SqliteWebMessageQuery(database, cursorCodec),
       queries: new SqliteInspectionQueryService(database, durable, evidenceManifests),
       projectionCheckpoints: new SqliteProjectionCheckpointStore(database),
       projectionFailures: new SqliteProjectionFailureSink(database, () => clock.now().toISOString()),

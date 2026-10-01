@@ -85,6 +85,8 @@ import { UnavailableImpactSurfaceProvider } from '../profiles/unavailable-impact
 import { DefaultStreamingEvidenceRecorder } from './streaming-evidence-recorder.js';
 import { InMemoryInspectionQueryService } from '../storage/in-memory-inspection-query.js';
 import type { InspectionQueryService } from '../contracts/read-model.js';
+import type { MessageCursorCodec, WebMessageQueries } from '../contracts/web-read-model.js';
+import { InMemoryWebMessageQuery } from '../storage/in-memory-web-message-query.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -450,6 +452,9 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     langSmithProjectionRunnerV2,
     ready,
     messageAssemblerV2,
+    webMessages: (cursorCodec: MessageCursorCodec): WebMessageQueries => (
+      persistence?.webMessages(cursorCodec) ?? new InMemoryWebMessageQuery(cursorCodec)
+    ),
     replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
     eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
     close: async (): Promise<void> => {
