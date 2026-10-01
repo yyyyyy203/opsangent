@@ -87,6 +87,7 @@ import { InMemoryInspectionQueryService } from '../storage/in-memory-inspection-
 import type { InspectionQueryService } from '../contracts/read-model.js';
 import type { MessageCursorCodec, WebMessageQueries } from '../contracts/web-read-model.js';
 import { InMemoryWebMessageQuery } from '../storage/in-memory-web-message-query.js';
+import type { RuntimeEventPublisher, RuntimeShutdownRegistry, SharedRuntimeEventPorts } from './runtime-ports.js';
 
 type EventMessageStore = EventStore & MessageStore;
 
@@ -95,6 +96,10 @@ export interface RuntimeToolPorts {
   evidenceBlobs?: EvidenceBlobStore;
   evidenceManifests?: EvidenceManifestStore;
   streamingEvidenceRecorder?: StreamingEvidenceRecorder;
+  evidence: EvidenceStore;
+  evidenceRecorder: EvidenceRecorder;
+  sharedEvents: SharedRuntimeEventPorts;
+  registerShutdownHook(callback: () => void | Promise<void>): void;
   toolResultCompactor: ToolResultCompactor;
   /** Shared V2 lifecycle ports for late-bound source/subagent Tools. */
   events: EventPublisherV2Dependencies;
@@ -143,6 +148,8 @@ export interface AgentRuntimeOptions {
   enableGovernance?: boolean;
   /** Use a durable V2 event/message store. Defaults to the in-memory store for tests. */
   eventMessageStore?: EventMessageStore;
+  /** Reuse a parent-owned V2 event store and publisher for a child Run. */
+  sharedEvents?: SharedRuntimeEventPorts;
   /** SQLite path for the complete Event, Checkpoint, Evidence and execution persistence bundle. */
   sqlitePath?: string;
   /** Explicit absolute Blob root used only when SQLite-backed L0 Blob storage is desired. */
@@ -159,8 +166,29 @@ export interface AgentRuntimeOptions {
 export function createAgentRuntime(options: AgentRuntimeOptions) {
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
+  const shutdownCallbacks: Array<() => void | Promise<void>> = [];
+  let shutdownStarted = false;
+  const shutdownRegistry: RuntimeShutdownRegistry = {
+    register: (callback) => {
+      if (shutdownStarted) throw new Error('Runtime shutdown has already started.');
+      shutdownCallbacks.push(callback);
+    },
+  };
+  const runShutdownHooks = async (): Promise<void> => {
+    if (shutdownStarted) return;
+    shutdownStarted = true;
+    for (const callback of shutdownCallbacks.splice(0)) await callback();
+  };
   if (options.enableGovernance === true && options.profileResolver === undefined) {
     throw new Error('profileResolver is required when governance is enabled.');
+  }
+  if (options.sharedEvents !== undefined && options.sqlitePath !== undefined) {
+    throw new Error('sharedEvents cannot be combined with sqlitePath');
+  }
+  if (options.sharedEvents !== undefined
+    && options.eventMessageStore !== undefined
+    && options.eventMessageStore !== options.sharedEvents.store) {
+    throw new Error('eventMessageStore must match sharedEvents.store');
   }
   if (options.sqlitePath !== undefined && (options.checkpoints !== undefined || options.eventMessageStore !== undefined)) {
     throw new Error('sqlitePath cannot be combined with partial persistence injection');
@@ -171,7 +199,8 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ids,
     ...(options.evidenceBlobRootPath === undefined ? {} : { evidenceBlobRootPath: options.evidenceBlobRootPath }),
   });
-  const inMemoryDurable = persistence === undefined && options.checkpoints === undefined
+  const inMemoryDurable = options.sharedEvents === undefined
+    && persistence === undefined && options.checkpoints === undefined
     ? new InMemoryDurableState(clock)
     : undefined;
   const durableState: DurableRunState | undefined = persistence ?? inMemoryDurable;
@@ -181,53 +210,70 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const observability = options.observability ?? new NoopObservability();
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
-  const eventStoreV2: EventMessageStore = options.eventMessageStore
+  const localEventStoreV2: EventMessageStore = options.eventMessageStore
     ?? persistence?.eventMessages
     ?? new InMemoryEventMessageStore();
   const replayV2 = new ReplayBufferV2({ maxEvents: 2_000, maxBytes: 4_000_000 });
   const projectionFailuresV2 = persistence?.projectionFailures ?? new InMemoryProjectionFailureSink();
-  const eventPublisherV2 = new EventPublisherV2(eventStoreV2, replayV2, projectionFailuresV2);
-  const eventFactoryV2 = new EventFactoryV2(clock, ids);
-  const durableOutboxDispatcher = durableState === undefined
+  const localEventPublisherV2 = options.sharedEvents === undefined
+    ? new EventPublisherV2(localEventStoreV2, replayV2, projectionFailuresV2)
+    : undefined;
+  const eventStoreV2: EventMessageStore = options.sharedEvents?.store ?? localEventStoreV2;
+  const eventPublisherV2: RuntimeEventPublisher = options.sharedEvents?.source ?? localEventPublisherV2 ?? {
+    publish: (event) => options.sharedEvents!.events.publisher.publish(event),
+    subscribe: () => () => undefined,
+    replayRun: async (runId, afterSequence = 0, limit = 1_000) => (
+      (await eventStoreV2.readRun(runId, afterSequence, limit)).length
+    ),
+  };
+  const eventFactoryV2 = options.sharedEvents?.events.factory ?? new EventFactoryV2(clock, ids);
+  const durableOutboxDispatcher = options.sharedEvents !== undefined || durableState === undefined
     ? undefined
-    : new DurableOutboxDispatcher({ outbox: durableState.outbox, publisher: eventPublisherV2, clock });
-  const publishingV2 = durableOutboxDispatcher === undefined
-    ? eventPublisherV2
+    : new DurableOutboxDispatcher({ outbox: durableState.outbox, publisher: localEventPublisherV2!, clock });
+  const localPublishingV2 = durableOutboxDispatcher === undefined
+    ? localEventPublisherV2
     : new OutboxedEventPublisher({
       outbox: durableState!.outbox,
       dispatcher: durableOutboxDispatcher,
-      publisher: eventPublisherV2,
-      eventStore: eventStoreV2,
+      publisher: localEventPublisherV2!,
+      eventStore: localEventStoreV2,
       clock,
     });
-  const v2EventDependencies = {
+  const publishingV2 = options.sharedEvents?.events.publisher ?? localPublishingV2!;
+  const v2EventDependencies: EventPublisherV2Dependencies = options.sharedEvents?.events ?? {
     factory: eventFactoryV2,
     publisher: publishingV2,
     correlationId: (runId: string) => `run:${runId}`,
     ...(durableOutboxDispatcher === undefined ? {} : { dispatcher: durableOutboxDispatcher }),
   };
   const v1ProjectorV2 = new V1CompatibilityProjector();
-  eventPublisherV2.subscribe({
-    name: 'v1-event-bus',
-    project: (event) => Promise.all(v1ProjectorV2.project(event).map((legacy) => events.publish(legacy))).then(() => undefined),
-  });
+  if (options.sharedEvents === undefined) {
+    localEventPublisherV2!.subscribe({
+      name: 'v1-event-bus',
+      project: (event) => Promise.all(v1ProjectorV2.project(event).map((legacy) => events.publish(legacy))).then(() => undefined),
+    });
+  }
   const projectionCheckpointsV2 = persistence?.projectionCheckpoints ?? new InMemoryProjectionCheckpointStore();
   const auditProjectorV2 = new AuditProjectorV2();
   const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
   const langSmithProjectionRunnerV2 = new ProjectionRunnerV2(langSmithProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const messageAssemblerV2 = new MessageAssemblerV2(eventStoreV2);
-  eventPublisherV2.subscribe(auditProjectionRunnerV2);
-  eventPublisherV2.subscribe(langSmithProjectionRunnerV2);
-  eventPublisherV2.subscribe({ name: 'message-assembler', project: (event) => messageAssemblerV2.apply(event).then(() => undefined) });
+  if (options.sharedEvents === undefined) {
+    localEventPublisherV2!.subscribe(auditProjectionRunnerV2);
+    localEventPublisherV2!.subscribe(langSmithProjectionRunnerV2);
+    localEventPublisherV2!.subscribe({ name: 'message-assembler', project: (event) => messageAssemblerV2.apply(event).then(() => undefined) });
+  }
   const publicProjectorV2 = new PublicEventProjectorV2();
   // Startup recovery is local-only by default. External LangSmith backfill stays explicit.
-  const ready = Promise.resolve().then(async () => {
-    await durableOutboxDispatcher?.drainAll();
-    // The V1 bridge is live-delivery only and has no durable projection
-    // cursor. Replaying it after draining the Outbox would duplicate events.
-    return eventPublisherV2.replayAll({ projectorNames: ['audit', 'message-assembler'] });
-  });
+  const ready = options.sharedEvents === undefined
+    ? Promise.resolve().then(async () => {
+      await durableOutboxDispatcher?.drainAll();
+      // The V1 bridge is live-delivery only and has no durable projection
+      // cursor. Replaying it after draining the Outbox would duplicate events.
+      return localEventPublisherV2!.replayAll({ projectorNames: ['audit', 'message-assembler'] });
+    })
+    : Promise.resolve(0);
   const evidenceBlobs = options.l0?.blobStore ?? persistence?.evidenceBlobs;
   const evidenceManifests = options.l0?.manifests ?? persistence?.evidenceManifests;
   const evidenceQuery = isEvidenceQueryStore(evidence) ? evidence : undefined;
@@ -256,14 +302,24 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       }));
   const evidenceRecorder = options.evidenceRecorder ?? new DefaultEvidenceRecorder({
     evidence,
-    events: { factory: eventFactoryV2, publisher: publishingV2, store: eventStoreV2, correlationId: (runId) => `run:${runId}` },
+    events: { ...v2EventDependencies, store: eventStoreV2 },
   });
+  const sharedEvents: SharedRuntimeEventPorts = options.sharedEvents ?? {
+    store: eventStoreV2,
+    events: v2EventDependencies,
+    source: eventPublisherV2,
+    replay: replayV2,
+  };
   let factoryTools: Tool[] = [];
   try {
     factoryTools = (options.toolFactories ?? []).flatMap((factory) => [...factory({
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
       ...(evidenceManifests === undefined ? {} : { evidenceManifests }),
       ...(streamingEvidenceRecorder === undefined ? {} : { streamingEvidenceRecorder }),
+      evidence,
+      evidenceRecorder,
+      sharedEvents,
+      registerShutdownHook: shutdownRegistry.register,
       toolResultCompactor,
       events: v2EventDependencies,
       checkpoints,
@@ -421,6 +477,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     streamingEvidenceRecorder,
     toolResultCompactor,
     evidenceRecorder,
+    sharedEvents,
     hitl: new HitlService(
       checkpoints,
       clock,
@@ -456,12 +513,22 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       persistence?.webMessages(cursorCodec) ?? new InMemoryWebMessageQuery(cursorCodec)
     ),
     replayRun: (runId: string, afterSequence?: number, limit?: number) => eventPublisherV2.replayRun(runId, afterSequence, limit),
-    eventStreamV2: new EventStreamService({ store: eventStoreV2, replay: replayV2, messages: eventStoreV2, source: eventPublisherV2, projector: publicProjectorV2 }),
+    eventStreamV2: new EventStreamService({
+      store: eventStoreV2,
+      replay: options.sharedEvents?.replay ?? replayV2,
+      messages: eventStoreV2,
+      source: eventPublisherV2,
+      projector: publicProjectorV2,
+    }),
     close: async (): Promise<void> => {
       try {
         await ready;
       } finally {
-        persistence?.close();
+        try {
+          await runShutdownHooks();
+        } finally {
+          persistence?.close();
+        }
       }
     },
   };

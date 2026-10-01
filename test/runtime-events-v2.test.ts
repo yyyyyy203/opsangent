@@ -121,4 +121,32 @@ describe('runtime V2 event wiring', () => {
     expect(types).toContain('STEP_FAILED');
     expect(types.indexOf('STEP_FAILED')).toBeLessThan(types.indexOf('RUN_FAILED'));
   });
+
+  it('publishes a shared child run through the parent V2 event port exactly once', async () => {
+    const parent = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'parent complete', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+    });
+    const child = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'child complete', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      checkpoints: parent.checkpoints,
+      evidence: parent.evidence,
+      evidenceRecorder: parent.evidenceRecorder,
+      sharedEvents: parent.sharedEvents,
+    });
+
+    try {
+      const result = await child.agent.reply({ runId: 'shared-child-run', message: 'inspect', profileId: 'simulation' });
+      const events = await parent.eventStoreV2.readRun(result.runId, 0, 100);
+      expect(events.length).toBeGreaterThan(0);
+      expect(new Set(events.map((event) => event.eventId)).size).toBe(events.length);
+      expect((await parent.eventStoreV2.listMessagesByRun(result.runId))).toHaveLength(1);
+    } finally {
+      await child.close();
+      await parent.close();
+    }
+  });
 });

@@ -1,8 +1,6 @@
 import type { AgentEventPayloadMap, AgentEventTypeV2, AgentMessage, ChatModel, Clock, IdGenerator, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
-import type { EventCreationContextV2 } from '../contracts/event-publisher.js';
-import type { EventFactoryV2 as EventFactoryImplementation } from '../event/v2/event-factory.js';
-import type { EventPublisherV2Like } from '../contracts/event-publisher.js';
+import type { EventCreationContextV2, EventFactoryV2Like, EventPublisherV2Like } from '../contracts/event-publisher.js';
 
 export interface EventedChatModelOptions {
   provider: string;
@@ -18,7 +16,7 @@ export class EventedChatModel implements ChatModel {
   public constructor(
     private readonly delegate: ChatModel,
     private readonly publisher: EventPublisherV2Like,
-    private readonly factory: EventFactoryImplementation,
+    private readonly factory: EventFactoryV2Like,
     private readonly config: EventedChatModelOptions,
   ) {}
 
