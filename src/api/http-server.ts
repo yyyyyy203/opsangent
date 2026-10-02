@@ -45,8 +45,9 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
   if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new RangeError('port must be between 0 and 65535');
   if (!Number.isSafeInteger(maxBodyBytes) || maxBodyBytes <= 0) throw new RangeError('maxBodyBytes must be positive');
 
+  const shutdown = new AbortController();
   const server = createServer((request, response) => {
-    void handleRequest(request, response, options, maxBodyBytes).catch((error: unknown) => {
+    void handleRequest(request, response, options, maxBodyBytes, shutdown.signal).catch((error: unknown) => {
       if (response.headersSent) { response.destroy(); return; }
       const status = typeof error === 'object' && error !== null && 'statusCode' in error && typeof error.statusCode === 'number' ? error.statusCode : 500;
       const clientVisible = status >= 400 && status < 500;
@@ -64,11 +65,14 @@ export async function startInspectionHttpServer(options: InspectionHttpServerOpt
     port: address.port,
     url: `http://${host}:${address.port}`,
     server,
-    close: () => close(server),
+    close: () => {
+      shutdown.abort();
+      return close(server);
+    },
   };
 }
 
-async function handleRequest(request: IncomingMessage, response: ServerResponse, options: InspectionHttpServerOptions, maxBodyBytes: number): Promise<void> {
+async function handleRequest(request: IncomingMessage, response: ServerResponse, options: InspectionHttpServerOptions, maxBodyBytes: number, shutdownSignal: AbortSignal): Promise<void> {
   const method = request.method ?? 'GET';
   const parsed = new URL(request.url ?? '/', 'http://localhost');
   if (!applyHost(request, response, options.allowedHosts)) return;
@@ -97,7 +101,7 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
       writeJson(response, 404, { error: 'NOT_FOUND', message: 'Run not found.' });
       return;
     }
-    await streamEvents(request, response, options.events, runId, lastEventId, snapshots[0] !== 'none', options.heartbeatTimer);
+    await streamEvents(request, response, options.events, runId, lastEventId, snapshots[0] !== 'none', options.heartbeatTimer, shutdownSignal);
     return;
   }
 
@@ -221,6 +225,7 @@ export async function streamEvents(
     set: (callback, ms) => setInterval(callback, ms),
     clear: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
   },
+  shutdownSignal?: AbortSignal,
 ): Promise<void> {
   try {
     await events.validateCursor(runId, lastEventId);
@@ -232,6 +237,9 @@ export async function streamEvents(
   const abort = () => controller.abort();
   request.on('aborted', abort);
   response.on('close', abort);
+  shutdownSignal?.addEventListener('abort', abort, { once: true });
+  if (shutdownSignal?.aborted) abort();
+  const socket = response.socket;
   const iterator = events.open({ runId, signal: controller.signal, includeMessageSnapshot, ...(lastEventId === undefined ? {} : { lastEventId }) });
   let heartbeat: unknown;
   let heartbeatPending = false;
@@ -274,7 +282,10 @@ export async function streamEvents(
     await iterator.return?.(undefined);
     request.off('aborted', abort);
     response.off('close', abort);
+    shutdownSignal?.removeEventListener('abort', abort);
     if (!response.writableEnded) response.end();
+    // Ending an SSE response can leave its keep-alive socket open and block server.close().
+    if (shutdownSignal?.aborted) socket?.destroy();
   }
 }
 

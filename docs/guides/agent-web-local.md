@@ -83,11 +83,22 @@ pnpm e2e
 
 fixture 不代表真实模型、Prometheus 或 ELK 已接通。真实数据源烟测必须另行配置并明确记录未验证项；当前 `D:\xfg\group-buy-market` 仍按只读目标处理。
 
+Docker 已启动且本地 Prometheus 可访问 `http://127.0.0.1:19090/-/ready` 后，可以显式运行真实 Prometheus 验收：
+
+```powershell
+$env:AGENTOPS_REAL_PROMETHEUS_WEB = '1'
+pnpm exec vitest run test/http-server.test.ts test/metrics-web-real-prometheus.test.ts
+pnpm exec playwright test test/e2e/metrics-web.spec.ts --project=real-metrics
+Remove-Item Env:AGENTOPS_REAL_PROMETHEUS_WEB
+```
+
+这些测试使用模拟器产生遥测、真实 Prometheus 查询和脚本模型；父 Run 记录子 Run 身份和证据引用，证据摘要需进入 Metrics 子 Run 查看。验收还检查父子 Run 的公开消息与 SSE 不泄漏原始指标。浏览器测试验证已完成 Run 的 SSE 连接在 Web 重启前存在，重启后可以重新连接并查询父子 Run 和子 Run 证据。运行中 Run 的关闭、取消与 checkpoint 排空不在本次验收范围内。
+
 ## 当前验证状态（2026-10-02）
 
 - `pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`：通过。
-- `pnpm test`：112 个测试文件通过、2 个显式 opt-in 真实 Prometheus 文件跳过；613 个测试通过、3 个跳过。
+- `pnpm test`：112 个测试文件通过、2 个显式 opt-in 真实 Prometheus 文件跳过；614 个测试通过、3 个跳过。
 - `pnpm e2e`：固定工具项目 4/4 通过；默认流程未连接 Docker、Prometheus 或外部凭据。
-- `pnpm lint`：新增的真实指标 E2E fixture 已纳入脚本忽略边界；当前仍有一个未被本增量修改的既有错误：`src/application/create-runtime.ts:322` 的 `@typescript-eslint/unbound-method`。
-- 真实 Prometheus Web 验收尚未运行：`127.0.0.1:19090` 当前没有监听服务。具备本地 Prometheus 后，显式执行 `AGENTOPS_REAL_PROMETHEUS_WEB=1` 的 Vitest 与 Playwright 命令，并单独记录结果。
+- `pnpm lint`：通过；运行时关闭回调已通过显式包装消除 `unbound-method` 错误，真实指标 E2E fixture 保持现有脚本忽略边界。
+- 真实 Prometheus Web 验收已在本机运行：API/HTTP 专项 4/4、浏览器专项 1/1 通过，覆盖正常、失败率超阈值、低样本、来源断开、父子 Run 公开数据隔离、已完成 Run 的 SSE 重连和 Web 重启后查询。数据仍来自模拟器，模型仍为脚本模型。
 - 本次实现仍只验证 `simulation` Profile；没有连接 `D:\xfg\group-buy-market`、生产 Prometheus、真实模型或 ELK。

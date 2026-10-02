@@ -4,6 +4,36 @@ import { createAgentRuntime } from '../src/application/create-runtime.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
 describe('inspection HTTP/SSE bootstrap', () => {
+  it('closes an active SSE stream when the server shuts down', async () => {
+    const runtime = createAgentRuntime({ model: new ScriptedModel([{ text: '完成', toolCalls: [] }]), workspaceRoots: [] });
+    if (runtime.queries === undefined) throw new Error('runtime query service is not configured');
+    const server = await startInspectionHttpServer({ agent: runtime.agent, events: runtime.eventStreamV2, queries: runtime.queries });
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let closing: Promise<void> | undefined;
+    try {
+      const started = await fetch(`${server.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ message: '巡检结算', profileId: 'group-buy-market' }),
+      });
+      expect(started.status).toBe(202);
+      const { runId } = await started.json() as { runId: string };
+      const stream = await fetch(`${server.url}/runs/${encodeURIComponent(runId)}/events?snapshots=none`);
+      expect(stream.status).toBe(200);
+      reader = stream.body?.getReader();
+      if (reader === undefined) throw new Error('SSE response has no body');
+
+      closing = server.close();
+      const closed = await Promise.race([
+        closing.then(() => true),
+        new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_000)),
+      ]);
+      expect(closed).toBe(true);
+    } finally {
+      await reader?.cancel();
+      await (closing ?? server.close());
+    }
+  });
+
   it('starts a run over HTTP and streams its V2 events with AsyncGenerator semantics', async () => {
     const runtime = createAgentRuntime({ model: new ScriptedModel([{ text: '完成', toolCalls: [] }]), workspaceRoots: [] });
     if (runtime.queries === undefined) throw new Error('runtime query service is not configured');

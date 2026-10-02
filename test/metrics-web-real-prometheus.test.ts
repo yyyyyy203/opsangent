@@ -51,11 +51,18 @@ describe.skipIf(!REAL_PROMETHEUS_WEB)('real Prometheus Web acceptance', () => {
         await waitForStatus(runtime.url, runId, 'completed');
 
         const detail = await getJson<PublicRunDetail>(runtime.url, `/runs/${runId}`);
-        const evidence = await getJson<PublicEvidencePage>(runtime.url, `/runs/${runId}/evidence`);
-        const messages = await getJson<unknown>(runtime.url, `/runs/${runId}/messages?limit=100`);
-        const serialized = JSON.stringify({ detail, evidence, messages });
+        const childRunId = detail.childRunIds[0];
+        if (childRunId === undefined) throw new Error('Metrics child Run is missing.');
+        const child = await getJson<PublicRunDetail>(runtime.url, `/runs/${encodeURIComponent(childRunId)}`);
+        const evidence = await getJson<PublicEvidencePage>(runtime.url, `/runs/${encodeURIComponent(childRunId)}/evidence`);
+        const messages = await getJson<unknown>(runtime.url, `/runs/${runId}/messages?limit=50`);
+        const childMessages = await getJson<unknown>(runtime.url, `/runs/${encodeURIComponent(childRunId)}/messages?limit=50`);
+        const parentEvents = await readPublicEvents(runtime.url, runId);
+        const childEvents = await readPublicEvents(runtime.url, childRunId);
+        const serialized = JSON.stringify({ detail, child, evidence, messages, childMessages, parentEvents, childEvents });
         expect(detail).toMatchObject({ status: 'completed', childRunIds: [expect.any(String)] });
         expect(detail.evidenceIds).toHaveLength(1);
+        expect(child).toMatchObject({ parentRunId: runId, evidenceIds: detail.evidenceIds });
         expect(evidence.items).toHaveLength(1);
         expect(evidence.items[0]).toMatchObject({
           evidenceId: detail.evidenceIds[0],
@@ -101,12 +108,15 @@ describe.skipIf(!REAL_PROMETHEUS_WEB)('real Prometheus Web acceptance', () => {
       await startRun(runtime.url, runId);
       await waitForStatus(runtime.url, runId, 'completed');
       const detail = await getJson<PublicRunDetail>(runtime.url, `/runs/${runId}`);
-      const evidence = await getJson<PublicEvidencePage>(runtime.url, `/runs/${runId}/evidence`);
-      const messages = await getJson<unknown>(runtime.url, `/runs/${runId}/messages?limit=100`);
+      const childRunId = detail.childRunIds[0];
+      if (childRunId === undefined) throw new Error('Metrics child Run is missing.');
+      const evidence = await getJson<PublicEvidencePage>(runtime.url, `/runs/${encodeURIComponent(childRunId)}/evidence`);
+      const messages = await getJson<unknown>(runtime.url, `/runs/${runId}/messages?limit=50`);
+      const childMessages = await getJson<unknown>(runtime.url, `/runs/${encodeURIComponent(childRunId)}/messages?limit=50`);
       expect(detail).toMatchObject({ status: 'completed', evidenceIds: [] });
       expect(detail.childRunIds).toHaveLength(1);
       expect(evidence.items).toEqual([]);
-      const serialized = JSON.stringify({ detail, messages });
+      const serialized = JSON.stringify({ detail, messages, childMessages });
       expect(serialized).not.toContain('healthy');
       expect(serialized).not.toContain('正常');
       expect(serialized).not.toContain('settlement_window_requests');
@@ -244,6 +254,27 @@ async function getJson<T>(url: string, path: string): Promise<T> {
   const response = await fetch(`${url}${path}`);
   if (!response.ok) throw new Error(`GET ${path} returned ${response.status}: ${await response.text()}`);
   return await response.json() as T;
+}
+
+async function readPublicEvents(url: string, runId: string): Promise<string> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${url}/runs/${encodeURIComponent(runId)}/events?snapshots=none`, { signal: controller.signal });
+    if (!response.ok || response.body === null) throw new Error(`SSE for ${runId} returned ${response.status}.`);
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let body = '';
+    for (;;) {
+      const next = await reader.read();
+      if (next.done) throw new Error(`SSE for ${runId} closed before RUN_FINISHED.`);
+      body += decoder.decode(next.value, { stream: true });
+      if (body.includes('event: RUN_FINISHED')) return body;
+    }
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
+  }
 }
 
 function hasToolResult(messages: readonly AgentMessage[]): boolean {

@@ -319,7 +319,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
       evidence,
       evidenceRecorder,
       sharedEvents,
-      registerShutdownHook: shutdownRegistry.register,
+      registerShutdownHook: (callback) => shutdownRegistry.register(callback),
       toolResultCompactor,
       events: v2EventDependencies,
       checkpoints,

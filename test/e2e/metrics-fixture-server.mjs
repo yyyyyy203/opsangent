@@ -8,6 +8,63 @@ import { PrometheusSettlementSource } from '../../dist/infrastructure/prometheus
 import { startSettlementMcpServer } from '../../dist/infrastructure/mcp/settlement-server.js';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
 
+class RealWebParentModel {
+  async *stream(messages, _tools, options) {
+    if (!hasToolResult(messages)) {
+      const end = Math.floor(Date.now() / 1_000);
+      const call = {
+        id: `real-web-parent-${options.runId}`,
+        name: 'metrics_subagent',
+        input: {
+          profileId: 'simulation',
+          service: 'checkout',
+          start: new Date((end - 300) * 1_000).toISOString(),
+          end: new Date(end * 1_000).toISOString(),
+          question: '结算失败率是否升高？',
+        },
+      };
+      yield { type: 'tool_call', call };
+      return { toolCalls: [call] };
+    }
+    const text = '真实 Prometheus 指标已完成确定性核验。';
+    yield { type: 'text_delta', delta: text };
+    return { text, toolCalls: [] };
+  }
+}
+
+class RealWebChildModel {
+  async *stream(messages, _tools, options) {
+    if (!hasToolResultNamed(messages, 'metrics.settlement')) {
+      const call = { id: `real-web-metric-${options.runId}`, name: 'metrics.settlement', input: { service: 'checkout' } };
+      yield { type: 'tool_call', call };
+      return { toolCalls: [call] };
+    }
+    if (hasToolResultNamed(messages, 'source_report')) {
+      const text = '来源报告已提交。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    }
+    const evidenceId = findEvidenceId(messages);
+    if (evidenceId === undefined) {
+      const text = '数据源当前不可用。';
+      yield { type: 'text_delta', delta: text };
+      return { text, toolCalls: [] };
+    }
+    const call = {
+      id: `real-web-report-${options.runId}`,
+      name: 'source_report',
+      input: {
+        summary: '结算指标已核验。',
+        findings: [{ kind: 'observation', statement: '结算指标已核验。', evidenceIds: [evidenceId] }],
+        businessTraceIds: [],
+        missingEvidence: [],
+      },
+    };
+    yield { type: 'tool_call', call };
+    return { toolCalls: [call] };
+  }
+}
+
 const dataDirectory = await mkdtemp(join(tmpdir(), 'agentops-real-web-e2e-'));
 const agentPort = Number(process.env.AGENTOPS_E2E_AGENT_PORT ?? 45100);
 const webPort = Number(process.env.AGENTOPS_E2E_WEB_PORT ?? 45173);
@@ -89,63 +146,6 @@ async function close() {
 }
 process.once('SIGINT', () => { void close(); });
 process.once('SIGTERM', () => { void close(); });
-
-class RealWebParentModel {
-  async *stream(messages, _tools, options) {
-    if (!hasToolResult(messages)) {
-      const end = Math.floor(Date.now() / 1_000);
-      const call = {
-        id: `real-web-parent-${options.runId}`,
-        name: 'metrics_subagent',
-        input: {
-          profileId: 'simulation',
-          service: 'checkout',
-          start: new Date((end - 300) * 1_000).toISOString(),
-          end: new Date(end * 1_000).toISOString(),
-          question: '结算失败率是否升高？',
-        },
-      };
-      yield { type: 'tool_call', call };
-      return { toolCalls: [call] };
-    }
-    const text = '真实 Prometheus 指标已完成确定性核验。';
-    yield { type: 'text_delta', delta: text };
-    return { text, toolCalls: [] };
-  }
-}
-
-class RealWebChildModel {
-  async *stream(messages, _tools, options) {
-    if (!hasToolResultNamed(messages, 'metrics.settlement')) {
-      const call = { id: `real-web-metric-${options.runId}`, name: 'metrics.settlement', input: { service: 'checkout' } };
-      yield { type: 'tool_call', call };
-      return { toolCalls: [call] };
-    }
-    if (hasToolResultNamed(messages, 'source_report')) {
-      const text = '来源报告已提交。';
-      yield { type: 'text_delta', delta: text };
-      return { text, toolCalls: [] };
-    }
-    const evidenceId = findEvidenceId(messages);
-    if (evidenceId === undefined) {
-      const text = '数据源当前不可用。';
-      yield { type: 'text_delta', delta: text };
-      return { text, toolCalls: [] };
-    }
-    const call = {
-      id: `real-web-report-${options.runId}`,
-      name: 'source_report',
-      input: {
-        summary: '结算指标已核验。',
-        findings: [{ kind: 'observation', statement: '结算指标已核验。', evidenceIds: [evidenceId] }],
-        businessTraceIds: [],
-        missingEvidence: [],
-      },
-    };
-    yield { type: 'tool_call', call };
-    return { toolCalls: [call] };
-  }
-}
 
 function hasToolResult(messages) {
   return messages.some((message) => message.blocks.some((block) => block.type === 'tool_result'));
