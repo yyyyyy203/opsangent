@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   logsCloseSnapshotInput,
+  logsCloseSnapshotInputJsonSchema,
   logsPageWireResultSchema,
   logsSearchPageInput,
+  logsSearchPageInputJsonSchema,
 } from '../src/mcp/logs-protocol.js';
 
 const validPage = {
@@ -52,6 +54,19 @@ describe('logs MCP page protocol', () => {
     expect(logsCloseSnapshotInput.safeParse({ sourceSnapshotId: 'snapshot-1' }).success).toBe(true);
     expect(logsCloseSnapshotInput.safeParse({ sourceSnapshotId: '' }).success).toBe(false);
     expect(logsCloseSnapshotInput.safeParse({ sourceSnapshotId: 'snapshot-1', pitId: 'private-pit' }).success).toBe(false);
+  });
+
+  it('publishes stable bounded JSON Schemas for the read-only MCP tools', () => {
+    expect(logsSearchPageInputJsonSchema).toMatchObject({
+      type: 'object', additionalProperties: false,
+      properties: { service: { minLength: 1 }, cursor: { maxLength: 4_096 } },
+      required: ['service', 'start', 'end'],
+    });
+    expect(logsSearchPageInputJsonSchema.allOf).toHaveLength(3);
+    expect(logsCloseSnapshotInputJsonSchema).toMatchObject({
+      type: 'object', properties: { sourceSnapshotId: { minLength: 1 } },
+      required: ['sourceSnapshotId'], additionalProperties: false,
+    });
   });
 
   it('rejects unknown response and normalized-record fields', () => {

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type {
   EvidenceCaptureBudget,
   EvidenceCaptureResult,
+  EvidenceSourcePage,
   EvidenceManifest,
   EvidenceManifestStore,
   EvidenceSummary,
@@ -131,7 +132,7 @@ function findTool(tools: readonly Tool[], name: string): Tool {
 async function callTool(
   tool: Tool,
   input: Record<string, unknown>,
-  overrides: { runId?: string; toolCallId?: string; omitToolCallId?: boolean } = {},
+  overrides: { runId?: string; toolCallId?: string; omitToolCallId?: boolean; deadline?: number; networkAttemptBudget?: { remaining: number } } = {},
 ): Promise<ToolResponse> {
   const result = tool.call?.(input, {
     runId: overrides.runId ?? 'run-1',
@@ -139,6 +140,8 @@ async function callTool(
     ...(overrides.omitToolCallId === true ? {} : { toolCallId: overrides.toolCallId ?? 'call-1' }),
     signal: new AbortController().signal,
     mode: 'dry_run',
+    ...(overrides.deadline === undefined ? {} : { deadline: overrides.deadline }),
+    ...(overrides.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: overrides.networkAttemptBudget }),
   });
   if (result === undefined) throw new Error('tool has no local call');
   if (typeof result === 'object' && result !== null && Symbol.asyncIterator in result) {
@@ -182,6 +185,36 @@ describe('log evidence Tools', () => {
     expect(captured[0]?.source).toBe('log');
     expect(captured[0]?.queryDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(JSON.stringify(result)).not.toContain('storageKey');
+  });
+
+  it('passes the bounded absolute deadline, shared attempt ledger and capture key to the source', async () => {
+    const captured: StreamingEvidenceCaptureRequest[] = [];
+    let sourceRequest: { deadline?: number; networkAttemptBudget?: { remaining: number }; requestId?: string } | undefined;
+    const tools = createLogEvidenceTools({
+      ...options(captured),
+      clock: { now: () => new Date(1_000) },
+      source: {
+        pages: (_query, request) => {
+          sourceRequest = request;
+          const iterator: AsyncIterator<EvidenceSourcePage> = {
+            next: () => Promise.resolve({ done: true, value: undefined }),
+          };
+          return { [Symbol.asyncIterator]: () => iterator };
+        },
+      },
+    });
+    const ledger = { remaining: 7 };
+
+    await callTool(findTool(tools, 'logs.capture'), {
+      service: 'checkout',
+      start: '2026-09-13T00:00:00.000Z',
+      end: '2026-09-13T01:00:00.000Z',
+    }, { deadline: 9_000, networkAttemptBudget: ledger });
+
+    expect(sourceRequest?.deadline).toBe(9_000);
+    expect(sourceRequest?.networkAttemptBudget).toBe(ledger);
+    expect(sourceRequest?.requestId).toBe(captured[0]?.captureKey);
+    expect(sourceRequest?.requestId).toMatch(/^log:run-1:call-1:/);
   });
 
   it('exposes read, aggregate and slice tools with safe restart policies', async () => {

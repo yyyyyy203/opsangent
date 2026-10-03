@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
   assertEvidenceCaptureBudget,
   canonicalJson,
+  systemClock,
+  type Clock,
   type EvidenceCaptureBudget,
   type EvidenceCaptureResult,
   type EvidenceManifestStore,
@@ -34,11 +36,17 @@ export interface LogEvidenceToolOptions {
   budget: EvidenceCaptureBudget;
   id?: () => string;
   maxModelBytes?: number;
+  clock?: Clock;
 }
 
 /** Source seam used by the Tool factory; PagedEvidenceSource is only one implementation. */
 export interface LogEvidencePageSource {
-  pages(query: ElkEvidenceQuery, options?: { signal?: AbortSignal }): AsyncIterable<EvidenceSourcePage>;
+  pages(query: ElkEvidenceQuery, options?: {
+    signal?: AbortSignal;
+    deadline?: number;
+    networkAttemptBudget?: { remaining: number };
+    requestId?: string;
+  }): AsyncIterable<EvidenceSourcePage>;
 }
 
 const captureInput = z.object({
@@ -79,6 +87,7 @@ const sliceInput = z.object({
 export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonly Tool[] {
   assertEvidenceCaptureBudget(options.budget);
   const id = options.id ?? randomUUID;
+  const clock = options.clock ?? systemClock;
   const maxModelBytes = options.maxModelBytes ?? DEFAULT_MAX_MODEL_BYTES;
   if (!Number.isSafeInteger(maxModelBytes) || maxModelBytes <= 0) throw new RangeError('maxModelBytes must be positive');
 
@@ -105,6 +114,10 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
       throwIfAborted(callOptions.signal);
       const evidenceId = id();
       const queryDigest = digest(query);
+      const captureKey = `log:${callOptions.runId}:${callOptions.toolCallId}:${queryDigest}`;
+      const startedAt = clock.now().getTime();
+      const deadline = Math.min(callOptions.deadline ?? Number.POSITIVE_INFINITY, startedAt + options.budget.maxDurationMs);
+      if (startedAt >= deadline) throw new SourceFailure('BUDGET_EXCEEDED');
       let result: EvidenceCaptureResult;
       try {
         result = await options.recorder.capture({
@@ -112,11 +125,16 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
           runId: callOptions.runId,
           stepId: callOptions.stepId,
           toolCallId: callOptions.toolCallId!,
-          captureKey: `log:${callOptions.runId}:${callOptions.toolCallId}:${queryDigest}`,
+          captureKey,
           source: 'log',
           queryDigest,
           timeRange: { start: query.start, end: query.end },
-          pages: options.source.pages(query, { signal: callOptions.signal }),
+          pages: options.source.pages(query, {
+            signal: callOptions.signal,
+            deadline,
+            requestId: captureKey,
+            ...(callOptions.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: callOptions.networkAttemptBudget }),
+          }),
           budget: options.budget,
         }, { signal: callOptions.signal });
       } catch (error) {

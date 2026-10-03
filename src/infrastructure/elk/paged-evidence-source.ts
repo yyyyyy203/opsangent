@@ -2,6 +2,7 @@ import type { McpConnection } from '../../mcp/types.js';
 import { SourceFailure, type ResilientExecutor, type RetryEvent } from '../../mcp/resilience.js';
 import {
   canonicalJson,
+  type AgentErrorCode,
   type EvidenceSourcePage,
   type JsonValue,
   type LogEvidenceQuery,
@@ -13,6 +14,7 @@ export type { LogEvidenceQuery as ElkEvidenceQuery } from '../../contracts/index
 
 const DEFAULT_MAX_PAGE_BYTES = 512 * 1024;
 const DEFAULT_MAX_PAGES = 10_000;
+const DEFAULT_DEADLINE_MS = 60_000;
 
 export interface ElkPageClientResponse {
   records: readonly NormalizedLogRecord[];
@@ -27,12 +29,25 @@ export interface ElkPageClient {
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
+    deadline?: number;
+    networkAttemptBudget?: { remaining: number };
+    requestId?: string;
   }): Promise<ElkPageClientResponse>;
+  closeSnapshot?(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void>;
+}
+
+export interface ElkPageRequestOptions {
+  signal?: AbortSignal;
+  deadline?: number;
+  networkAttemptBudget?: { remaining: number };
+  requestId?: string;
 }
 
 export interface PagedEvidenceSourceOptions {
   maxPageBytes?: number;
   maxPages?: number;
+  deadlineMs?: number;
+  now?: () => number;
 }
 
 /**
@@ -42,6 +57,8 @@ export interface PagedEvidenceSourceOptions {
 export class PagedEvidenceSource {
   private readonly maxPageBytes: number;
   private readonly maxPages: number;
+  private readonly deadlineMs: number;
+  private readonly now: () => number;
 
   public constructor(
     private readonly client: ElkPageClient,
@@ -49,66 +66,101 @@ export class PagedEvidenceSource {
   ) {
     this.maxPageBytes = options.maxPageBytes ?? DEFAULT_MAX_PAGE_BYTES;
     this.maxPages = options.maxPages ?? DEFAULT_MAX_PAGES;
+    this.deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
+    this.now = options.now ?? Date.now;
     if (!Number.isSafeInteger(this.maxPageBytes) || this.maxPageBytes <= 0) {
       throw new RangeError('maxPageBytes must be a positive safe integer');
     }
     if (!Number.isSafeInteger(this.maxPages) || this.maxPages <= 0) {
       throw new RangeError('maxPages must be a positive safe integer');
     }
+    if (!Number.isFinite(this.deadlineMs) || this.deadlineMs <= 0) {
+      throw new RangeError('deadlineMs must be positive');
+    }
   }
 
   public pages(
     query: LogEvidenceQuery,
-    options: { signal?: AbortSignal } = {},
+    options: ElkPageRequestOptions = {},
   ): AsyncGenerator<EvidenceSourcePage, void> {
     const validatedQuery = validateQuery(query);
     const signal = options.signal ?? new AbortController().signal;
-    return this.iterate(validatedQuery, signal);
+    return this.iterate(validatedQuery, { ...options, signal });
   }
 
-  private async *iterate(query: LogEvidenceQuery, signal: AbortSignal): AsyncGenerator<EvidenceSourcePage, void> {
+  private async *iterate(query: LogEvidenceQuery, options: ElkPageRequestOptions & { signal: AbortSignal }): AsyncGenerator<EvidenceSourcePage, void> {
+    const { signal } = options;
+    const deadline = options.deadline ?? this.now() + this.deadlineMs;
     let cursor: string | undefined;
     let expectedSnapshot: string | undefined;
     const seenCursors = new Set<string>();
 
-    for (let pageNumber = 0; pageNumber < this.maxPages; pageNumber += 1) {
-      throwIfAborted(signal);
-      let response: ElkPageClientResponse;
-      try {
-        response = await this.client.fetchPage({
-          query,
-          signal,
-          ...(cursor === undefined ? {} : { cursor }),
-          ...(expectedSnapshot === undefined ? {} : { sourceSnapshotId: expectedSnapshot }),
-        });
-      } catch (error) {
-        throw normalizeSourceError(error);
-      }
-      throwIfAborted(signal);
+    try {
+      for (let pageNumber = 0; pageNumber < this.maxPages; pageNumber += 1) {
+        throwIfAborted(signal);
+        if (this.now() >= deadline) throw new SourceFailure('BUDGET_EXCEEDED');
+        if (options.networkAttemptBudget !== undefined && options.networkAttemptBudget.remaining <= 0) {
+          throw new SourceFailure('BUDGET_EXCEEDED');
+        }
+        let response: ElkPageClientResponse;
+        try {
+          response = await this.client.fetchPage({
+            query,
+            signal,
+            ...(cursor === undefined ? {} : { cursor }),
+            ...(expectedSnapshot === undefined ? {} : { sourceSnapshotId: expectedSnapshot }),
+            deadline,
+            ...(options.networkAttemptBudget === undefined ? {} : { networkAttemptBudget: options.networkAttemptBudget }),
+            ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
+          });
+        } catch (error) {
+          throw normalizeSourceError(error);
+        }
+        throwIfAborted(signal);
 
-      const page = validatePageResponse(response, this.maxPageBytes);
-      if (expectedSnapshot === undefined && page.sourceSnapshotId !== undefined) {
-        expectedSnapshot = page.sourceSnapshotId;
-      } else if (
-        expectedSnapshot !== undefined
-        && page.sourceSnapshotId !== undefined
-        && page.sourceSnapshotId !== expectedSnapshot
-      ) {
-        throw protocolError();
-      }
+        const page = validatePageResponse(response, this.maxPageBytes);
+        if (expectedSnapshot === undefined && page.sourceSnapshotId !== undefined) {
+          expectedSnapshot = page.sourceSnapshotId;
+        } else if (
+          expectedSnapshot !== undefined
+          && page.sourceSnapshotId !== undefined
+          && page.sourceSnapshotId !== expectedSnapshot
+        ) {
+          throw protocolError();
+        }
 
-      const nextCursor = page.nextCursor;
-      if (nextCursor !== undefined) {
-        if (nextCursor === cursor || seenCursors.has(nextCursor)) throw protocolError();
-        seenCursors.add(nextCursor);
-      }
+        const nextCursor = page.nextCursor;
+        if (nextCursor !== undefined) {
+          if (nextCursor === cursor || seenCursors.has(nextCursor)) throw protocolError();
+          seenCursors.add(nextCursor);
+        }
 
-      yield page;
-      if (nextCursor === undefined) return;
-      cursor = nextCursor;
+        yield page;
+        if (nextCursor === undefined) return;
+        cursor = nextCursor;
+      }
+      throw protocolError();
+    } finally {
+      if (expectedSnapshot !== undefined && this.client.closeSnapshot !== undefined) {
+        const cleanup = new AbortController();
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            this.client.closeSnapshot({ sourceSnapshotId: expectedSnapshot, signal: cleanup.signal }),
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => {
+                cleanup.abort();
+                reject(new SourceFailure('MCP_TIMEOUT'));
+              }, 1_000);
+            }),
+          ]);
+        } catch {
+          // Cleanup is best-effort and must not replace the capture's primary result or failure.
+        } finally {
+          if (timeout !== undefined) clearTimeout(timeout);
+        }
+      }
     }
-
-    throw protocolError();
   }
 }
 
@@ -141,9 +193,15 @@ export class McpElkPageClient implements ElkPageClient {
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
+    deadline?: number;
+    networkAttemptBudget?: { remaining: number };
+    requestId?: string;
   }): Promise<ElkPageClientResponse> {
     throwIfAborted(input.signal);
     const query = validateQuery(input.query);
+    if (input.cursor === undefined && (input.requestId === undefined || input.requestId.trim().length === 0)) {
+      throw protocolError();
+    }
     let response: ToolResponse;
     try {
       response = await this.connection.call(this.remoteName, {
@@ -155,6 +213,7 @@ export class McpElkPageClient implements ElkPageClient {
         ...(query.contains === undefined ? {} : { contains: query.contains }),
         ...(input.cursor === undefined ? {} : { cursor: input.cursor }),
         ...(input.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: input.sourceSnapshotId }),
+        ...(input.requestId === undefined ? {} : { requestId: input.requestId }),
       }, input.signal);
     } catch (error) {
       throw normalizeSourceError(error);
@@ -164,6 +223,22 @@ export class McpElkPageClient implements ElkPageClient {
     const blocks = response.blocks.filter((block) => block.type === 'json');
     if (blocks.length !== 1 || blocks[0]?.type !== 'json') throw protocolError();
     return decodePage(blocks[0].value);
+  }
+
+  public async closeSnapshot(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void> {
+    throwIfAborted(input.signal);
+    try {
+      const response = await this.connection.call('logs.close_snapshot', {
+        sourceSnapshotId: input.sourceSnapshotId,
+      }, input.signal);
+      throwIfAborted(input.signal);
+      if (response.isError) throw new SourceFailure('MCP_SERVER_ERROR');
+      const blocks = response.blocks.filter((block) => block.type === 'json');
+      if (blocks.length !== 1 || blocks[0]?.type !== 'json'
+        || !isRecord(blocks[0].value) || blocks[0].value.status !== 'closed') throw protocolError();
+    } catch (error) {
+      throw normalizeSourceError(error);
+    }
   }
 }
 
@@ -186,17 +261,27 @@ export class ResilientElkPageClient implements ElkPageClient {
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
+    deadline?: number;
+    networkAttemptBudget?: { remaining: number };
+    requestId?: string;
   }): Promise<ElkPageClientResponse> {
     return this.options.executor.execute(
       (signal) => this.delegate.fetchPage({ ...input, signal }),
       {
         signal: input.signal,
-        deadline: this.now() + this.deadlineMs,
+        deadline: input.deadline ?? this.now() + this.deadlineMs,
         now: this.now,
-        ...(this.options.attemptBudget === undefined ? {} : { attemptBudget: this.options.attemptBudget }),
+        ...((input.networkAttemptBudget ?? this.options.attemptBudget) === undefined
+          ? {}
+          : { attemptBudget: input.networkAttemptBudget ?? this.options.attemptBudget }),
         ...(this.options.onEvent === undefined ? {} : { onEvent: this.options.onEvent }),
       },
     );
+  }
+
+  public closeSnapshot(input: { sourceSnapshotId: string; signal: AbortSignal }): Promise<void> {
+    if (this.delegate.closeSnapshot === undefined) return Promise.resolve();
+    return this.delegate.closeSnapshot(input);
   }
 }
 
@@ -247,6 +332,14 @@ function validatePageResponse(response: ElkPageClientResponse, maxPageBytes: num
 }
 
 function decodePage(value: unknown): ElkPageClientResponse {
+  if (isRecord(value) && value.status === 'source_error') {
+    const code = value.code;
+    if (typeof code !== 'string' || !LOG_SOURCE_ERROR_CODES.has(code as AgentErrorCode)) throw protocolError();
+    throw new SourceFailure(code as AgentErrorCode);
+  }
+  if (isRecord(value) && value.status !== undefined && value.status !== 'available') throw protocolError();
+  if (isRecord(value) && value.status === 'available'
+    && (typeof value.sourceSnapshotId !== 'string' || value.sourceSnapshotId.trim().length === 0)) throw protocolError();
   if (!isRecord(value) || !Array.isArray(value.records)) throw protocolError();
   const records = value.records.map(validateRecord);
   if (value.nextCursor !== undefined && (typeof value.nextCursor !== 'string' || value.nextCursor.trim().length === 0)) {
@@ -262,6 +355,11 @@ function decodePage(value: unknown): ElkPageClientResponse {
     ...(value.sourceSnapshotId === undefined ? {} : { sourceSnapshotId: value.sourceSnapshotId }),
   };
 }
+
+const LOG_SOURCE_ERROR_CODES = new Set<AgentErrorCode>([
+  'ABORTED', 'BUDGET_EXCEEDED', 'INVALID_INPUT', 'MCP_AUTH_ERROR', 'MCP_NETWORK_ERROR',
+  'MCP_PROTOCOL_ERROR', 'MCP_RATE_LIMITED', 'MCP_SERVER_ERROR', 'MCP_TIMEOUT', 'POLICY_DENIED', 'UNAVAILABLE',
+]);
 
 function validateRecord(value: unknown): NormalizedLogRecord {
   if (!isRecord(value) || typeof value.timestamp !== 'string' || Number.isNaN(Date.parse(value.timestamp))) {

@@ -1,8 +1,9 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { CallToolResultSchema, ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
-import type { McpConnection } from '../../mcp/types.js';
+import type { McpConnection, McpRequestOptions } from '../../mcp/types.js';
 import { SourceFailure } from '../../mcp/resilience.js';
 import type { McpToolDescriptor } from '../../tool/adapters/mcp-tool-adapter.js';
 import type { ToolResponse } from '../../contracts/tool.js';
@@ -20,6 +21,7 @@ export class HttpMcpConnection implements McpConnection {
   private readonly url: URL;
   private readonly timeoutMs: number;
   private readonly maxResponseBytes: number;
+  private readonly requestBudget = new AsyncLocalStorage<McpRequestOptions>();
 
   public constructor(private readonly options: HttpMcpOptions) {
     this.url = new URL(options.url);
@@ -29,7 +31,7 @@ export class HttpMcpConnection implements McpConnection {
     if (!Number.isFinite(this.timeoutMs) || this.timeoutMs <= 0 || !Number.isInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0) throw new Error('Invalid MCP resource limits.');
   }
 
-  public async connect(signal: AbortSignal): Promise<void> {
+  public async connect(signal: AbortSignal, options?: McpRequestOptions): Promise<void> {
     if (signal.aborted) throw new SourceFailure('ABORTED');
     if (this.client) throw new Error('MCP connection already initialized.');
     const client = new Client({ name: 'agentops-readonly', version: '0.1.0' }, { capabilities: {} });
@@ -37,6 +39,11 @@ export class HttpMcpConnection implements McpConnection {
       requestInit: { headers: this.options.headers ?? {}, redirect: 'error' },
       reconnectionOptions: { maxRetries: 0, initialReconnectionDelay: 200, maxReconnectionDelay: 2_000, reconnectionDelayGrowFactor: 2 },
       fetch: async (url, init) => {
+        const ledger = this.requestBudget.getStore()?.networkAttemptBudget;
+        if (ledger !== undefined) {
+          if (ledger.remaining <= 0) throw new SourceFailure('BUDGET_EXCEEDED');
+          ledger.remaining -= 1;
+        }
         let response: Response;
         const timeout = AbortSignal.timeout(this.timeoutMs);
         const requestSignal = AbortSignal.any([timeout, ...(init?.signal ? [init.signal] : [])]);
@@ -67,7 +74,9 @@ export class HttpMcpConnection implements McpConnection {
     try {
       // SDK 1.x getters include undefined while Transport uses exact optional fields.
       // The assertion is isolated to the official SDK boundary; runtime protocol is unchanged.
-      await client.connect(transport as Transport, { signal, timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs });
+      await this.requestBudget.run(options ?? {}, () => client.connect(
+        transport as Transport, { signal, timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs },
+      ));
       this.client = client;
     } catch (error) {
       await client.close();
@@ -75,17 +84,33 @@ export class HttpMcpConnection implements McpConnection {
     }
   }
 
-  public async listTools(signal: AbortSignal): Promise<McpToolDescriptor[]> {
+  public async listTools(signal: AbortSignal, options?: McpRequestOptions): Promise<McpToolDescriptor[]> {
     const client = this.requireClient();
     const tools: McpToolDescriptor[] = [];
     const cursors = new Set<string>();
     let cursor: string | undefined;
     try {
       for (let page = 0; page < 20; page += 1) {
-        const result = await client.listTools(cursor ? { cursor } : {}, { signal, timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs });
+        const result = await this.requestBudget.run(options ?? {}, () => client.listTools(
+          cursor ? { cursor } : {}, { signal, timeout: this.timeoutMs, maxTotalTimeout: this.timeoutMs },
+        ));
         for (const descriptor of result.tools) {
           if (tools.some((tool) => tool.name === descriptor.name) || tools.length >= 1_000) throw new SourceFailure('MCP_PROTOCOL_ERROR');
-          tools.push({ name: descriptor.name, inputSchema: descriptor.inputSchema, ...(descriptor.description === undefined ? {} : { description: descriptor.description }) });
+          const annotations = descriptor.annotations;
+          tools.push({
+            name: descriptor.name,
+            inputSchema: descriptor.inputSchema,
+            ...(descriptor.description === undefined ? {} : { description: descriptor.description }),
+            ...(annotations === undefined ? {} : {
+              annotations: {
+                ...(annotations.title === undefined ? {} : { title: annotations.title }),
+                ...(annotations.readOnlyHint === undefined ? {} : { readOnlyHint: annotations.readOnlyHint }),
+                ...(annotations.destructiveHint === undefined ? {} : { destructiveHint: annotations.destructiveHint }),
+                ...(annotations.idempotentHint === undefined ? {} : { idempotentHint: annotations.idempotentHint }),
+                ...(annotations.openWorldHint === undefined ? {} : { openWorldHint: annotations.openWorldHint }),
+              },
+            }),
+          });
         }
         if (!result.nextCursor) return tools;
         if (cursors.has(result.nextCursor)) throw new SourceFailure('MCP_PROTOCOL_ERROR');

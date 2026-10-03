@@ -15,14 +15,23 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 const remoteSchema = { type: 'object', properties: { service: { type: 'string' } }, required: ['service'], additionalProperties: false };
 const manifest = { localName: 'metrics.query', remoteName: 'query', description: 'Read metrics', inputSchema: z.object({ service: z.string() }), expectedRemoteSchema: remoteSchema, readOnly: true as const, idempotent: true as const, concurrencySafe: true };
 
-async function fixture(transientFailures = 0, failureStatus = 503, businessError = false) {
+async function fixture(transientFailures = 0, failureStatus = 503, businessError = false, paginateTools = false) {
   const methods: string[] = [];
   let attempts = 0;
   const mcp = new Server({ name: 'test-source', version: '1' }, { capabilities: { tools: {} } });
-  mcp.setRequestHandler(ListToolsRequestSchema, () => ({ tools: [
-    { name: 'query', inputSchema: remoteSchema },
-    { name: 'delete_everything', inputSchema: { type: 'object' } },
-  ] }));
+  mcp.setRequestHandler(ListToolsRequestSchema, ({ params }) => {
+    if (paginateTools) {
+      return params?.cursor === undefined
+        ? { tools: [{ name: 'query', inputSchema: remoteSchema }], nextCursor: 'tools-2' }
+        : { tools: [{ name: 'query-2', inputSchema: remoteSchema }] };
+    }
+    return { tools: [
+      { name: 'query', inputSchema: remoteSchema, annotations: {
+        readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
+      } },
+      { name: 'delete_everything', inputSchema: { type: 'object' } },
+    ] };
+  });
   mcp.setRequestHandler(CallToolRequestSchema, ({ params }) => ({ isError: businessError, content: [{ type: 'text', text: JSON.stringify({ service: params.arguments?.service, failureRate: 0.15 }) }] }));
   const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: randomUUID, enableJsonResponse: true });
   await mcp.connect(transport as Transport);
@@ -49,6 +58,36 @@ async function fixture(transientFailures = 0, failureStatus = 503, businessError
 }
 
 describe('official SDK HTTP integration', () => {
+  it('charges the shared budget for each HTTP request made during MCP initialization', async () => {
+    const server = await fixture();
+    const connection = new HttpMcpConnection({ url: server.url });
+    const ledger = { remaining: 1 };
+    try {
+      await expect(connection.connect(new AbortController().signal, { networkAttemptBudget: ledger }))
+        .rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+      expect(ledger.remaining).toBe(0);
+      expect(server.methods).toContain('initialize');
+      expect(server.methods).not.toContain('notifications/initialized');
+    } finally {
+      await connection.close();
+      await server.close();
+    }
+  });
+
+  it('charges every listTools page and stops before the next HTTP request when budget is exhausted', async () => {
+    const server = await fixture(0, 503, false, true);
+    const connection = new HttpMcpConnection({ url: server.url });
+    const signal = new AbortController().signal;
+    const ledger = { remaining: 1 };
+    try {
+      await connection.connect(signal);
+      await expect(connection.listTools(signal, { networkAttemptBudget: ledger }))
+        .rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+      expect(ledger.remaining).toBe(0);
+      expect(server.methods.filter((method) => method === 'tools/list')).toHaveLength(1);
+    } finally { await connection.close(); await server.close(); }
+  });
+
   it.each([{ failures: 100, status: 401, business: false }, { failures: 0, status: 503, business: true }])('does not retry authentication or business failures: %j', async ({ failures, status, business }) => {
     const server = await fixture(failures, status, business);
     const connection = new HttpMcpConnection({ url: server.url });
@@ -72,6 +111,11 @@ describe('official SDK HTTP integration', () => {
     const signal = new AbortController().signal;
     try {
       await connection.connect(signal);
+      await expect(connection.listTools(signal)).resolves.toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'query', annotations: {
+          readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false,
+        } }),
+      ]));
       const tools = await bindReadonlyMcpTools(connection, [manifest], {
         signal, executor: new ResilientExecutor(new SourceCircuitBreaker(), { sleep: () => Promise.resolve() }),
       });

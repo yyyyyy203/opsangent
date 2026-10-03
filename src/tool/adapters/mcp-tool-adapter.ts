@@ -4,6 +4,13 @@ export interface McpToolDescriptor {
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
+  annotations?: {
+    title?: string;
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
 }
 
 export interface McpToolExecutor {

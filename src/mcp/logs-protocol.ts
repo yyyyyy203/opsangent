@@ -60,6 +60,38 @@ export const logsCloseSnapshotInput = z.object({
   sourceSnapshotId: nonEmptyBoundedText,
 }).strict();
 
+/** Stable wire schema shared by the MCP server and its lazy read-only client. */
+export const logsSearchPageInputJsonSchema = {
+  type: 'object',
+  properties: {
+    service: { type: 'string', minLength: 1, maxLength: MAX_TEXT_LENGTH },
+    start: { type: 'string', format: 'date-time', maxLength: MAX_TEXT_LENGTH },
+    end: { type: 'string', format: 'date-time', maxLength: MAX_TEXT_LENGTH },
+    level: { type: 'string', maxLength: MAX_TEXT_LENGTH },
+    traceId: { type: 'string', maxLength: MAX_TEXT_LENGTH },
+    contains: { type: 'string', maxLength: MAX_CONTAINS_LENGTH },
+    cursor: { type: 'string', minLength: 1, maxLength: MAX_CURSOR_LENGTH },
+    sourceSnapshotId: { type: 'string', minLength: 1, maxLength: MAX_TEXT_LENGTH },
+    requestId: { type: 'string', minLength: 1, maxLength: MAX_TEXT_LENGTH },
+  },
+  required: ['service', 'start', 'end'],
+  additionalProperties: false,
+  allOf: [
+    { if: { not: { required: ['cursor'] } }, then: { required: ['requestId'] } },
+    { if: { required: ['cursor'] }, then: { required: ['sourceSnapshotId'] } },
+    { if: { required: ['sourceSnapshotId'] }, then: { required: ['cursor'] } },
+  ],
+} as const;
+
+export const logsCloseSnapshotInputJsonSchema = {
+  type: 'object',
+  properties: {
+    sourceSnapshotId: { type: 'string', minLength: 1, maxLength: MAX_TEXT_LENGTH },
+  },
+  required: ['sourceSnapshotId'],
+  additionalProperties: false,
+} as const;
+
 const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
   z.string(),
   z.number().finite(),
