@@ -21,5 +21,6 @@ export * from './read-model.js';
 export * from './run-usage.js';
 export * from './web-read-model.js';
 export * from './log-evidence.js';
+export * from './log-redaction.js';
 export * from './source-subagent.js';
 export * from './tool.js';

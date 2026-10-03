@@ -120,7 +120,7 @@ export const logsLabQueryPolicy: Readonly<LogsQueryPolicy> = Object.freeze({
 
 - Consumes: Task 1 `LogsPageBackend`、`LogsSearchPageInput`、`LogsPageWireResult`、`logsLabQueryPolicy`。
 - Produces: `ElasticsearchHttp` 构造参数 `{url:string;fetch?:typeof globalThis.fetch;maxResponseBytes?:number}`；`request(path:string, body:unknown, options:{method:'POST'|'DELETE'|'PUT';signal:AbortSignal}):Promise<unknown>`。
-- Produces: `createElasticsearchLogSource(options:{url:string;index:string;cursorSecret:string;fetch?:typeof globalThis.fetch;now?:()=>number;id?:()=>string;maxSessions?:number;pageSize?:number}):LogsPageBackend`。
+- Produces: `createElasticsearchLogSource(options:{url:string;index:string;cursorSecret:string;fetch?:typeof globalThis.fetch;now?:()=>number;id?:()=>string;maxSessions?:number;pageSize?:number;onCleanupFailure:(failure:{code:AgentErrorCode;sourceSnapshotId?:string})=>void}):LogsPageBackend`。清理报告只暴露稳定错误码与逻辑快照 ID。
 - Produces: `redactLogRecord(record:NormalizedLogRecord):NormalizedLogRecord`，无基础设施依赖的纯函数；从 Recorder 原 defaultRedactor/redactFields/redactValue/redactText 提取，行为与 redaction/v1 相同，新导出是相容增量。
 - Registry 为适配器私有；不得从 contracts 或 agent 引用具体类。
 

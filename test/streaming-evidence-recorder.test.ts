@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { gunzipSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { Clock, IdGenerator, NormalizedLogRecord, EvidenceSourcePage } from '../src/contracts/index.js';
 import { SqliteDatabase } from '../src/infrastructure/sqlite/database.js';
@@ -69,7 +70,7 @@ function request(pages: AsyncIterable<EvidenceSourcePage> = generatedLogPages({ 
   };
 }
 
-async function createRecorder(withEvents = false) {
+async function createRecorder(withEvents = false, useDefaultRedactor = false) {
   const root = await mkdtemp(join(tmpdir(), 'agentops-l0-recorder-'));
   roots.push(root);
   const database = SqliteDatabase.open(join(root, 'state.sqlite'));
@@ -93,12 +94,14 @@ async function createRecorder(withEvents = false) {
         correlationId: (runId: string) => `run:${runId}`,
       },
     }),
-    redactor: (input) => ({
-      ...input,
-      ...(input.message === undefined ? {} : { message: input.message.replaceAll('raw-log-marker', '[REDACTED]') }),
+    ...(useDefaultRedactor ? {} : {
+      redactor: (input: NormalizedLogRecord) => ({
+        ...input,
+        ...(input.message === undefined ? {} : { message: input.message.replaceAll('raw-log-marker', '[REDACTED]') }),
+      }),
     }),
   });
-  return { recorder, manifests, database, eventStore, publisher };
+  return { recorder, manifests, blobStore, database, eventStore, publisher };
 }
 
 describe('DefaultStreamingEvidenceRecorder', () => {
@@ -122,6 +125,42 @@ describe('DefaultStreamingEvidenceRecorder', () => {
       database.close();
     }
   }, 30_000);
+
+  it('uses the shared default redactor before writing evidence and building samples', async () => {
+    const { recorder, manifests, blobStore, database } = await createRecorder(false, true);
+    const sensitive: NormalizedLogRecord = {
+      timestamp: '2026-09-13T00:00:01.000Z',
+      service: 'checkout',
+      message: 'Bearer abc.def',
+      fields: { apiKey: 'secret', route: '/checkout' },
+    };
+    const pages = (async function* (): AsyncIterable<EvidenceSourcePage> {
+      await Promise.resolve();
+      yield { records: [sensitive], encodedBytes: 200 };
+    })();
+    try {
+      const result = await recorder.capture({ ...request(pages), evidenceId: 'evidence-default-redaction' });
+      expect(result.summary.samples).toEqual([{
+        timestamp: sensitive.timestamp,
+        service: 'checkout',
+        message: '[REDACTED]',
+      }]);
+      const internalManifest = await manifests.get('evidence-default-redaction');
+      expect(internalManifest).not.toBeNull();
+      const chunk = internalManifest!.chunks[0];
+      expect(chunk).toBeDefined();
+      const compressed: Buffer[] = [];
+      for await (const part of blobStore.readChunk(chunk!)) compressed.push(Buffer.from(part));
+      expect(JSON.parse(gunzipSync(Buffer.concat(compressed)).toString('utf8'))).toEqual({
+        fields: { apiKey: '[REDACTED]', route: '/checkout' },
+        message: '[REDACTED]',
+        service: 'checkout',
+        timestamp: sensitive.timestamp,
+      });
+    } finally {
+      database.close();
+    }
+  });
 
   it('commits partial evidence when the byte budget is reached', async () => {
     const { recorder, manifests, database } = await createRecorder();
