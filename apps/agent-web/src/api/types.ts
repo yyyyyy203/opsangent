@@ -13,10 +13,18 @@ export interface PublicRunSummary {
   parentRunId?: string;
 }
 
+export interface RunUsageSummary {
+  completeness: 'complete' | 'partial' | 'unavailable';
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedInputTokens?: number;
+}
+
 export interface PublicRunDetail extends PublicRunSummary {
   evidenceIds: readonly string[];
   missingEvidence: readonly string[];
   childRunIds: readonly string[];
+  usage?: RunUsageSummary;
   failure?: { code: string; message: string; retryable: boolean };
 }
 

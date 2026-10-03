@@ -89,6 +89,33 @@ async function commitManifest(
 }
 
 describe('SQLite inspection query read model', () => {
+  it('reconstructs token usage from durable audit events after reopening the database', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-usage-'));
+    roots.push(root);
+    const path = join(root, 'runtime.sqlite');
+    const first = createSqlitePersistence({ path, clock });
+    await first.checkpoints.save(context('usage-run', 'profile-a'), null);
+    const factory = new EventFactoryV2(clock, ids());
+    await first.eventMessages.append('usage-run', 0, [
+      factory.create('MODEL_CALL_STARTED', {
+        runId: 'usage-run', correlationId: 'run:usage-run', visibility: 'audit', durability: 'durable',
+      }, { provider: 'test', model: 'test-model', purpose: 'inspection', attempt: 1, inputSummary: 'internal' }),
+      factory.create('MODEL_CALL_COMPLETED', {
+        runId: 'usage-run', correlationId: 'run:usage-run', visibility: 'audit', durability: 'durable',
+      }, { provider: 'test', model: 'test-model', attempt: 1, durationMs: 10, usage: { inputTokens: 81, outputTokens: 19 } }),
+    ]);
+    first.close();
+
+    const reopened = createSqlitePersistence({ path, clock });
+    try {
+      expect((await reopened.queries.getRun('usage-run'))?.usage).toEqual({
+        completeness: 'complete', inputTokens: 81, outputTokens: 19,
+      });
+    } finally {
+      reopened.close();
+    }
+  });
+
   it('accepts the public maximum page size when Run evidence includes manifests', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-page-limit-'));
     roots.push(root);

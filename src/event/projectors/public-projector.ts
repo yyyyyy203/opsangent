@@ -63,13 +63,16 @@ export class PublicEventProjectorV2 {
         return sanitizeRecord({ checkpointVersion: event.payload.checkpointVersion, resumeReason: safeText(event.payload.resumeReason), newStreamId: event.payload.newStreamId });
       case 'RUN_PAUSED':
         return sanitizeRecord({ interruptId: event.payload.interruptId, reason: safeText(event.payload.reason), expiresAt: event.payload.expiresAt, checkpointVersion: event.payload.checkpointVersion });
-      case 'RUN_FINISHED':
-        return sanitizeRecord({
+      case 'RUN_FINISHED': {
+        const payload = sanitizeRecord({
           outcome: event.payload.outcome,
           ...(event.payload.reportId === undefined ? {} : { reportId: event.payload.reportId }),
-          ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage as unknown as JsonObject }),
+          ...(event.payload.usageCompleteness === undefined ? {} : { usageCompleteness: event.payload.usageCompleteness }),
           durationMs: event.payload.durationMs,
         });
+        if (event.payload.usage !== undefined) payload.usage = publicUsage(event.payload.usage);
+        return payload;
+      }
       case 'RUN_FAILED':
         return sanitizeRecord({
           error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
@@ -215,6 +218,15 @@ function safeText(value: string): string {
 function pickNumbers(value: JsonObject): JsonObject {
   const output: JsonObject = {};
   for (const [key, item] of Object.entries(value)) if (typeof item === 'number' && Number.isFinite(item)) output[key] = item;
+  return output;
+}
+
+function publicUsage(value: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number }): JsonObject {
+  const output: JsonObject = {};
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens'] as const) {
+    const count = value[key];
+    if (count !== undefined && Number.isSafeInteger(count) && count >= 0) output[key] = count;
+  }
   return output;
 }
 

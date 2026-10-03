@@ -82,8 +82,11 @@ export class ApiClient {
     return this.request<PublicMessagePage>(`${this.runPath(runId)}/messages${query.size === 0 ? '' : `?${query.toString()}`}`);
   }
 
-  public async listEvidence(runId: string): Promise<PublicEvidencePage> {
-    return this.request<PublicEvidencePage>(`${this.runPath(runId)}/evidence`);
+  public async listEvidence(runId: string, options: { cursor?: string; limit?: number } = {}): Promise<PublicEvidencePage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set('cursor', options.cursor);
+    if (options.limit !== undefined) query.set('limit', String(options.limit));
+    return this.request<PublicEvidencePage>(`${this.runPath(runId)}/evidence${query.size === 0 ? '' : `?${query.toString()}`}`);
   }
 
   public async getConfirmation(runId: string): Promise<PublicConfirmation | null> {

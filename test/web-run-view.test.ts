@@ -9,6 +9,8 @@ import type {
   PublicMessagePage,
   PublicEventFrame,
   PublicRunDetail,
+  PublicEvidenceView,
+  PublicEvidencePage,
 } from '../apps/agent-web/src/api/types.js';
 
 function message(id: string, runId = 'run-1', version = 1, text = id): PublicMessageItem {
@@ -33,6 +35,193 @@ function page(...items: PublicMessageItem[]): PublicMessagePage {
 }
 
 describe('browser run view state', () => {
+  it('keeps successful initial messages when a newer refresh cannot load them', async () => {
+    const detail = runDetail('initial-message-race', 10);
+    const client = viewClient(detail);
+    const heldPage = deferred<PublicEvidencePage>();
+    const initialStarted = deferred<void>();
+    let pageRead = 0;
+    client.listEvidence = () => {
+      if (pageRead++ === 0) { initialStarted.resolve(undefined); return heldPage.promise; }
+      return Promise.resolve({ items: [] });
+    };
+    let messageRead = 0;
+    client.getMessages = () => messageRead++ === 0
+      ? Promise.resolve(page(message('initial-valid', detail.runId)))
+      : Promise.reject(new Error('newer message query unavailable'));
+    const controller = new RunViewController(client);
+    try {
+      const initial = controller.openRun(detail.runId);
+      await initialStarted.promise;
+      await controller.resumeRun();
+      heldPage.resolve({ items: [] });
+      await initial;
+
+      expect(controller.getState().messages.map((item) => item.message.id)).toEqual(['initial-valid']);
+    } finally { controller.close(); }
+  });
+
+  it('keeps the newer Run snapshot when an earlier tree refresh finishes late', async () => {
+    const initial = runDetail('race-run', 0);
+    const older = runDetail('race-run', 10);
+    const newer = runDetail('race-run', 20);
+    const oldEvidence = evidence('race-old', initial.runId);
+    const newEvidence = evidence('race-new', initial.runId);
+    const client = viewClient(initial);
+    const controller = new RunViewController(client);
+    const heldPage = deferred<PublicEvidencePage>();
+    const olderStarted = deferred<void>();
+    try {
+      await controller.openRun(initial.runId);
+      let detailRead = 0;
+      client.getRun = () => Promise.resolve(detailRead++ === 0 ? older : newer);
+      let pageRead = 0;
+      client.listEvidence = () => {
+        if (pageRead++ === 0) { olderStarted.resolve(undefined); return heldPage.promise; }
+        return Promise.resolve({ items: [newEvidence] });
+      };
+
+      const earlier = controller.resumeRun();
+      await olderStarted.promise;
+      await controller.resumeRun();
+      heldPage.resolve({ items: [oldEvidence] });
+      await earlier;
+
+      expect(controller.getState().detail?.usage?.inputTokens).toBe(20);
+      expect(controller.getState().subtreeUsage?.inputTokens).toBe(20);
+      expect(controller.getState().evidence.map((item) => item.evidenceId)).toEqual(['race-new']);
+    } finally { controller.close(); }
+  });
+
+  it('retains previous evidence and completed pages when a later evidence page fails', async () => {
+    const detail = runDetail('page-failure-run', 10);
+    const previous = evidence('previous-evidence', detail.runId);
+    const pageOne = evidence('new-page-one-evidence', detail.runId);
+    const client = viewClient(detail);
+    client.listEvidence = () => Promise.resolve({ items: [previous] });
+    const controller = new RunViewController(client);
+    try {
+      await controller.openRun(detail.runId);
+      client.listEvidence = (_runId, options) => options?.cursor === undefined
+        ? Promise.resolve({ items: [pageOne], nextCursor: 'failing-page' })
+        : Promise.reject(new Error('second page temporarily unavailable'));
+
+      await controller.resumeRun();
+
+      expect(controller.getState().evidenceIncomplete).toBe(true);
+      expect(controller.getState().evidence.map((item) => item.evidenceId)).toEqual(expect.arrayContaining([
+        'previous-evidence', 'new-page-one-evidence',
+      ]));
+      expect(controller.getState().evidence).toHaveLength(2);
+    } finally { controller.close(); }
+  });
+
+  it('does not publish an unsafe token sum as a complete tree total', async () => {
+    const parent = runDetail('overflow-parent', Number.MAX_SAFE_INTEGER, ['overflow-child']);
+    const child = runDetail('overflow-child', 2);
+    const client = viewClient(parent);
+    client.getRun = (runId) => Promise.resolve(runId === parent.runId ? parent : child);
+    const controller = new RunViewController(client);
+    try {
+      await controller.openRun(parent.runId);
+
+      expect(controller.getState().subtreeUsage?.completeness).toBe('partial');
+      expect(controller.getState().subtreeUsage?.inputTokens).toBeUndefined();
+      expect(controller.getState().subtreeUsage?.outputTokens).toBe(40);
+    } finally { controller.close(); }
+  });
+
+  it('includes child-run evidence in the parent view while preserving evidence ownership', async () => {
+    const parent: PublicRunDetail = {
+      runId: 'parent-run', profileId: 'profile', status: 'completed', stage: 'postmortem', contextVersion: 1,
+      createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', evidenceIds: [],
+      missingEvidence: [], childRunIds: ['metrics-child'],
+      usage: { completeness: 'complete', inputTokens: 100, outputTokens: 20, cachedInputTokens: 8 },
+    };
+    const child: PublicRunDetail = {
+      runId: 'metrics-child', profileId: 'profile', status: 'completed', stage: 'evidence_collection', contextVersion: 1,
+      createdAt: '2026-10-01T00:00:01.000Z', updatedAt: '2026-10-01T00:00:02.000Z', evidenceIds: ['evidence-child'],
+      missingEvidence: [], childRunIds: ['logs-grandchild'],
+      usage: { completeness: 'complete', inputTokens: 30, outputTokens: 10, cachedInputTokens: 2 },
+    };
+    const grandchild: PublicRunDetail = {
+      runId: 'logs-grandchild', profileId: 'profile', status: 'completed', stage: 'evidence_collection', contextVersion: 1,
+      createdAt: '2026-10-01T00:00:02.000Z', updatedAt: '2026-10-01T00:00:03.000Z', evidenceIds: ['evidence-grandchild'],
+      missingEvidence: [], childRunIds: [],
+      usage: { completeness: 'complete', inputTokens: 10, outputTokens: 4, cachedInputTokens: 1 },
+    };
+    const childEvidence: PublicEvidenceView = {
+      evidenceId: 'evidence-child', runId: 'metrics-child', source: 'prometheus', state: 'available',
+      capturedAt: '2026-10-01T00:00:02.000Z', summary: { status: 'breached' }, traceIdCount: 0, retrievable: false,
+    };
+    const secondChildEvidence: PublicEvidenceView = {
+      ...childEvidence, evidenceId: 'evidence-child-2', capturedAt: '2026-10-01T00:00:03.000Z', summary: { window: 'previous' },
+    };
+    const grandchildEvidence: PublicEvidenceView = {
+      ...childEvidence, evidenceId: 'evidence-grandchild', runId: grandchild.runId, source: 'elk',
+      capturedAt: '2026-10-01T00:00:04.000Z', summary: { exceptions: 2 },
+    };
+    const evidenceQueries: string[] = [];
+    const cursors: Array<string | undefined> = [];
+    const client: RunViewClient = {
+      listProfiles: () => Promise.resolve([]), listRuns: () => Promise.resolve({ items: [] }),
+      getRun: (runId) => Promise.resolve(runId === parent.runId ? parent : runId === child.runId ? child : grandchild),
+      getMessages: () => Promise.resolve({ items: [] }),
+      listEvidence: (runId, options) => {
+        evidenceQueries.push(runId);
+        cursors.push(options?.cursor);
+        if (runId === child.runId) {
+          return Promise.resolve(options?.cursor === undefined
+            ? { items: [childEvidence], nextCursor: 'evidence-page-2' }
+            : { items: [secondChildEvidence] });
+        }
+        return Promise.resolve({ items: runId === grandchild.runId ? [grandchildEvidence] : [] });
+      },
+      getConfirmation: () => Promise.resolve(null),
+      startRun: () => Promise.resolve({ runId: parent.runId, status: 'started', eventsUrl: `/runs/${parent.runId}/events` }),
+      resumeRun: () => Promise.resolve({ runId: parent.runId, status: 'resuming', eventsUrl: `/runs/${parent.runId}/events` }),
+      decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
+      openRunEvents: () => ({ close: () => undefined }),
+    };
+    const controller = new RunViewController(client);
+
+    await controller.openRun(parent.runId);
+
+    expect(evidenceQueries).toEqual(expect.arrayContaining([parent.runId, child.runId, grandchild.runId]));
+    expect(cursors).toContain('evidence-page-2');
+    expect(controller.getState().evidence).toEqual([childEvidence, secondChildEvidence, grandchildEvidence]);
+    expect(controller.getState().evidence[0]?.runId).toBe(child.runId);
+    expect(controller.getState().evidence[0]?.retrievable).toBe(false);
+    expect(controller.getState().descendantUsage).toEqual({ completeness: 'complete', inputTokens: 40, outputTokens: 14, cachedInputTokens: 3 });
+    expect(controller.getState().subtreeUsage).toEqual({ completeness: 'complete', inputTokens: 140, outputTokens: 34, cachedInputTokens: 11 });
+  });
+
+  it('marks evidence and subtree usage incomplete when a child Run cannot be read', async () => {
+    const parent: PublicRunDetail = {
+      runId: 'parent-partial', profileId: 'profile', status: 'completed', stage: 'postmortem', contextVersion: 1,
+      createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z', evidenceIds: [],
+      missingEvidence: [], childRunIds: ['missing-child'],
+      usage: { completeness: 'complete', inputTokens: 100, outputTokens: 20 },
+    };
+    const client: RunViewClient = {
+      listProfiles: () => Promise.resolve([]), listRuns: () => Promise.resolve({ items: [] }),
+      getRun: (runId) => runId === parent.runId ? Promise.resolve(parent) : Promise.reject(new Error('child unavailable')),
+      getMessages: () => Promise.resolve({ items: [] }), listEvidence: () => Promise.resolve({ items: [] }),
+      getConfirmation: () => Promise.resolve(null),
+      startRun: () => Promise.resolve({ runId: parent.runId, status: 'started', eventsUrl: `/runs/${parent.runId}/events` }),
+      resumeRun: () => Promise.resolve({ runId: parent.runId, status: 'resuming', eventsUrl: `/runs/${parent.runId}/events` }),
+      decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
+      openRunEvents: () => ({ close: () => undefined }),
+    };
+    const controller = new RunViewController(client);
+
+    await controller.openRun(parent.runId);
+
+    expect(controller.getState().evidenceIncomplete).toBe(true);
+    expect(controller.getState().descendantUsage).toEqual({ completeness: 'partial' });
+    expect(controller.getState().subtreeUsage).toEqual({ completeness: 'partial', inputTokens: 100, outputTokens: 20 });
+  });
+
   it('merges a message page idempotently and never lets an older version roll back newer content', () => {
     const current = [message('m-1', 'run-1', 2, 'new')];
     const merged = mergeMessagePage(current, page(message('m-1', 'run-1', 1, 'old'), message('m-2')), 'run-1');
@@ -159,3 +348,37 @@ describe('browser run view state', () => {
     controller.close();
   });
 });
+
+function runDetail(runId: string, inputTokens: number, childRunIds: string[] = []): PublicRunDetail {
+  return {
+    runId, profileId: 'profile', status: 'completed', stage: 'postmortem', contextVersion: 1,
+    createdAt: '2026-10-01T00:00:00.000Z', updatedAt: '2026-10-01T00:00:00.000Z',
+    evidenceIds: [], missingEvidence: [], childRunIds,
+    usage: { completeness: 'complete', inputTokens, outputTokens: 20 },
+  };
+}
+
+function evidence(evidenceId: string, runId: string): PublicEvidenceView {
+  return {
+    evidenceId, runId, source: 'prometheus', state: 'available',
+    capturedAt: '2026-10-01T00:00:02.000Z', summary: { status: 'breached' }, traceIdCount: 0, retrievable: false,
+  };
+}
+
+function viewClient(detail: PublicRunDetail): RunViewClient {
+  return {
+    listProfiles: () => Promise.resolve([]), listRuns: () => Promise.resolve({ items: [] }),
+    getRun: () => Promise.resolve(detail), getMessages: () => Promise.resolve({ items: [] }),
+    listEvidence: () => Promise.resolve({ items: [] }), getConfirmation: () => Promise.resolve(null),
+    startRun: () => Promise.resolve({ runId: detail.runId, status: 'started', eventsUrl: `/runs/${detail.runId}/events` }),
+    resumeRun: () => Promise.resolve({ runId: detail.runId, status: 'resuming', eventsUrl: `/runs/${detail.runId}/events` }),
+    decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
+    openRunEvents: () => ({ close: () => undefined }),
+  };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolver) => { resolve = resolver; });
+  return { promise, resolve };
+}

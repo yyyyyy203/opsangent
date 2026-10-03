@@ -86,7 +86,7 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
       eventMessages,
       webMessages: (cursorCodec) => new SqliteWebMessageQuery(database, cursorCodec),
-      queries: new SqliteInspectionQueryService(database, durable, evidenceManifests),
+      queries: new SqliteInspectionQueryService(database, durable, evidenceManifests, eventMessages),
       projectionCheckpoints: new SqliteProjectionCheckpointStore(database),
       projectionFailures: new SqliteProjectionFailureSink(database, () => clock.now().toISOString()),
       close: () => {

@@ -457,6 +457,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     clock,
     ids,
     admission: new ToolAdmission(toolkit),
+    eventStore: eventStoreV2,
     ...(options.enableGovernance === true && options.profileResolver !== undefined
       ? { profileResolver: options.profileResolver }
       : {}),

@@ -16,6 +16,7 @@ import type {
   VersionedCheckpointStore,
 } from '../contracts/index.js';
 import { publicEvidenceFromManifest, publicEvidenceFromRecord } from '../contracts/read-model.js';
+import { readRunUsageSummary } from '../contracts/run-usage.js';
 import type { AgentContext } from '../contracts/context.js';
 
 const DEFAULT_PAGE_SIZE = 50;
@@ -56,7 +57,10 @@ export class InMemoryInspectionQueryService implements InspectionQueryService {
     const loaded = await this.loadCheckpoint(runId);
     if (loaded === null) return null;
     const relation = await this.findRelation(runId);
-    return toRunDetail(loaded, relation.parentRunId, relation.childRunIds);
+    return {
+      ...toRunDetail(loaded, relation.parentRunId, relation.childRunIds),
+      usage: await readRunUsageSummary(this.events, runId),
+    };
   }
 
   public async listEvidence(runId: string, options: { cursor?: string; limit?: number } = {}): Promise<PublicEvidencePage> {

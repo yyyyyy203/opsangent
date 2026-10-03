@@ -2,7 +2,7 @@
 
 日期：2026-10-01
 
-状态：待用户审核；本文件是新增集成规格，不替代既有 Metrics 和 Source Subagent 规格
+状态：已实施；2026-10-03 补充父级证据汇总与 Run 用量统计。本文件不替代既有 Metrics 和 Source Subagent 规格
 适用分支：`codex/event-message-v2`
 
 ## 1. 规格关系与边界
@@ -78,9 +78,17 @@ MCP/Prometheus 不可用时，canonical Tool 仍可被调用；既有 Retry → 
 
 Web 查询应能从父 Run 查看子 Run 身份，从子 Run 查看其公开消息、阶段、终态及证据摘要；父级 ToolResult 保留相同 evidenceId 引用。刷新和进程重启后两级关系仍可查询。浏览器不增加原文证据下载接口，也不提供模拟器写控制。
 
+2026-10-03 补充验收约束：父 Run 的证据面板递归汇总子 Run 树的分页证据目录，最多查询 100 个 Run、展示 500 条证据；每条证据保留其原始 `runId` 和 `evidenceId`。查询、分页失败或触及上限时明确提示列表不完整。页面仍只呈现有界摘要与引用，不开放原始证据读取，`retrievable=false` 不得被 UI 解释为可以下载。
+
+同一 Run 的并发刷新按请求序号应用 detail、证据与用量快照，较晚返回的旧请求不得覆盖已经应用的新快照；跨 Run 切换仍以 generation 隔离。消息独立按 `messageId + version` 合并，不能因树快照过期而丢弃成功取得的消息。证据分页失败时保留已取得的页面及已有可见证据，并明确标记不完整；不得以空列表替换已知证据。
+
+模型用量从持久化 `MODEL_CALL_COMPLETED` 事件汇总，不能同时累加 `MESSAGE_COMPLETED.usage`，避免重复计数。只有 Run 级汇总通过 `RUN_FINISHED` 的可选 `usage` / `usageCompleteness` 字段进入公开 SSE；单次模型审计事件仍不公开。Run 详情从事件存储重建用量，父页面分别显示本 Run、子 Run 合计和调用树总量。重试、失败尝试或缺失输入/输出 token 时必须标记为 `partial`；无调用记录为 `unavailable`。本增量只报告 token 数，不估算费用；账单金额需独立结合供应商价格与账单核对。
+
+调用树 token 加总必须保持非负安全整数；不合法计数或溢出时省略受影响的计数并标记 `partial`，不得展示不精确的数字或标记为完整。
+
 ## 7. 兼容性和迁移
 
-- 不新增或改变 Event/Message V2、ToolResponse、SourceSubagentResult 和 HTTP 公开字段的既有语义；新增配置与内部运行时端口为可选。
+- 不改变 Event/Message V2、ToolResponse、SourceSubagentResult 和 HTTP 公开字段的既有语义；仅新增可选的 Run 用量字段，不破坏既有消费者。
 - 不修改 Harness 迭代顺序、Hook/Guard/HITL 职责或写动作策略。受信任初始 system 消息属于上下文构建，不是外部命令或新事件类型。
 - 默认无需持久化 Schema 迁移；若共享子 Run 查询需要索引，只添加事务迁移和回归测试，不修改旧迁移。
 - 现有固定返回值 Web E2E 保留，用于 HITL/前端状态测试；新增真实 Prometheus 的可选 E2E 不替换它。

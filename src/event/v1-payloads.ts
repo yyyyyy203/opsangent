@@ -55,6 +55,7 @@ export function legacyRunFinishedPayload(payload: RunFinishedPayloadV2): Record<
     ...(payload.finalText === undefined ? {} : { finalText: payload.finalText }),
     ...(payload.reportId === undefined ? {} : { reportId: payload.reportId }),
     ...(payload.usage === undefined ? {} : { usage: payload.usage }),
+    ...(payload.usageCompleteness === undefined ? {} : { usageCompleteness: payload.usageCompleteness }),
     durationMs: payload.durationMs,
   };
 }

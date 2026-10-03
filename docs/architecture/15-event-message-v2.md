@@ -98,7 +98,7 @@ interface AgentEventEnvelope<T extends AgentEventTypeV2> {
 | `RUN_STARTED` | public/audit | profile、trigger、deadline、版本快照 |
 | `RUN_RESUMED` | public/audit | checkpointVersion、resumeReason、newStreamId |
 | `RUN_PAUSED` | public/audit | interruptId、reason、expiresAt、checkpointVersion |
-| `RUN_FINISHED` | public/audit | outcome、finalText?、reportId、usage、durationMs |
+| `RUN_FINISHED` | public/audit | outcome、finalText?、reportId、Run 级聚合 usage、usageCompleteness、durationMs |
 | `RUN_FAILED` | public/audit | 结构化错误、阶段、可恢复性 |
 | `RUN_CANCELLED` | public/audit | actor、reason、stage |
 | `RUN_TIMED_OUT` | public/audit | deadline、stage、partialResultId |
@@ -123,6 +123,8 @@ interface AgentEventEnvelope<T extends AgentEventTypeV2> {
 | `MODEL_CALL_FAILED` | audit | 错误、attempt、retryable、durationMs |
 
 `REASONING_STARTED` 描述 Agent 诊断阶段，`MODEL_CALL_STARTED` 描述一次供应商调用，两者不能互相替代。模型 payload 不保存完整系统提示词、密钥或未经脱敏的原始证据。
+
+公开 `RUN_FINISHED` 只允许携带 `inputTokens`、`outputTokens`、`cachedInputTokens` 这几个非负整数和 `usageCompleteness`。该用量仅从 `MODEL_CALL_COMPLETED` 聚合一次，不能再把 `MESSAGE_COMPLETED.usage` 加进去；单次 `MODEL_CALL_*` 事件仍为 audit，不通过 SSE 暴露。遇到重试/失败或计数缺失时标记 `partial`，没有模型调用记录时标记 `unavailable`。Token 数不是账单金额。
 
 ### 5.3 消息与内容块流
 

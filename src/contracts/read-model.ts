@@ -1,4 +1,5 @@
 import type { AgentErrorCode } from './errors.js';
+import type { RunUsageSummary } from './run-usage.js';
 import type { DiagnosisStage, RunStatus } from './context.js';
 import type { JsonObject, JsonValue } from './common.js';
 import type { EvidenceManifestSummary, EvidenceRecord } from './storage.js';
@@ -19,6 +20,7 @@ export interface PublicRunDetail extends PublicRunSummary {
   evidenceIds: readonly string[];
   missingEvidence: readonly string[];
   childRunIds: readonly string[];
+  usage?: RunUsageSummary;
   failure?: {
     code: AgentErrorCode;
     message: string;

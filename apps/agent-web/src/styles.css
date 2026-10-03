@@ -81,6 +81,9 @@ textarea { resize: vertical; line-height: 1.5; }
 .detail-list div { display: flex; justify-content: space-between; gap: 10px; color: #9cacbf; font-size: .72rem; }
 .detail-list dd { color: #d9e3ef; margin: 0; text-align: right; }
 .detail-list dt { color: #7e8ea4; }
+.token-usage { border-top: 1px solid #243249; margin-top: 14px; padding-top: 11px; }
+.token-usage > strong { color: #d7e2f0; font-size: .76rem; }
+.token-usage > small { color: #8392a9; display: block; font-size: .64rem; line-height: 1.5; margin-top: 8px; }
 .live-label { color: #7be0c1; border-color: #2c765f; }
 .risk-label { color: #f1c476; border-color: #765b2d; }
 .confirmation-copy { color: #e9eef7; font-size: .8rem; line-height: 1.6; }

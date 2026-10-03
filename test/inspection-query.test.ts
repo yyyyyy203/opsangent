@@ -10,6 +10,23 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 const fixedClock: Clock = { now: () => new Date('2026-10-01T00:00:00.000Z') };
 
 describe('InspectionQueryService', () => {
+  it('derives token usage from model audit events for the public Run detail', async () => {
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: '诊断完成', toolCalls: [], usage: { inputTokens: 41, outputTokens: 9, cachedInputTokens: 3 } }]),
+      workspaceRoots: [],
+    });
+    try {
+      await runtime.agent.reply({ runId: 'usage-run', message: '巡检', profileId: 'group-buy-market' });
+      const detail = await runtime.queries?.getRun('usage-run');
+
+      expect(detail?.usage).toEqual({
+        completeness: 'complete', inputTokens: 41, outputTokens: 9, cachedInputTokens: 3,
+      });
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('reads only one evidence page for a bounded response', async () => {
     const evidence = new FirstPageOnlyEvidenceStore();
     const checkpoints = new InMemoryCheckpointStore();

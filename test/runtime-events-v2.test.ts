@@ -8,6 +8,37 @@ import { z } from 'zod';
 import { PublicEventProjectorV2 } from '../src/event/projectors/public-projector.js';
 
 describe('runtime V2 event wiring', () => {
+  it('publishes aggregate token usage on the terminal public Run event without exposing per-call audit events', async () => {
+    const response: ModelResponse = {
+      text: 'inspection complete', toolCalls: [], usage: { inputTokens: 120, outputTokens: 32, cachedInputTokens: 8 },
+    };
+    const runtime = createAgentRuntime({ model: new ScriptedModel([response]), workspaceRoots: [] });
+    try {
+      const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
+      const events = await runtime.eventStoreV2.readRun(result.runId, 0, 100);
+      const finish = events.find((item) => item.type === 'RUN_FINISHED');
+      const publicEvents = events.flatMap((event) => {
+        const projected = new PublicEventProjectorV2().project(event);
+        return projected === null ? [] : [projected];
+      });
+
+      expect(finish).toMatchObject({
+        type: 'RUN_FINISHED',
+        payload: {
+          usage: { inputTokens: 120, outputTokens: 32, cachedInputTokens: 8 },
+          usageCompleteness: 'complete',
+        },
+      });
+      expect(publicEvents.find((event) => event.type === 'RUN_FINISHED')?.payload).toMatchObject({
+        usage: { inputTokens: 120, outputTokens: 32, cachedInputTokens: 8 },
+        usageCompleteness: 'complete',
+      });
+      expect(publicEvents.map((event) => event.type)).not.toContain('MODEL_CALL_COMPLETED');
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('persists lifecycle events from the authoritative Harness run', async () => {
     const response: ModelResponse = { text: 'inspection complete', toolCalls: [] };
     const runtime = createAgentRuntime({ model: new ScriptedModel([response]), workspaceRoots: [] });

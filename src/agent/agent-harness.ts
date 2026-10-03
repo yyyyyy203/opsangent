@@ -16,6 +16,8 @@ import type {
   PendingAgentEventV2,
   DurableExecutionTransition,
   EventPublisherV2Dependencies,
+  EventStore,
+  RunUsageSummary,
   GovernanceEffect,
   HookRegistryLike,
   ProfileResolver,
@@ -39,6 +41,7 @@ import { planPendingBatchRecovery } from './run-recovery.js';
 import { toolInputDigest } from '../tool/schema.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
+import { readRunUsageSummary } from '../contracts/run-usage.js';
 
 const MAX_TRUSTED_SYSTEM_CONTEXT_CHARS = 8_192;
 
@@ -61,6 +64,7 @@ export interface AgentHarnessDependencies {
   v2Events?: Omit<EventPublisherV2Dependencies, 'correlationId'> & {
     correlationId: string | ((runId: string) => string);
   };
+  eventStore?: EventStore;
 }
 
 type RunTerminalOutcome = 'completed' | 'paused' | 'failed' | 'cancelled';
@@ -360,9 +364,17 @@ export class AgentHarness implements DiagnosisAgent {
         }, stepId);
         delete frame.activeStepId;
         delete frame.activeStepStartedAt;
+        const runUsage = this.dependencies.eventStore === undefined
+          ? undefined
+          : await readRunUsageSummary(this.dependencies.eventStore, frame.context.runId);
+        const usagePayload = runUsage === undefined ? undefined : toUsagePayload(runUsage);
         const finishPayload = {
           outcome: 'complete' as const,
           finalText: frame.finalText,
+          ...(runUsage === undefined ? {} : {
+            usageCompleteness: runUsage.completeness,
+            ...(usagePayload === undefined ? {} : { usage: usagePayload }),
+          }),
           durationMs: this.elapsed(frame.context),
         };
         await this.publishTransitionV2(frame, 'RUN_FINISHED', finishPayload);
@@ -1468,4 +1480,13 @@ function loopHint(intervention: LoopIntervention): string {
   return intervention.level === 'warn'
     ? `检测到 ${intervention.toolName} 的重复调用，请切换证据路径或停止重复查询。`
     : `重复调用 ${intervention.toolName} 已被治理拦截，请改用未尝试的证据路径。`;
+}
+
+function toUsagePayload(summary: RunUsageSummary): { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } | undefined {
+  const usage = {
+    ...(summary.inputTokens === undefined ? {} : { inputTokens: summary.inputTokens }),
+    ...(summary.outputTokens === undefined ? {} : { outputTokens: summary.outputTokens }),
+    ...(summary.cachedInputTokens === undefined ? {} : { cachedInputTokens: summary.cachedInputTokens }),
+  };
+  return Object.keys(usage).length === 0 ? undefined : usage;
 }
