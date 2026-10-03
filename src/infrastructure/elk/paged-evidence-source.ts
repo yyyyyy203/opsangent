@@ -4,22 +4,15 @@ import {
   canonicalJson,
   type EvidenceSourcePage,
   type JsonValue,
+  type LogEvidenceQuery,
   type NormalizedLogRecord,
   type ToolResponse,
 } from '../../contracts/index.js';
 
+export type { LogEvidenceQuery as ElkEvidenceQuery } from '../../contracts/index.js';
+
 const DEFAULT_MAX_PAGE_BYTES = 512 * 1024;
 const DEFAULT_MAX_PAGES = 10_000;
-
-/** Structured query accepted by the ELK adapter; raw DSL is deliberately not part of this port. */
-export interface ElkEvidenceQuery {
-  service: string;
-  start: string;
-  end: string;
-  level?: string;
-  traceId?: string;
-  contains?: string;
-}
 
 export interface ElkPageClientResponse {
   records: readonly NormalizedLogRecord[];
@@ -30,7 +23,7 @@ export interface ElkPageClientResponse {
 /** The page client is independent of the MCP SDK and can be backed by MCP, HTTP or a fixture. */
 export interface ElkPageClient {
   fetchPage(input: {
-    query: ElkEvidenceQuery;
+    query: LogEvidenceQuery;
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
@@ -65,7 +58,7 @@ export class PagedEvidenceSource {
   }
 
   public pages(
-    query: ElkEvidenceQuery,
+    query: LogEvidenceQuery,
     options: { signal?: AbortSignal } = {},
   ): AsyncGenerator<EvidenceSourcePage, void> {
     const validatedQuery = validateQuery(query);
@@ -73,7 +66,7 @@ export class PagedEvidenceSource {
     return this.iterate(validatedQuery, signal);
   }
 
-  private async *iterate(query: ElkEvidenceQuery, signal: AbortSignal): AsyncGenerator<EvidenceSourcePage, void> {
+  private async *iterate(query: LogEvidenceQuery, signal: AbortSignal): AsyncGenerator<EvidenceSourcePage, void> {
     let cursor: string | undefined;
     let expectedSnapshot: string | undefined;
     const seenCursors = new Set<string>();
@@ -144,7 +137,7 @@ export class McpElkPageClient implements ElkPageClient {
   }
 
   public async fetchPage(input: {
-    query: ElkEvidenceQuery;
+    query: LogEvidenceQuery;
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
@@ -189,7 +182,7 @@ export class ResilientElkPageClient implements ElkPageClient {
   }
 
   public fetchPage(input: {
-    query: ElkEvidenceQuery;
+    query: LogEvidenceQuery;
     cursor?: string;
     sourceSnapshotId?: string;
     signal: AbortSignal;
@@ -207,7 +200,7 @@ export class ResilientElkPageClient implements ElkPageClient {
   }
 }
 
-function validateQuery(input: ElkEvidenceQuery): ElkEvidenceQuery {
+function validateQuery(input: LogEvidenceQuery): LogEvidenceQuery {
   if (!isRecord(input)) throw protocolError();
   const service = nonEmptyString(input.service);
   const start = nonEmptyString(input.start);

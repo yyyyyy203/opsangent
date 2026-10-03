@@ -9,6 +9,16 @@ export interface LogEvidenceFilter {
   contains?: string;
 }
 
+/** Structured readonly query shared by source adapters and MCP protocol boundaries. */
+export interface LogEvidenceQuery {
+  service: string;
+  start: string;
+  end: string;
+  level?: string;
+  traceId?: string;
+  contains?: string;
+}
+
 export interface LogEvidenceReadPage {
   records: readonly NormalizedLogRecord[];
   nextCursor?: string;
