@@ -6,7 +6,8 @@ import {
 } from '../src/bootstrap/logs-subagent.js';
 import { createSourceReportTool } from '../src/bootstrap/source-report-tool.js';
 import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
-import { DefaultSourceReportCollector } from '../src/application/source-report-collector.js';
+import { DefaultSourceReportCollector, type SourceReportCollector } from '../src/application/source-report-collector.js';
+import { LogsSourceReportCollector } from '../src/application/logs-source-report-collector.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 import type {
   EvidenceCaptureBudget,
@@ -91,6 +92,84 @@ describe('logs_subagent runtime composition', () => {
       profileId: 'group-buy-market', service: 'checkout', start: '2026-09-14T00:00:00.000Z', end: '2026-09-14T01:00:00.000Z', question: '调查', evidenceIds: ['evidence-1'],
     }, 'parent-run-1')).rejects.toMatchObject({ code: 'POLICY_DENIED' });
     expect(created).toBe(false);
+  });
+
+  it('forwards optional request validation and collector factories without changing the generic default', async () => {
+    let validated = false;
+    let collectedRequest: unknown;
+    let collectorCreated = false;
+    const injectedCollector: SourceReportCollector = {
+      observeToolResult: () => undefined,
+      acceptReport: () => undefined,
+      finalize: () => ({
+        source: 'logs', status: 'unavailable', summary: 'collector-injected', findings: [], evidenceIds: [],
+        businessTraceIds: [], missingEvidence: [], coverage: 0, toolCallsUsed: 0, durationMs: 0,
+      }),
+    };
+    const tool = createLogsSubagentTool({
+      ...evidenceOptions(),
+      childAgentFactory: { create: (input) => createAgentRuntime({
+        model: new ScriptedModel([{ text: 'no evidence collected', toolCalls: [] }]),
+        workspaceRoots: [], includeExternalBash: false, tools: [...input.tools],
+      }).agent },
+      validateRequest: (value) => { validated = true; expect(value.service).toBe('checkout'); },
+      collector: (input) => { collectorCreated = true; collectedRequest = input.request; return injectedCollector; },
+    });
+
+    const result = await drainTool(tool, {
+      profileId: 'group-buy-market', service: 'checkout', start: '2026-09-14T00:00:00.000Z',
+      end: '2026-09-14T01:00:00.000Z', question: '调查结算日志',
+    }, 'parent-run-1');
+    const report = result.blocks.find((block) => block.type === 'json');
+
+    expect(validated).toBe(true);
+    expect(collectorCreated).toBe(true);
+    expect(collectedRequest).toMatchObject({ service: 'checkout', profileId: 'group-buy-market' });
+    if (report?.type !== 'json' || typeof report.value !== 'object' || report.value === null) {
+      throw new Error('expected source report JSON');
+    }
+    expect((report.value as Record<string, unknown>).summary).toBe('collector-injected');
+  });
+
+  it('binds capture-window observations to the actual child Tool input', async () => {
+    const tool = createLogsSubagentTool({
+      ...evidenceOptions(),
+      childAgentFactory: { create: (input) => createAgentRuntime({
+        model: new ScriptedModel([
+          { toolCalls: [{ id: 'capture-mismatch', name: 'logs.capture', input: {
+            service: 'checkout', start: '2026-09-14T00:10:00.000Z', end: '2026-09-14T00:20:00.000Z',
+          } }] },
+          { toolCalls: [{ id: 'report-mismatch', name: 'source_report', input: {
+            summary: '模型称已验证完整调用链和根因。',
+            findings: [{ kind: 'inference', statement: '数据库是根因', evidenceIds: ['evidence-1'] }],
+            businessTraceIds: ['trace-1'], missingEvidence: [],
+          } }] },
+          { text: '取证完成。', toolCalls: [] },
+        ]),
+        workspaceRoots: [], includeExternalBash: false, tools: [...input.tools],
+      }).agent },
+      collector: ({ request }) => new LogsSourceReportCollector({ request }),
+    });
+
+    const response = await drainTool(tool, {
+      profileId: 'group-buy-market', service: 'checkout', start: '2026-09-14T00:00:00.000Z',
+      end: '2026-09-14T01:00:00.000Z', question: '调查结算日志',
+    }, 'parent-run-1');
+    const block = response.blocks.find((item) => item.type === 'json');
+
+    if (block?.type !== 'json' || typeof block.value !== 'object' || block.value === null) {
+      throw new Error('expected source report JSON');
+    }
+    const value = block.value as { source: string; status: string; summary: string; missingEvidence: string[];
+      findings: Array<{ kind: string; statement: string }> };
+    expect(value.source).toBe('logs');
+    expect(value.status).toBe('partial');
+    expect(value.missingEvidence).toContain('capture_window_mismatch');
+    expect(value.missingEvidence).toContain('traces');
+    expect(value.summary).not.toContain('已验证完整调用链');
+    expect(value.summary).not.toContain('数据库是根因');
+    expect(value.findings.some((finding) => finding.kind === 'observation' && finding.statement.includes('数据库是根因'))).toBe(false);
+    expect(value.findings.some((finding) => finding.kind === 'inference' && finding.statement.startsWith('未验证推断：'))).toBe(true);
   });
 
   it('keeps the child Tool list, strict source_report schema, and stable source identities', () => {

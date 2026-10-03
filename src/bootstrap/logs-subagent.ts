@@ -3,9 +3,16 @@ import type {
   CheckpointStore,
   Clock,
   SourceSubagentDescriptor,
+  SourceSubagentRequest,
   SubagentLifecyclePorts,
   Tool,
+  ToolCallReturn,
+  ToolCallOptions,
+  ToolResponse,
+  ToolResponseChunk,
 } from '../contracts/index.js';
+import { attachSourceEvidenceObservation } from '../application/source-evidence-observation.js';
+import type { SourceReportCollector } from '../application/source-report-collector.js';
 import {
   createLogEvidenceTools,
   type LogEvidencePageSource,
@@ -35,6 +42,8 @@ export interface LogsSubagentOptions extends Omit<LogEvidenceToolOptions, 'maxMo
   clock?: Clock;
   lifecycle?: SubagentLifecyclePorts;
   maxAttempts?: number;
+  validateRequest?: SourceSubagentDescriptor['validateRequest'];
+  collector?: (input: { request: SourceSubagentRequest }) => SourceReportCollector;
 }
 
 /**
@@ -45,10 +54,11 @@ export interface LogsSubagentOptions extends Omit<LogEvidenceToolOptions, 'maxMo
 export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
   const childOnlyTools = createLogEvidenceTools(options);
   const childTools: SourceChildToolsFactory = {
-    create: ({ collector }) => Object.freeze([
-      ...childOnlyTools,
-      createSourceReportTool(collector),
-    ]),
+    create: ({ request, collector }) => {
+      const scopedTools = options.collector === undefined ? childOnlyTools : childOnlyTools.map((tool) =>
+        tool.name === 'logs.capture' ? bindCaptureObservation(tool, request) : tool);
+      return Object.freeze([...scopedTools, createSourceReportTool(collector)]);
+    },
   };
   const runner = new DefaultSourceSubagentRunner({
     source: 'logs',
@@ -56,6 +66,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     childTools,
     ...(options.checkpoints === undefined ? {} : { checkpoints: options.checkpoints }),
     ...(options.clock === undefined ? {} : { clock: options.clock }),
+    ...(options.collector === undefined ? {} : { collector: options.collector }),
     renderPrompt: renderLogsPrompt,
   });
   const descriptor: SourceSubagentDescriptor = {
@@ -67,6 +78,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
     ...(options.lifecycle === undefined ? {} : { lifecycle: options.lifecycle }),
     childRunId: (execution) => stableSourceChildRunId('logs', execution.parentRunId, execution.parentToolCallId),
+    ...(options.validateRequest === undefined ? {} : { validateRequest: options.validateRequest }),
     validateEvidenceIds: async (evidenceIds, input) => {
       for (const evidenceId of evidenceIds) {
         const visible = await options.manifests.getVisible(evidenceId);
@@ -77,6 +89,66 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
     },
   };
   return createSourceSubagentTool(descriptor);
+}
+
+function bindCaptureObservation(tool: Tool, request: SourceSubagentRequest): Tool {
+  if (tool.call === undefined) return tool;
+  const invoke = tool.call;
+  return Object.freeze({
+    ...tool,
+    call: (input: Record<string, unknown>, callOptions: ToolCallOptions) => {
+      if (input.service !== request.service) throw new SourceScopeError('Log capture service is outside the parent request.');
+      return mapToolResult(invoke(input, callOptions), (response) => attachCaptureObservation(response, input));
+    },
+  });
+}
+
+function mapToolResult(value: ToolCallReturn, transform: (response: ToolResponse) => ToolResponse): ToolCallReturn {
+  if (isAsyncGenerator(value)) return mapToolGenerator(value, transform);
+  if (isPromiseLike(value)) return value.then(transform);
+  return transform(value);
+}
+
+async function* mapToolGenerator(
+  stream: AsyncGenerator<ToolResponseChunk, ToolResponse>,
+  transform: (response: ToolResponse) => ToolResponse,
+): AsyncGenerator<ToolResponseChunk, ToolResponse> {
+  return transform(yield* stream);
+}
+
+function attachCaptureObservation(response: ToolResponse, input: Record<string, unknown>): ToolResponse {
+  if (response.isError === true || response.metadata?.sourceEvidence !== undefined) return response;
+  const jsonBlocks = response.blocks.filter((block) => block.type === 'json');
+  if (jsonBlocks.length !== 1 || jsonBlocks[0]?.type !== 'json' || !isRecord(jsonBlocks[0].value)) return response;
+  const value = jsonBlocks[0].value;
+  if (typeof value.evidenceId !== 'string' || (value.status !== 'committed' && value.status !== 'partial')
+    || typeof value.coverage !== 'number' || !Number.isFinite(value.coverage)
+    || !Array.isArray(value.missingEvidence) || typeof input.start !== 'string' || typeof input.end !== 'string') return response;
+  try {
+    return attachSourceEvidenceObservation(response, {
+      schemaVersion: 1,
+      source: 'logs',
+      evidenceId: value.evidenceId,
+      state: value.status,
+      coverage: value.coverage,
+      timeRange: { start: input.start, end: input.end },
+      missingEvidence: value.missingEvidence as string[],
+    });
+  } catch {
+    return response;
+  }
+}
+
+function isAsyncGenerator(value: ToolCallReturn): value is AsyncGenerator<ToolResponseChunk, ToolResponse> {
+  return typeof value === 'object' && value !== null && Symbol.asyncIterator in value;
+}
+
+function isPromiseLike(value: ToolCallReturn): value is Promise<ToolResponse> {
+  return typeof value === 'object' && value !== null && 'then' in value && typeof value.then === 'function';
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function renderLogsPrompt(request: {
