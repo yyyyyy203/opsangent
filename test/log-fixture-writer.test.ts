@@ -9,7 +9,7 @@ async function* records(count: number, message = 'ok'): AsyncIterable<Normalized
   for (let i = 0; i < count; i++) yield { timestamp: '2026-10-03T00:04:59Z', service: 'checkout', message: `${message}${i}` };
 }
 
-function fakeElasticsearch(input?: { itemFailure?: boolean; count?: number }) {
+function fakeElasticsearch(input?: { itemFailure?: boolean; hideTopLevelError?: boolean; count?: number }) {
   const requests: { url: string; method: string; body: string }[] = [];
   const fetcher = vi.fn<typeof fetch>((resource, init) => {
     const url = typeof resource === 'string' ? resource : resource instanceof URL ? resource.href : resource.url;
@@ -19,7 +19,7 @@ function fakeElasticsearch(input?: { itemFailure?: boolean; count?: number }) {
     if (url.endsWith('/_bulk')) {
       const rows = body.trimEnd().split('\n');
       const items = Array.from({ length: rows.length / 2 }, (_, i) => ({ index: { status: input?.itemFailure && i === 0 ? 400 : 201 } }));
-      return Promise.resolve(Response.json({ errors: input?.itemFailure ?? false, items }));
+      return Promise.resolve(Response.json({ errors: (input?.itemFailure ?? false) && !input?.hideTopLevelError, items }));
     }
     if (url.endsWith('/_refresh')) return Promise.resolve(Response.json({ _shards: { total: 1, successful: 1, failed: 0 } }));
     if (url.endsWith('/_count')) return Promise.resolve(Response.json({ count: input?.count ?? 2 }));
@@ -60,6 +60,13 @@ describe('isolated log fixture writer', () => {
     await expect(writeLogFixture({ url: 'http://127.0.0.1:19200', index, records: records(2), signal, fetch: fake.fetcher }))
       .rejects.toThrow('FIXTURE_BULK_FAILED');
     expect(fake.requests.some(({ url }) => url.endsWith('/_refresh'))).toBe(false);
+  });
+
+  it('rejects a failed bulk item when HTTP is 200 and errors is false', async () => {
+    const fake = fakeElasticsearch({ itemFailure: true, hideTopLevelError: true });
+    await expect(writeLogFixture({ url: 'http://127.0.0.1:19200', index, records: records(2), signal, fetch: fake.fetcher }))
+      .rejects.toThrow('FIXTURE_BULK_FAILED');
+    expect(fake.requests.map(({ url }) => new URL(url).pathname)).toEqual([`/${index}`, '/_bulk']);
   });
 
   it('does not report ready when refreshed count differs or index is outside lab namespace', async () => {
