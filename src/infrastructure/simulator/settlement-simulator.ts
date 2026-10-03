@@ -16,6 +16,10 @@ export class SettlementSimulator {
 
   currentScenario(): SettlementScenario { return this.activeScenario; }
 
+  currentSnapshot(): Readonly<{ start: number; end: number; success: number; failure: number }> {
+    return Object.freeze({ ...this.snapshot });
+  }
+
   exposition(): string {
     const { start, end, success, failure } = this.snapshot;
     const labels = 'service="checkout",environment="simulation"';
