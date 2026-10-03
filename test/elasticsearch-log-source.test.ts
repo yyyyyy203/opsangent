@@ -34,6 +34,174 @@ function response(body: unknown): Response {
 }
 
 describe('Elasticsearch log page source', () => {
+  it('closes the latest PIT when expiry cleanup meets an in-flight rotation', async () => {
+    let clock = now;
+    let release: (value: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const deleted: unknown[] = [];
+    let opens = 0;
+    let searches = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async (url, init) => {
+      if (init?.method === 'DELETE') {
+        deleted.push(jsonBody(init));
+        return new Response(null, { status: 204 });
+      }
+      if (!(url instanceof URL)) throw new Error('expected a URL');
+      if (url.pathname.endsWith('/_pit')) return response({ id: `open-${++opens}` });
+      if (++searches === 2) return gate;
+      if (searches > 2) return response({ hits: { hits: [] } });
+      return response({ pit_id: 'pit-before-expiry', hits: { hits: [hit('first', [start, 1])] } });
+    });
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => clock, pageSize: 1,
+    });
+    const first = await source.searchPage({ service: 'checkout', start, end, requestId: 'expiring' }, signal);
+    if (first.status !== 'available' || first.nextCursor === undefined) throw new Error('expected cursor');
+    const searching = source.searchPage({ service: 'checkout', start, end,
+      sourceSnapshotId: first.sourceSnapshotId, cursor: first.nextCursor }, signal);
+    await vi.waitFor(() => expect(searches).toBe(2));
+    clock += 120_001;
+    const fresh = source.searchPage({ service: 'checkout',
+      start: new Date(clock - 300_000).toISOString(), end: new Date(clock).toISOString(), requestId: 'fresh' }, signal);
+    release(response({ pit_id: 'pit-after-expiry', hits: { hits: [hit('second', [lastTimestamp, 2])] } }));
+    await Promise.all([searching, fresh]);
+    expect(deleted).toContainEqual({ id: 'pit-after-expiry' });
+    expect(deleted).not.toContainEqual({ id: 'pit-before-expiry' });
+  });
+
+  it('shutdown waits for an in-flight open and prevents subsequent searches', async () => {
+    let release: (value: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockReturnValueOnce(gate)
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret, fetch, now: () => now,
+    });
+    const input = { service: 'checkout', start, end, requestId: 'shutdown-opening' };
+    const searching = source.searchPage(input, signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const closing = source.close();
+    release(response({ id: 'pit-opened-during-shutdown' }));
+    expect(await searching).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    await closing;
+    expect(jsonBody(fetch.mock.calls[1]?.[1])).toEqual({ id: 'pit-opened-during-shutdown' });
+    expect(await source.searchPage({ ...input, requestId: 'after-shutdown' }, signal))
+      .toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('serializes close behind search and deletes the latest rotated PIT', async () => {
+    let release: (value: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(response({ id: 'pit-1' }))
+      .mockResolvedValueOnce(response({ pit_id: 'pit-2', hits: { hits: [hit('first', [start, 1])] } }))
+      .mockReturnValueOnce(gate)
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, pageSize: 1,
+    });
+    const first = await source.searchPage({ service: 'checkout', start, end, requestId: 'close-race' }, signal);
+    if (first.status !== 'available' || first.nextCursor === undefined) throw new Error('expected cursor');
+    const input = { service: 'checkout', start, end, sourceSnapshotId: first.sourceSnapshotId, cursor: first.nextCursor };
+    const searching = source.searchPage(input, signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    const closing = source.closeSnapshot({ sourceSnapshotId: first.sourceSnapshotId }, signal);
+    const racing = source.searchPage(input, signal);
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(fetch.mock.calls.filter(([, init]) => init?.method === 'DELETE')).toHaveLength(0);
+    } finally {
+      release(response({ pit_id: 'pit-3', hits: { hits: [hit('second', [lastTimestamp, 2])] } }));
+    }
+    await searching;
+    await closing;
+    expect(await racing).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(jsonBody(fetch.mock.calls[3]?.[1])).toEqual({ id: 'pit-3' });
+    expect(fetch).toHaveBeenCalledTimes(4);
+  });
+
+  it('uses the session lock for first-page retries as well as cursor searches', async () => {
+    let release: (value: Response) => void = () => {};
+    const gate = new Promise<Response>((resolve) => { release = resolve; });
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(response({ id: 'pit-1' }))
+      .mockResolvedValueOnce(new Response(null, { status: 503 }))
+      .mockReturnValueOnce(gate)
+      .mockResolvedValue(new Response(null, { status: 204 }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, id: () => 'snapshot-retry', pageSize: 1,
+    });
+    const input = { service: 'checkout', start, end, requestId: 'retry-close-race' };
+    await source.searchPage(input, signal);
+    const searching = source.searchPage(input, signal);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    const closing = source.closeSnapshot({ sourceSnapshotId: 'snapshot-retry' }, signal);
+    release(response({ pit_id: 'pit-rotated', hits: { hits: [hit('retried', [start, 1])] } }));
+    await Promise.all([searching, closing]);
+    expect(jsonBody(fetch.mock.calls[3]?.[1])).toEqual({ id: 'pit-rotated' });
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+  });
+
+  it('never reopens a valid old ID after cache eviction and history saturation', async () => {
+    let opens = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation((url, init) => {
+      if (!(url instanceof URL)) throw new Error('expected a URL');
+      if (url.pathname.endsWith('/_pit') && init?.method === 'POST') return Promise.resolve(response({ id: `pit-${++opens}` }));
+      if (init?.method === 'DELETE') return Promise.resolve(new Response(null, { status: 204 }));
+      return Promise.resolve(response({ hits: { hits: [] } }));
+    });
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, maxSessions: 1,
+    });
+    for (let index = 0; index < 1_024; index++) {
+      expect(await source.searchPage({ service: 'checkout', start, end, requestId: `history-${index}` }, signal))
+        .toMatchObject({ status: 'available', records: [] });
+    }
+    expect(await source.searchPage({ service: 'checkout', start, end, requestId: 'history-new' }, signal))
+      .toMatchObject({ status: 'source_error', code: 'MCP_RATE_LIMITED' });
+    expect(await source.searchPage({ service: 'checkout', start, end, requestId: 'history-0' }, signal))
+      .toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(opens).toBe(1_024);
+  });
+
+  it('never reopens a request after first-page PIT expiry', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(response({ id: 'pit-private' }))
+      .mockResolvedValueOnce(new Response('private details', { status: 404 }))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, pageSize: 1,
+    });
+    const input = { service: 'checkout', start, end, requestId: 'expired-first' };
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries a transient first-page failure on the same known PIT and query', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(response({ id: 'pit-private' }))
+      .mockResolvedValueOnce(new Response('private details', { status: 503 }))
+      .mockResolvedValueOnce(response({ hits: { hits: [hit('retry', [start, 1])] } }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, pageSize: 1,
+    });
+    const input = { service: 'checkout', start, end, requestId: 'transient-first' };
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'MCP_SERVER_ERROR' });
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'available', records: [{ message: 'retry' }] });
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(jsonBody(fetch.mock.calls[2]?.[1])).toEqual(jsonBody(fetch.mock.calls[1]?.[1]));
+  });
+
   it('keeps a stable logical snapshot when Elasticsearch rotates the private PIT ID', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(response({ id: 'pit-1' }))
@@ -251,7 +419,7 @@ describe('Elasticsearch log page source', () => {
       }, signal)).resolves.toMatchObject({ status: 'source_error', code: 'UNAVAILABLE', reason: 'snapshot_expired' });
   });
 
-  it('closes a newly opened PIT when the active-session limit rejects its logical session', async () => {
+  it('rejects at capacity before opening another PIT', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
       .mockResolvedValueOnce(response({ id: 'pit-1' }))
       .mockResolvedValueOnce(response({ hits: { hits: [hit('first', [start, 1])] } }))
@@ -267,8 +435,56 @@ describe('Elasticsearch log page source', () => {
     const rejected = await source.searchPage({ service: 'checkout', start, end, requestId: 'capture-2' }, signal);
 
     expect(rejected).toMatchObject({ status: 'source_error', code: 'MCP_RATE_LIMITED' });
-    expect(fetch).toHaveBeenCalledTimes(4);
-    expect(fetch.mock.calls[3]?.[1]?.method).toBe('DELETE');
-    expect(jsonBody(fetch.mock.calls[3]?.[1])).toEqual({ id: 'pit-2' });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('counts concurrent in-flight opens against the 16 PIT limit', async () => {
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let opens = 0;
+    const fetch = vi.fn<typeof globalThis.fetch>().mockImplementation(async (url, init) => {
+      if (!(url instanceof URL)) throw new Error('expected a URL');
+      if (url.pathname.endsWith('/_pit') && init?.method === 'POST') {
+        const ordinal = ++opens;
+        await gate;
+        return response({ id: `pit-${ordinal}` });
+      }
+      if (init?.method === 'DELETE') return new Response(null, { status: 204 });
+      return response({ hits: { hits: [hit('first', [start, 1])] } });
+    });
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, pageSize: 1,
+    });
+    const requests = Array.from({ length: 17 }, (_, index) => source.searchPage({
+      service: 'checkout', start, end, requestId: `concurrent-${index}`,
+    }, signal));
+    try {
+      await vi.waitFor(() => expect(opens).toBeGreaterThanOrEqual(16));
+      expect(opens).toBe(16);
+    } finally {
+      release();
+    }
+    const results = await Promise.all(requests);
+    expect(results.filter((page) => page.status === 'available')).toHaveLength(16);
+    expect(results[16]).toMatchObject({ status: 'source_error', code: 'MCP_RATE_LIMITED' });
+    await source.close();
+  });
+
+  it('never reopens an ambiguous PIT open and releases its capacity for other IDs', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockRejectedValueOnce(new Error('connection lost after opening'))
+      .mockResolvedValueOnce(response({ id: 'other-pit' }))
+      .mockResolvedValueOnce(response({ hits: { hits: [hit('other', [start, 1])] } }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now, maxSessions: 1, pageSize: 1,
+    });
+    const input = { service: 'checkout', start, end, requestId: 'ambiguous-open' };
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'MCP_NETWORK_ERROR' });
+    expect(await source.searchPage(input, signal)).toMatchObject({ status: 'source_error', code: 'UNAVAILABLE' });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(await source.searchPage({ ...input, requestId: 'other-request' }, signal)).toMatchObject({ status: 'available' });
+    expect(fetch).toHaveBeenCalledTimes(3);
   });
 });

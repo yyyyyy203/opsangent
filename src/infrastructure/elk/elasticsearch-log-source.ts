@@ -47,6 +47,7 @@ class ElasticsearchLogSource implements LogsPageBackend {
   private readonly pageSize: number;
   private readonly onCleanupFailure: ElasticsearchLogSourceOptions['onCleanupFailure'];
   private readonly locks = new Map<string, Promise<void>>();
+  private stopped = false;
 
   public constructor(options: ElasticsearchLogSourceOptions) {
     if (!isValidIndex(options.index)) throw new TypeError('Invalid Elasticsearch index');
@@ -70,6 +71,7 @@ class ElasticsearchLogSource implements LogsPageBackend {
   }
 
   public async searchPage(input: LogsSearchPageInput, signal: AbortSignal): Promise<LogsPageWireResult> {
+    if (this.stopped) return sourceError('UNAVAILABLE', 'source_unavailable');
     const parsed = logsSearchPageInput.safeParse(input);
     if (!parsed.success) return sourceError('INVALID_INPUT');
     try {
@@ -82,10 +84,11 @@ class ElasticsearchLogSource implements LogsPageBackend {
     const lockKey = parsed.data.cursor === undefined
       ? `request:${parsed.data.requestId}`
       : `snapshot:${parsed.data.sourceSnapshotId}`;
+    await this.closeExpiredSessions();
     return this.withLock(lockKey, async () => {
       try {
         if (signal.aborted) throw new SourceFailure('ABORTED');
-        await this.closeExpiredSessions();
+        if (this.stopped) throw new SourceFailure('UNAVAILABLE');
         return await this.searchValidated(parsed.data, queryDigest, signal);
       } catch (error) {
         return toSourceError(error, parsed.data.cursor === undefined ? undefined : 'snapshot_expired');
@@ -95,15 +98,18 @@ class ElasticsearchLogSource implements LogsPageBackend {
 
   public async closeSnapshot(input: { sourceSnapshotId: string }, signal: AbortSignal): Promise<void> {
     void signal;
-    await this.closeExpiredSessions();
     const session = this.registry.findBySnapshot(input.sourceSnapshotId);
-    if (session !== undefined) await this.closePit(session);
+    if (session !== undefined) await this.scheduleClose(session);
   }
 
   public async close(): Promise<void> {
+    this.stopped = true;
     const expired = this.registry.expire();
     const active = this.registry.activeSessions();
-    await Promise.allSettled([...expired, ...active].map((session) => this.closePit(session)));
+    const cleanup = [...new Set([...expired, ...active])].map((session) => this.scheduleClose(session));
+    // Request locks include in-flight opens; those close their newly known PIT
+    // before completing instead of starting a search after shutdown.
+    await Promise.allSettled([...this.locks.values(), ...cleanup]);
   }
 
   private async searchValidated(
@@ -113,7 +119,7 @@ class ElasticsearchLogSource implements LogsPageBackend {
   ): Promise<LogsPageWireResult> {
     if (input.cursor !== undefined && input.sourceSnapshotId !== undefined) {
       const session = this.registry.findBySnapshot(input.sourceSnapshotId);
-      if (session === undefined) return sourceError('UNAVAILABLE', 'snapshot_expired');
+      if (session === undefined || session.closing) return sourceError('UNAVAILABLE', 'snapshot_expired');
       let searchAfter: readonly [string, number];
       try {
         searchAfter = this.registry.resolveCursor(input.sourceSnapshotId, queryDigest, input.cursor);
@@ -131,23 +137,36 @@ class ElasticsearchLogSource implements LogsPageBackend {
 
     if (input.requestId === undefined) return sourceError('INVALID_INPUT');
     let session = this.registry.findByRequest(input.requestId, queryDigest);
-    if (session !== undefined) {
-      const cached = this.registry.getCachedPage(session, undefined);
-      if (cached !== undefined) return cached;
-      if (session.closed) return sourceError('UNAVAILABLE', 'snapshot_expired');
-    } else {
-      const opened = await this.http.request(`/${this.index}/_pit?keep_alive=${PIT_KEEP_ALIVE}`, {}, {
-        method: 'POST', signal,
+    if (session === undefined) {
+      this.registry.reserveOpening({
+        requestId: input.requestId, queryDigest,
+        retainUntil: Date.parse(input.end) + logsLabQueryPolicy.maxWindowSkewSeconds * 1_000,
       });
-      const pitId = readPitId(opened, 'id');
+      let pitId: string | undefined;
       try {
+        const opened = await this.http.request(`/${this.index}/_pit?keep_alive=${PIT_KEEP_ALIVE}`, {}, {
+          method: 'POST', signal,
+        });
+        pitId = readPitId(opened, 'id');
         session = this.registry.createSession({ requestId: input.requestId, queryDigest, pitId });
       } catch (error) {
-        await this.closePitId(pitId);
+        if (pitId !== undefined) await this.closePitId(pitId);
+        this.registry.failOpening(input.requestId);
         throw error;
       }
     }
-    return this.fetchAndCachePage(session, input, undefined, undefined, signal);
+    const current = session;
+    return this.withLock(`snapshot:${current.snapshotId}`, async () => {
+      if (this.stopped) {
+        await this.closePit(current);
+        return sourceError('UNAVAILABLE', 'source_unavailable');
+      }
+      if (current.closing) return sourceError('UNAVAILABLE', 'snapshot_expired');
+      const cached = this.registry.getCachedPage(current, undefined);
+      if (cached !== undefined) return cached;
+      if (current.closed) return sourceError('UNAVAILABLE', 'snapshot_expired');
+      return this.fetchAndCachePage(current, input, undefined, undefined, signal);
+    });
   }
 
   private async fetchAndCachePage(
@@ -188,11 +207,10 @@ class ElasticsearchLogSource implements LogsPageBackend {
       if (nextCursor === undefined) await this.closePit(session);
       return result;
     } catch (error) {
-      const shouldClose = inputCursor === undefined || signal.aborted
+      const shouldClose = signal.aborted
         || !(error instanceof SourceFailure) || !error.retryable;
       if (shouldClose) {
         await this.closePit(session);
-        if (inputCursor === undefined) this.registry.remove(session);
       }
       throw error;
     }
@@ -200,7 +218,15 @@ class ElasticsearchLogSource implements LogsPageBackend {
 
   private async closeExpiredSessions(): Promise<void> {
     const expired = this.registry.expire();
-    await Promise.allSettled(expired.map((session) => this.closePit(session)));
+    await Promise.allSettled(expired.map((session) => this.scheduleClose(session, true)));
+  }
+
+  private async scheduleClose(session: LogSnapshotSession, remove = false): Promise<void> {
+    session.closing = true;
+    await this.withLock(`snapshot:${session.snapshotId}`, async () => {
+      await this.closePit(session);
+      if (remove) this.registry.remove(session);
+    });
   }
 
   private async closePit(session: LogSnapshotSession): Promise<void> {

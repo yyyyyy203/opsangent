@@ -28,8 +28,9 @@ export class ElasticsearchHttp {
     this.baseUrl = baseUrl;
     this.fetch = options.fetch ?? globalThis.fetch;
     this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
-    if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0) {
-      throw new RangeError('maxResponseBytes must be a positive safe integer');
+    if (!Number.isSafeInteger(this.maxResponseBytes) || this.maxResponseBytes <= 0
+      || this.maxResponseBytes > DEFAULT_MAX_RESPONSE_BYTES) {
+      throw new RangeError('maxResponseBytes must be between 1 and 1048576');
     }
   }
 

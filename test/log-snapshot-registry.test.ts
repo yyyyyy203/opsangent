@@ -5,6 +5,57 @@ import { LogSnapshotRegistry } from '../src/infrastructure/elk/log-snapshot-regi
 const secret = '0123456789abcdef0123456789abcdef';
 
 describe('LogSnapshotRegistry', () => {
+  it('fails closed at history capacity without evicting a retryable tombstone', () => {
+    let next = 0;
+    const registry = new LogSnapshotRegistry({
+      cursorSecret: secret, now: () => 1_000, id: () => `snapshot-${++next}`,
+      maxSessions: 1, maxRequestHistory: 3,
+    });
+    for (let index = 1; index <= 3; index++) {
+      const session = registry.createSession({ requestId: `request-${index}`, queryDigest: 'query', pitId: `pit-${index}` });
+      registry.markClosed(session);
+    }
+    expect(() => registry.createSession({ requestId: 'request-4', queryDigest: 'query', pitId: 'pit-4' }))
+      .toThrowError(new SourceFailure('MCP_RATE_LIMITED'));
+    expect(() => registry.findByRequest('request-1', 'query'))
+      .toThrowError(new SourceFailure('UNAVAILABLE'));
+    expect(() => registry.createSession({ requestId: 'request-1', queryDigest: 'query', pitId: 'replacement' }))
+      .toThrowError(new SourceFailure('UNAVAILABLE'));
+  });
+
+  it('retains tombstones through the inclusive 150-second query freshness horizon', () => {
+    let clock = 0;
+    let next = 0;
+    const registry = new LogSnapshotRegistry({
+      cursorSecret: secret, now: () => clock, id: () => `snapshot-${++next}`,
+      maxSessions: 1, maxRequestHistory: 1, ttlMs: 100,
+    });
+    registry.markClosed(registry.createSession({ requestId: 'old', queryDigest: 'query', pitId: 'old-pit' }));
+    clock = 150_000;
+    registry.expire();
+    expect(() => registry.createSession({ requestId: 'new', queryDigest: 'query', pitId: 'new-pit' }))
+      .toThrowError(new SourceFailure('MCP_RATE_LIMITED'));
+    clock += 1;
+    expect(registry.createSession({ requestId: 'new', queryDigest: 'query', pitId: 'new-pit' })).toMatchObject({ requestId: 'new' });
+  });
+
+  it('does not evict an in-flight open from bounded request history', () => {
+    const registry = new LogSnapshotRegistry({ cursorSecret: secret, maxSessions: 2, maxRequestHistory: 2 });
+    registry.reserveOpening({ requestId: 'opening', queryDigest: 'query' });
+    registry.reserveOpening({ requestId: 'failed', queryDigest: 'query' });
+    registry.failOpening('failed');
+    expect(() => registry.reserveOpening({ requestId: 'new', queryDigest: 'query' }))
+      .toThrowError(new SourceFailure('MCP_RATE_LIMITED'));
+    expect(registry.createSession({ requestId: 'opening', queryDigest: 'query', pitId: 'known-pit' }))
+      .toMatchObject({ requestId: 'opening', pitId: 'known-pit' });
+  });
+
+  it('rejects a new opening whose query retention deadline already passed', () => {
+    const registry = new LogSnapshotRegistry({ cursorSecret: secret, now: () => 1_001 });
+    expect(() => registry.reserveOpening({ requestId: 'late', queryDigest: 'query', retainUntil: 1_000 }))
+      .toThrowError(new SourceFailure('UNAVAILABLE'));
+  });
+
   it('keeps interleaved logical snapshots stable while rotating private PIT IDs', () => {
     let next = 0;
     const registry = new LogSnapshotRegistry({

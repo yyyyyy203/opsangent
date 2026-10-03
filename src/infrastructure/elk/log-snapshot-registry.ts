@@ -2,18 +2,21 @@ import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { canonicalJson } from '../../contracts/index.js';
 import type { LogsPageWireResult } from '../../mcp/logs-protocol.js';
 import { SourceFailure } from '../../mcp/resilience.js';
+import { logsLabQueryPolicy } from '../../profiles/logs.js';
 
 const DEFAULT_MAX_SESSIONS = 16;
 const MAX_RETAINED_SESSIONS_PER_ACTIVE = 2;
 const DEFAULT_MAX_REQUEST_HISTORY = 1_024;
 const DEFAULT_TTL_MS = 2 * 60_000;
 const MAX_CURSOR_BYTES = 4 * 1_024;
+const REQUEST_RETENTION_MS = (logsLabQueryPolicy.maxFutureSkewSeconds + logsLabQueryPolicy.maxWindowSkewSeconds) * 1_000;
 
 type SearchAfter = readonly [string, number];
 
 interface RequestReference {
   queryDigest: string;
   snapshotId: string;
+  retainUntil: number;
 }
 
 export interface LogSnapshotSession {
@@ -23,6 +26,7 @@ export interface LogSnapshotSession {
   pitId: string;
   expiresAt: number;
   closed: boolean;
+  closing: boolean;
   firstPage?: LogsPageWireResult;
   recentPage?: { inputCursor: string; result: LogsPageWireResult };
 }
@@ -37,6 +41,7 @@ export class LogSnapshotRegistry {
   private readonly ttlMs: number;
   private readonly sessions = new Map<string, LogSnapshotSession>();
   private readonly requests = new Map<string, RequestReference>();
+  private readonly opening = new Set<string>();
 
   public constructor(options: {
     cursorSecret: string;
@@ -63,39 +68,59 @@ export class LogSnapshotRegistry {
     }
   }
 
-  public createSession(input: { requestId: string; queryDigest: string; pitId: string }): LogSnapshotSession {
-    this.expire();
+  public reserveOpening(input: { requestId: string; queryDigest: string; retainUntil?: number }): void {
     const requestId = nonEmpty(input.requestId);
     const queryDigest = nonEmpty(input.queryDigest);
-    const pitId = nonEmpty(input.pitId);
-    if (requestId === undefined || queryDigest === undefined || pitId === undefined) {
+    if (requestId === undefined || queryDigest === undefined) {
       throw new SourceFailure('MCP_PROTOCOL_ERROR');
     }
-
-    const existingReference = this.requests.get(requestId);
-    if (existingReference !== undefined) {
-      if (existingReference.queryDigest !== queryDigest) throw new SourceFailure('MCP_PROTOCOL_ERROR');
-      const existing = this.sessions.get(existingReference.snapshotId);
-      if (existing === undefined) throw new SourceFailure('UNAVAILABLE');
-      return existing;
-    }
+    if (this.requests.has(requestId)) throw new SourceFailure('UNAVAILABLE');
+    const retainUntil = input.retainUntil ?? this.now() + REQUEST_RETENTION_MS;
+    if (!Number.isFinite(retainUntil) || retainUntil < this.now()) throw new SourceFailure('UNAVAILABLE');
     const activeSessions = [...this.sessions.values()].filter((session) => !session.closed).length;
-    if (activeSessions >= this.maxSessions) throw new SourceFailure('MCP_RATE_LIMITED');
+    if (activeSessions + this.opening.size >= this.maxSessions) throw new SourceFailure('MCP_RATE_LIMITED');
     this.trimClosedSessions();
     this.trimRequestHistory();
 
     const snapshotId = nonEmpty(this.id());
-    if (snapshotId === undefined || this.sessions.has(snapshotId)) throw new SourceFailure('MCP_PROTOCOL_ERROR');
+    if (snapshotId === undefined || [...this.requests.values()].some((reference) => reference.snapshotId === snapshotId)) {
+      throw new SourceFailure('MCP_PROTOCOL_ERROR');
+    }
+    this.requests.set(requestId, { queryDigest, snapshotId, retainUntil });
+    this.opening.add(requestId);
+  }
+
+  public failOpening(requestId: string): void {
+    // The server may have opened a PIT even when its response was lost.
+    // Release capacity, but retain the ID so a retry cannot open a replacement.
+    this.opening.delete(requestId);
+  }
+
+  public createSession(input: { requestId: string; queryDigest: string; pitId: string }): LogSnapshotSession {
+    if (nonEmpty(input.pitId) === undefined) throw new SourceFailure('MCP_PROTOCOL_ERROR');
+    let reference = this.requests.get(input.requestId);
+    if (reference === undefined) {
+      this.reserveOpening(input);
+      reference = this.requests.get(input.requestId)!;
+    }
+    if (reference.queryDigest !== input.queryDigest) throw new SourceFailure('MCP_PROTOCOL_ERROR');
+    if (!this.opening.has(input.requestId)) {
+      const existing = this.sessions.get(reference.snapshotId);
+      if (existing === undefined) throw new SourceFailure('UNAVAILABLE');
+      return existing;
+    }
+    this.trimClosedSessions();
     const session: LogSnapshotSession = {
-      snapshotId,
-      requestId,
-      queryDigest,
-      pitId,
+      snapshotId: reference.snapshotId,
+      requestId: input.requestId,
+      queryDigest: input.queryDigest,
+      pitId: input.pitId,
       expiresAt: this.now() + this.ttlMs,
       closed: false,
+      closing: false,
     };
-    this.sessions.set(snapshotId, session);
-    this.requests.set(requestId, { queryDigest, snapshotId });
+    this.sessions.set(session.snapshotId, session);
+    this.opening.delete(input.requestId);
     return session;
   }
 
@@ -104,7 +129,7 @@ export class LogSnapshotRegistry {
     if (reference === undefined) return undefined;
     if (reference.queryDigest !== queryDigest) throw new SourceFailure('MCP_PROTOCOL_ERROR');
     const session = this.sessions.get(reference.snapshotId);
-    if (session === undefined) throw new SourceFailure('UNAVAILABLE');
+    if (session === undefined || session.closing) throw new SourceFailure('UNAVAILABLE');
     return session;
   }
 
@@ -193,12 +218,9 @@ export class LogSnapshotRegistry {
   public remove(session: LogSnapshotSession): void {
     if (this.sessions.get(session.snapshotId) !== session) return;
     this.sessions.delete(session.snapshotId);
-    const reference = this.requests.get(session.requestId);
-    if (reference?.snapshotId === session.snapshotId) this.requests.delete(session.requestId);
   }
 
   public activeSessions(): LogSnapshotSession[] {
-    this.expire();
     return [...this.sessions.values()].filter((session) => !session.closed);
   }
 
@@ -207,7 +229,15 @@ export class LogSnapshotRegistry {
     const expired: LogSnapshotSession[] = [];
     for (const [snapshotId, session] of this.sessions) {
       if (session.expiresAt > now) continue;
-      this.sessions.delete(snapshotId);
+      if (session.closed) {
+        this.sessions.delete(snapshotId);
+      } else if (session.closing) {
+        continue;
+      } else {
+        // Keep the object registered until the search lock drains, so an
+        // in-flight response can publish its latest PIT before cleanup.
+        session.closing = true;
+      }
       expired.push(session);
     }
     return expired;
@@ -218,11 +248,15 @@ export class LogSnapshotRegistry {
   }
 
   private trimRequestHistory(): void {
-    while (this.requests.size >= this.maxRequestHistory) {
-      const oldestExpired = [...this.requests].find(([, reference]) => !this.sessions.has(reference.snapshotId));
-      if (oldestExpired === undefined) throw new SourceFailure('MCP_RATE_LIMITED');
-      this.requests.delete(oldestExpired[0]);
+    // Scope accepts end up to 30s ahead and retries through end + 120s,
+    // including the boundary. Never evict an ID while that query is valid.
+    const now = this.now();
+    for (const [requestId, reference] of this.requests) {
+      if (reference.retainUntil < now && !this.sessions.has(reference.snapshotId) && !this.opening.has(requestId)) {
+        this.requests.delete(requestId);
+      }
     }
+    if (this.requests.size >= this.maxRequestHistory) throw new SourceFailure('MCP_RATE_LIMITED');
   }
 
   private trimClosedSessions(): void {

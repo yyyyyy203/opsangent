@@ -5,6 +5,13 @@ import { ElasticsearchHttp } from '../src/infrastructure/elk/elasticsearch-http.
 const signal = new AbortController().signal;
 
 describe('ElasticsearchHttp', () => {
+  it('rejects a configured response limit above the fixed 1 MiB ceiling', () => {
+    expect(() => new ElasticsearchHttp({ url: 'http://127.0.0.1:19200', maxResponseBytes: 1_048_577 }))
+      .toThrowError(RangeError);
+    expect(() => new ElasticsearchHttp({ url: 'http://127.0.0.1:19200', maxResponseBytes: 1_048_576 }))
+      .not.toThrow();
+  });
+
   it('sends a fixed same-origin request and parses a bounded JSON response', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ id: 'pit-id' }));
     const client = new ElasticsearchHttp({ url: 'http://127.0.0.1:19200', fetch });
