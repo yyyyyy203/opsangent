@@ -75,12 +75,13 @@ describe('local Agent web runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-web-metrics-'));
     roots.push(root);
     const seenMessages: AgentMessage[][] = [];
+    const seenTools: string[][] = [];
     const model: ChatModel = {
       async *stream(messages: AgentMessage[], tools, options): AsyncGenerator<ModelStreamEvent, ModelResponse> {
         await Promise.resolve();
-        void tools;
         void options;
         seenMessages.push(messages);
+        seenTools.push(tools.map((tool) => tool.name));
         yield { type: 'text_delta', delta: '完成' };
         return { text: '完成', toolCalls: [] };
       },
@@ -120,8 +121,105 @@ describe('local Agent web runtime', () => {
       expect(systemText.text).toContain('end=2026-10-02T12:34:56.000Z');
       expect(systemText.text).toContain('allowed_tools=metrics_subagent');
       expect(systemText.text).not.toContain('attacker');
+      expect(seenTools).toEqual([['metrics_subagent']]);
     } finally {
       await runtime.close();
+    }
+  });
+
+  it('adds the Logs source only in metrics-backed mode and describes its window as source metadata', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-web-logs-'));
+    roots.push(root);
+    const seenMessages: AgentMessage[][] = [];
+    const seenTools: string[][] = [];
+    const model: ChatModel = {
+      async *stream(messages: AgentMessage[], tools, options): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+        await Promise.resolve();
+        void options;
+        seenMessages.push(messages);
+        seenTools.push(tools.map((tool) => tool.name));
+        yield { type: 'text_delta', delta: '完成' };
+        return { text: '完成', toolCalls: [] };
+      },
+    };
+    const runtime = await startAgentWebRuntime({
+      dataDirectory: root,
+      workspaceRoots: [root],
+      model,
+      clock: { now: () => new Date('2026-10-02T12:34:56.789Z') },
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19210/mcp' },
+      logs: {
+        profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19211/mcp',
+        cursorSecret: '0123456789abcdef0123456789abcdef',
+      },
+      port: 0,
+      allowedOrigins: ['http://127.0.0.1:5173'],
+    });
+    try {
+      const started = await fetch(`${runtime.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json', Origin: 'http://127.0.0.1:5173' },
+        body: JSON.stringify({ runId: 'simulation-logs-run', message: '检查结算日志', profileId: 'simulation' }),
+      });
+      expect(started.status).toBe(202);
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const detail = await fetch(`${runtime.url}/runs/simulation-logs-run`);
+        if (detail.status === 200 && (await detail.clone().json() as { status: string }).status === 'completed') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect((await fetch(`${runtime.url}/runs/simulation-logs-run`)).status).toBe(200);
+      expect(seenTools).toEqual([['metrics_subagent', 'logs_subagent']]);
+
+      const system = seenMessages[0]?.find((message) => message.role === 'system');
+      const systemText = system?.blocks.find((block) => block.type === 'text');
+      expect(systemText).toMatchObject({ type: 'text' });
+      if (systemText?.type !== 'text') throw new Error('trusted system context missing');
+      expect(systemText.text).toContain('allowed_tools=metrics_subagent,logs_subagent');
+      expect(systemText.text).toContain('日志来源窗口与快照时间以来源元数据为准，不保证完全一致。');
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('requires Metrics for Logs and rejects credential URLs or short cursor secrets without echoing them', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-web-logs-invalid-'));
+    roots.push(root);
+    const base = { dataDirectory: root, workspaceRoots: [root], model: new ScriptedModel([]) };
+    const logs = {
+      profileId: 'simulation' as const,
+      mcpUrl: 'http://127.0.0.1:19211/mcp',
+      cursorSecret: '0123456789abcdef0123456789abcdef',
+    };
+
+    const logsOnly = await attemptStartup({ ...base, logs });
+    if (logsOnly.status === 'started') await logsOnly.close();
+    expect(logsOnly.status).toBe('failed');
+    if (logsOnly.status === 'failed') expect(errorMessage(logsOnly.error)).toMatch(/metrics/i);
+
+    const credentialUrl = 'http://user:private-marker@127.0.0.1:19211/mcp';
+    const invalidUrl = await attemptStartup({
+      ...base,
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19210/mcp' },
+      logs: { ...logs, mcpUrl: credentialUrl },
+    });
+    if (invalidUrl.status === 'started') await invalidUrl.close();
+    expect(invalidUrl.status).toBe('failed');
+    if (invalidUrl.status === 'failed') {
+      expect(errorMessage(invalidUrl.error)).toMatch(/logs\.mcpUrl/i);
+      expect(errorMessage(invalidUrl.error)).not.toContain(credentialUrl);
+      expect(errorMessage(invalidUrl.error)).not.toContain('private-marker');
+    }
+
+    const shortSecret = 'short-cursor-marker';
+    const invalidSecret = await attemptStartup({
+      ...base,
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19210/mcp' },
+      logs: { ...logs, cursorSecret: shortSecret },
+    });
+    if (invalidSecret.status === 'started') await invalidSecret.close();
+    expect(invalidSecret.status).toBe('failed');
+    if (invalidSecret.status === 'failed') {
+      expect(errorMessage(invalidSecret.error)).toMatch(/cursorSecret/i);
+      expect(errorMessage(invalidSecret.error)).not.toContain(shortSecret);
     }
   });
 
@@ -139,3 +237,18 @@ describe('local Agent web runtime', () => {
     })).rejects.toThrow('Unsupported metrics Profile');
   });
 });
+
+async function attemptStartup(options: Parameters<typeof startAgentWebRuntime>[0]): Promise<
+  { status: 'started'; close: () => Promise<void> } | { status: 'failed'; error: unknown }
+> {
+  try {
+    const runtime = await startAgentWebRuntime(options);
+    return { status: 'started', close: () => runtime.close() };
+  } catch (error) {
+    return { status: 'failed', error };
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

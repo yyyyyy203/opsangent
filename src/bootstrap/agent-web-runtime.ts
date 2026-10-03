@@ -1,10 +1,13 @@
 import { mkdir } from 'node:fs/promises';
+import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
 import type { ChatModel, Clock, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import type { RuntimeToolPorts } from '../application/create-runtime.js';
 import type { ReplyOptions } from '../agent/types.js';
 import { systemClock, randomIdGenerator } from '../contracts/index.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
 import { createMetricsWebSource } from './metrics-web-source.js';
+import { createLogsWebSource } from './logs-web-source.js';
 import { createOpenAICompatibleModel, type CreateOpenAICompatibleModelOptions } from './openai-compatible.js';
 import { OpaqueMessageCursorCodec } from '../application/message-cursor-codec.js';
 import { WebQueryService, type ConfiguredWebProfile } from '../application/web-query-service.js';
@@ -41,6 +44,12 @@ export interface AgentWebRuntimeOptions {
     mcpUrl: string;
     childModel?: ChatModel;
   };
+  logs?: {
+    profileId: 'simulation';
+    mcpUrl: string;
+    childModel?: ChatModel;
+    cursorSecret: string;
+  };
   profiles?: readonly AgentWebProfileConfig[];
   host?: string;
   port?: number;
@@ -63,6 +72,10 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   const host = options.host ?? '127.0.0.1';
   validateLocalHost(host);
   const metrics = normalizeMetricsConfig(options.metrics);
+  const logs = normalizeLogsConfig(options.logs);
+  if (logs !== undefined && metrics === undefined) {
+    throw new Error('Logs Web source requires the Metrics simulation Profile.');
+  }
   await mkdir(options.dataDirectory, { recursive: true });
 
   const clock = options.clock ?? systemClock;
@@ -73,14 +86,16 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     : normalizeProfiles([{
       id: 'simulation',
       name: 'simulation',
-      description: '使用本地 Prometheus lab 的模拟数据；只读、仅支持 checkout 结算指标取证。',
+      description: logs === undefined
+        ? '使用本地 Prometheus lab 的模拟数据；只读、仅支持 checkout 结算指标取证。'
+        : '使用模拟巡检 Profile 和只读 Metrics、Logs 来源调查 checkout 结算问题。',
       enabled: true,
       readOnly: true,
     }]);
   const directTools = metrics === undefined ? [...(options.tools ?? [])] : [];
   const allowedToolNames = metrics === undefined
     ? directTools.map((tool) => tool.name)
-    : ['metrics_subagent'];
+    : ['metrics_subagent', ...(logs === undefined ? [] : ['logs_subagent'])];
   const runtime = createInspectionRuntime({
     model,
     workspaceRoots: [...options.workspaceRoots],
@@ -92,8 +107,16 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
           mcpUrl: metrics.mcpUrl,
           model: metrics.childModel ?? model,
         }),
+        ...(logs === undefined ? [] : [
+          (ports: RuntimeToolPorts) => createLogsWebSource(ports, {
+            mcpUrl: logs.mcpUrl,
+            model: logs.childModel ?? model,
+            cursorSecret: logs.cursorSecret,
+          }),
+        ]),
       ],
     }),
+    ...(logs === undefined ? {} : { evidenceBlobRootPath: join(options.dataDirectory, 'evidence-blobs') }),
     sqlitePath: join(options.dataDirectory, 'agent.sqlite'),
     clock,
     ids,
@@ -110,7 +133,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     const execution = new RunExecutionCoordinator(
       runtime.agent,
       runtime.checkpoints,
-      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock) },
+      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock, logs !== undefined) },
     );
     const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
@@ -185,7 +208,37 @@ function normalizeMetricsConfig(
   return value;
 }
 
-function createSimulationStartPreparation(clock: Clock): (options: ReplyOptions) => ReplyOptions {
+function normalizeLogsConfig(
+  value: AgentWebRuntimeOptions['logs'] | null | undefined,
+): AgentWebRuntimeOptions['logs'] | undefined {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value !== 'object' || value.profileId !== 'simulation') {
+    throw new Error('Unsupported Logs Profile; only simulation is available.');
+  }
+  if (typeof value.mcpUrl !== 'string' || value.mcpUrl.trim().length === 0) {
+    throw new Error('logs.mcpUrl is required for the simulation Profile.');
+  }
+  try {
+    const url = new URL(value.mcpUrl);
+    const hostname = url.hostname.replace(/^\[|\]$/g, '').toLowerCase();
+    const ipVersion = isIP(hostname);
+    const isLoopback = hostname === 'localhost'
+      || hostname === '::1'
+      || (ipVersion === 4 && hostname.startsWith('127.'));
+    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.hash || !isLoopback) {
+      throw new Error('unsupported endpoint');
+    }
+  } catch {
+    throw new Error('logs.mcpUrl must be a loopback http(s) URL without credentials or fragments.');
+  }
+  if (typeof value.cursorSecret !== 'string' || value.cursorSecret.trim().length === 0
+    || Buffer.byteLength(value.cursorSecret, 'utf8') < 32) {
+    throw new Error('logs.cursorSecret must contain at least 32 UTF-8 bytes.');
+  }
+  return value;
+}
+
+function createSimulationStartPreparation(clock: Clock, includeLogs: boolean): (options: ReplyOptions) => ReplyOptions {
   return (options) => {
     const end = Math.floor(clock.now().getTime() / 1_000) * 1_000;
     const start = end - 300_000;
@@ -195,8 +248,9 @@ function createSimulationStartPreparation(clock: Clock): (options: ReplyOptions)
       'service=checkout',
       `start=${new Date(start).toISOString()}`,
       `end=${new Date(end).toISOString()}`,
-      'allowed_tools=metrics_subagent',
+      `allowed_tools=metrics_subagent${includeLogs ? ',logs_subagent' : ''}`,
       'source=local-prometheus-lab',
+      ...(includeLogs ? ['日志来源窗口与快照时间以来源元数据为准，不保证完全一致。'] : []),
     ].join('\n');
     return { ...options, trustedSystemContext };
   };

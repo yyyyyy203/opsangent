@@ -6,12 +6,19 @@ const workspaceRoots = required('AGENTOPS_WORKSPACE_ROOTS').split(';').map((valu
 if (workspaceRoots.length === 0) throw new Error('AGENTOPS_WORKSPACE_ROOTS must contain at least one absolute path.');
 const webProfile = required('AGENTOPS_WEB_PROFILE');
 const metricsMcpUrl = required('AGENTOPS_METRICS_MCP_URL');
+const logsMcpUrl = optional('AGENTOPS_LOGS_MCP_URL');
 if (webProfile !== 'simulation') throw new Error('AGENTOPS_WEB_PROFILE must be simulation.');
 const allowedOrigins = optionalList('AGENTOPS_ALLOWED_ORIGINS');
+const logs = logsMcpUrl === undefined ? undefined : {
+  profileId: 'simulation',
+  mcpUrl: logsMcpUrl,
+  cursorSecret: required('AGENTOPS_EVIDENCE_CURSOR_SECRET'),
+};
 const runtime = await startAgentWebRuntime({
   dataDirectory,
   workspaceRoots,
   metrics: { profileId: 'simulation', mcpUrl: metricsMcpUrl },
+  ...(logs === undefined ? {} : { logs }),
   ...(process.env.AGENTOPS_HOST === undefined ? {} : { host: process.env.AGENTOPS_HOST }),
   ...(process.env.AGENTOPS_PORT === undefined ? {} : { port: parsePort(process.env.AGENTOPS_PORT) }),
   ...(allowedOrigins.length === 0 ? {} : { allowedOrigins }),
@@ -31,6 +38,10 @@ function required(name) {
   const value = process.env[name];
   if (value === undefined || value.trim().length === 0) throw new Error(`${name} is required.`);
   return value;
+}
+
+function optional(name) {
+  return process.env[name];
 }
 
 function optionalList(name) {
