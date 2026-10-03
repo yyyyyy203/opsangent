@@ -11,6 +11,7 @@ import type {
 } from './types.js';
 import { DefaultToolResultCompactor } from '../../context-compressor/tool-result-compactor.js';
 import type { ToolResultCompactor } from '../../context-compressor/types.js';
+import { createModelToolNameCodec, type ModelToolNameCodec } from './tool-name-codec.js';
 
 const CORRECTION_DETAIL_KEYS = [
   'gate',
@@ -28,14 +29,15 @@ const DEFAULT_TOOL_RESULT_COMPACTOR = new DefaultToolResultCompactor();
 export function formatChatRequest(
   messages: readonly AgentMessage[],
   tools: readonly Tool[],
-  options: { model: string; includeUsage: boolean; toolChoice?: 'none'; toolResultCompactor?: ToolResultCompactor },
+  options: { model: string; includeUsage: boolean; toolChoice?: 'none'; toolResultCompactor?: ToolResultCompactor; toolNameCodec?: ModelToolNameCodec },
 ): OpenAICompatibleRequest {
   if (options.model.trim().length === 0) throw protocolFailure('Model name is required.');
 
+  const toolNameCodec = options.toolNameCodec ?? createModelToolNameCodec(messages, tools);
   const formattedMessages: OpenAICompatibleMessage[] = [];
-  for (const message of messages) formattedMessages.push(...formatMessage(message, options.toolResultCompactor ?? DEFAULT_TOOL_RESULT_COMPACTOR));
+  for (const message of messages) formattedMessages.push(...formatMessage(message, options.toolResultCompactor ?? DEFAULT_TOOL_RESULT_COMPACTOR, toolNameCodec));
 
-  const formattedTools = tools.length === 0 ? undefined : tools.map(formatTool);
+  const formattedTools = tools.length === 0 ? undefined : tools.map((tool) => formatTool(tool, toolNameCodec));
   return {
     model: options.model,
     messages: formattedMessages,
@@ -58,14 +60,14 @@ export function renderToolResultForModel(
   return stableJson(projected);
 }
 
-function formatMessage(message: AgentMessage, compactor: ToolResultCompactor): OpenAICompatibleMessage[] {
+function formatMessage(message: AgentMessage, compactor: ToolResultCompactor, toolNameCodec: ModelToolNameCodec): OpenAICompatibleMessage[] {
   switch (message.role) {
     case 'system':
       return [formatTextualMessage('system', message.blocks)];
     case 'user':
       return [formatTextualMessage('user', message.blocks)];
     case 'assistant':
-      return [formatAssistantMessage(message.blocks)];
+      return [formatAssistantMessage(message.blocks, toolNameCodec)];
     case 'tool':
       return formatToolMessages(message.blocks, compactor);
     default:
@@ -86,7 +88,7 @@ function formatTextualMessage(
   return { role, content: parts.join('\n') };
 }
 
-function formatAssistantMessage(blocks: readonly MessageBlock[]): OpenAICompatibleAssistantMessage {
+function formatAssistantMessage(blocks: readonly MessageBlock[], toolNameCodec: ModelToolNameCodec): OpenAICompatibleAssistantMessage {
   const textParts: string[] = [];
   const toolCalls: OpenAICompatibleToolCall[] = [];
   for (const block of blocks) {
@@ -96,7 +98,7 @@ function formatAssistantMessage(blocks: readonly MessageBlock[]): OpenAICompatib
       id: requireIdentity(block.call.id, 'tool call id'),
       type: 'function',
       function: {
-        name: requireIdentity(block.call.name, 'tool name'),
+        name: toolNameCodec.toWireName(requireIdentity(block.call.name, 'tool name')),
         arguments: stableJson(block.call.input),
       },
     });
@@ -104,7 +106,7 @@ function formatAssistantMessage(blocks: readonly MessageBlock[]): OpenAICompatib
       id: requireIdentity(block.call.id, 'tool call id'),
       type: 'function',
       function: {
-        name: requireIdentity(block.call.name, 'tool name'),
+        name: toolNameCodec.toWireName(requireIdentity(block.call.name, 'tool name')),
         arguments: requireString(block.call.arguments, 'tool call arguments'),
       },
     });
@@ -131,12 +133,12 @@ function formatToolMessages(blocks: readonly MessageBlock[], compactor: ToolResu
   return messages;
 }
 
-function formatTool(tool: Tool): OpenAICompatibleTool {
+function formatTool(tool: Tool, toolNameCodec: ModelToolNameCodec): OpenAICompatibleTool {
   const name = requireIdentity(tool.name, 'tool name');
   const description = requireString(tool.description, 'tool description');
   const parameters = toolInputJsonSchema(tool);
   assertJsonSafe(parameters, 'tool schema');
-  return { type: 'function', function: { name, description, parameters: stableValue(parameters) as Record<string, unknown> } };
+  return { type: 'function', function: { name: toolNameCodec.toWireName(name), description, parameters: stableValue(parameters) as Record<string, unknown> } };
 }
 
 function projectToolResponseBlock(block: ToolResponseBlock): Record<string, unknown> | undefined {

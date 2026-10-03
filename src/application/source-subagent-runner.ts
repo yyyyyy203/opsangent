@@ -1,4 +1,5 @@
 import type { AgentEvent, Tool, ToolResponse } from '../contracts/index.js';
+import type { AgentErrorCode } from '../contracts/errors.js';
 import type { AgentContext } from '../contracts/context.js';
 import type { DiagnosisRunResult } from '../agent/types.js';
 import type {
@@ -172,6 +173,7 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
           error instanceof Error ? error.message : 'Child source run failed.',
           error.retryable,
           partial.evidenceIds.length > 0 ? partial : undefined,
+          error.details,
         );
       }
       const partial = reducedScope(finalize(), 'child_run_failed');
@@ -181,11 +183,34 @@ export class DefaultSourceSubagentRunner implements SourceSubagentRunner {
       throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source run failed.', true);
     }
     if (childResult.status === 'failed' || childResult.status === 'cancelled') {
-      const partial = reducedScope(finalize(), childResult.status === 'cancelled' ? 'child_run_cancelled' : 'child_run_failed');
-      if (partial.evidenceIds.length > 0) {
-        throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source run failed.', true, partial);
+      const cancelled = childResult.status === 'cancelled';
+      const partial = reducedScope(finalize(), cancelled ? 'child_run_cancelled' : 'child_run_failed');
+      let childFailure: AgentContext['failure'];
+      if (!cancelled && this.options.checkpoints !== undefined) {
+        try {
+          childFailure = (await this.options.checkpoints.load(execution.childRunId))?.failure;
+        } catch {
+          throw new SourceSubagentFailure(
+            'STORAGE_ERROR',
+            'Child Run failure could not be read from its checkpoint.',
+            false,
+            partial.evidenceIds.length > 0 ? partial : undefined,
+          );
+        }
       }
-      throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source run failed.', true);
+      if (!cancelled && childFailure === undefined) {
+        if (partial.evidenceIds.length > 0) {
+          throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source Run failed.', true, partial);
+        }
+        throw new SourceSubagentFailure('MCP_SERVER_ERROR', 'Child source Run failed.', true);
+      }
+      throw new SourceSubagentFailure(
+        childFailure?.code ?? (cancelled ? 'ABORTED' : 'UNAVAILABLE'),
+        childFailure?.message ?? (cancelled ? 'Child source Run was cancelled.' : 'Child source Run failed without a stored failure reason.'),
+        childFailure?.retryable ?? false,
+        partial.evidenceIds.length > 0 ? partial : undefined,
+        childFailure?.details,
+      );
     }
     if (childResult.status === 'paused' || childResult.status === 'awaiting_confirmation') {
       const partial = reducedScope(finalize(), 'child_run_interrupted');
@@ -204,6 +229,7 @@ export class SourceSubagentFailure extends Error {
     message: string,
     public readonly retryable: boolean,
     public readonly partialResult?: SourceSubagentResult,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'SourceSubagentFailure';
@@ -323,33 +349,21 @@ function throwIfAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new SourceSubagentFailure('ABORTED', 'Source subagent was aborted.', false);
 }
 
-export type SourceSubagentFailureCode =
-  | 'ABORTED'
-  | 'BUDGET_EXCEEDED'
-  | 'INVALID_INPUT'
-  | 'MCP_SERVER_ERROR'
-  | 'TIMEOUT'
-  | 'UNAVAILABLE'
-  | 'POLICY_DENIED'
-  | 'MCP_TIMEOUT'
-  | 'MCP_NETWORK_ERROR'
-  | 'MCP_RATE_LIMITED'
-  | 'MCP_PROTOCOL_ERROR';
+export type SourceSubagentFailureCode = AgentErrorCode;
 
 function isStructuredSourceFailure(error: unknown): error is {
   code: SourceSubagentFailureCode;
+  message?: string;
   retryable: boolean;
+  details?: Record<string, unknown>;
 } {
   if (!isRecord(error) || typeof error.code !== 'string' || typeof error.retryable !== 'boolean') return false;
-  return error.code === 'ABORTED'
-    || error.code === 'BUDGET_EXCEEDED'
-    || error.code === 'INVALID_INPUT'
-    || error.code === 'MCP_SERVER_ERROR'
-    || error.code === 'TIMEOUT'
-    || error.code === 'UNAVAILABLE'
-    || error.code === 'POLICY_DENIED'
-    || error.code === 'MCP_TIMEOUT'
-    || error.code === 'MCP_NETWORK_ERROR'
-    || error.code === 'MCP_RATE_LIMITED'
-    || error.code === 'MCP_PROTOCOL_ERROR';
+  return AGENT_ERROR_CODES.has(error.code as AgentErrorCode);
 }
+
+const AGENT_ERROR_CODES = new Set<AgentErrorCode>([
+  'ABORTED', 'BUDGET_EXCEEDED', 'CONFIRMATION_EXPIRED', 'INVALID_INPUT', 'LOOP_DETECTED', 'MODEL_ERROR',
+  'STORAGE_ERROR', 'TOOL_ERROR', 'TOOL_NOT_FOUND', 'TOOL_ARGUMENTS_PARSE_FAILED', 'TOOL_ARGUMENTS_SCHEMA_INVALID',
+  'TOOL_ARGUMENTS_SEMANTIC_INVALID', 'POLICY_DENIED', 'MCP_NETWORK_ERROR', 'MCP_TIMEOUT', 'MCP_RATE_LIMITED',
+  'MCP_SERVER_ERROR', 'MCP_AUTH_ERROR', 'MCP_PROTOCOL_ERROR', 'CIRCUIT_OPEN', 'TIMEOUT', 'UNAVAILABLE', 'USER_REJECTED',
+]);

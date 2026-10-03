@@ -82,14 +82,14 @@ describe('OpenAI-compatible request formatter', () => {
       role: 'assistant',
       content: '',
       tool_calls: [
-        { id: 'tc-0', type: 'function', function: { name: 'metrics.query', arguments: '{"limit":2,"window":"5m"}' } },
-        { id: 'tc-1', type: 'function', function: { name: 'metrics.query', arguments: '{"window":}' } },
+        { id: 'tc-0', type: 'function', function: { name: 'metrics_query', arguments: '{"limit":2,"window":"5m"}' } },
+        { id: 'tc-1', type: 'function', function: { name: 'metrics_query', arguments: '{"window":}' } },
       ],
     }]);
     expect(request.tools).toEqual([{
       type: 'function',
       function: {
-        name: 'metrics.query',
+        name: 'metrics_query',
         description: 'Query metrics.',
         parameters: readToolSchema.jsonSchema,
       },

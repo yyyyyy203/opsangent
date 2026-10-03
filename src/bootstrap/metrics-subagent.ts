@@ -140,7 +140,7 @@ function daysInMonth(year: number, month: number): number {
 function renderMetricsPrompt(request: SourceSubagentRequest): string {
   return [
     '你是只读 Metrics 取证 Subagent。',
-    '只能调用 metrics.settlement 和 source_report。',
+    '只能调用提供的指标查询工具和 source_report。',
     '失败率、阈值、样本充分性由工具结果决定；不要自行计算或猜测根因。',
     '低样本必须视为 insufficient_data。',
     `profileId=${JSON.stringify(request.profileId)}`,

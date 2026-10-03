@@ -4,6 +4,7 @@ import { OpenAIStreamAssembler } from './assembler.js';
 import { classifyOpenAICompatibleError } from './error-classifier.js';
 import type { OpenAICompatibleClient, OpenAICompatibleClientRequestOptions } from './client.js';
 import { formatChatRequest } from './formatter.js';
+import { createModelToolNameCodec } from './tool-name-codec.js';
 import type { ToolResultCompactor } from '../../context-compressor/types.js';
 import type { OpenAICompatibleStreamChunk } from './types.js';
 
@@ -26,12 +27,14 @@ export class OpenAICompatibleChatModel implements ChatModel {
     messages: AgentMessage[], tools: Tool[], callOptions: ModelCallOptions,
   ): AsyncGenerator<ModelStreamEvent, ModelResponse> {
     const clock = this.config.clock ?? Date.now;
+    const toolNameCodec = createModelToolNameCodec(messages, tools);
     const combined = createCallSignal(callOptions.signal, callOptions.deadline, clock);
     const request = formatChatRequest(messages, tools, {
       model: this.config.model,
       includeUsage: this.config.includeUsage ?? true,
       ...(callOptions.toolChoice === undefined ? {} : { toolChoice: callOptions.toolChoice }),
       ...(this.config.toolResultCompactor === undefined ? {} : { toolResultCompactor: this.config.toolResultCompactor }),
+      toolNameCodec,
     });
     const upstreamOptions: OpenAICompatibleClientRequestOptions = {
       signal: combined.signal,
@@ -48,7 +51,7 @@ export class OpenAICompatibleChatModel implements ChatModel {
         if (item.done) {
           upstreamCompleted = true;
           if (combined.deadlineTriggered()) throw deadlineFailure();
-          return assembler.finish();
+          return toolNameCodec.toInternalResponse(assembler.finish());
         }
         for (const event of assembler.accept(item.value)) yield event;
       }

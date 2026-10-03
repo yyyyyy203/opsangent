@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { ModelCallOptions, ModelResponse, ModelStreamEvent } from '../src/contracts/index.js';
+import { z } from 'zod';
+import type { ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../src/contracts/index.js';
 import { OpenAICompatibleChatModel } from '../src/model/openai-compatible/model.js';
 import type { OpenAICompatibleClient, OpenAICompatibleClientRequestOptions } from '../src/model/openai-compatible/client.js';
 import type { OpenAICompatibleRequest, OpenAICompatibleStreamChunk } from '../src/model/openai-compatible/types.js';
@@ -7,14 +8,20 @@ import type { OpenAICompatibleRequest, OpenAICompatibleStreamChunk } from '../sr
 describe('OpenAI-compatible ChatModel', () => {
   it('returns raw tool calls, usage and finish reason while exposing only text deltas', async () => {
     const client = new FakeClient([
-      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'tc-1', type: 'function', function: { name: 'metrics.query', arguments: '{"window":' } }] } }] },
+      { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'tc-1', type: 'function', function: { name: 'metrics_query', arguments: '{"window":' } }] } }] },
       { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, function: { arguments: '"5m"}' } }] } }] },
       { choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] },
       { choices: [], usage: { prompt_tokens: 20, completion_tokens: 4, prompt_tokens_details: { cached_tokens: 12 } } },
     ]);
     const model = new OpenAICompatibleChatModel(client, { model: 'test-model' });
+    const tools: Tool[] = [{
+      name: 'metrics.query',
+      description: 'Query metrics.',
+      kind: 'evidence',
+      inputSchema: z.object({ window: z.string() }),
+    }];
 
-    const result = await drainModel(model.stream([], [], callOptions()));
+    const result = await drainModel(model.stream([], tools, callOptions()));
 
     expect(result.events).toEqual([]);
     expect(result.returnValue).toEqual({
@@ -24,6 +31,7 @@ describe('OpenAI-compatible ChatModel', () => {
       finishReason: 'tool_calls',
     });
     expect(client.requests[0]).toMatchObject({ model: 'test-model', stream: true });
+    expect(client.requests[0]?.tools?.[0]?.function.name).toBe('metrics_query');
   });
 
   it('streams text and maps usage through the same assembler', async () => {

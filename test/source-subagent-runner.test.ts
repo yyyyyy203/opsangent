@@ -225,6 +225,54 @@ describe('source subagent Runner', () => {
 
     expect(failure).toMatchObject({ code: 'MCP_PROTOCOL_ERROR', retryable: false });
   });
+
+  it('preserves a terminal child model failure from its checkpoint instead of converting it to a retryable MCP error', async () => {
+    let checkpointLoads = 0;
+    const child: SourceChildAgent = {
+      replyStream: async function* (options) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        return { ...completedChildResult(options.runId), status: 'failed' };
+      },
+      resumeStream: async function* (runId) {
+        await Promise.resolve();
+        yield* [] as AgentEvent[];
+        return { ...completedChildResult(runId), status: 'failed' };
+      },
+    };
+    const runner = new DefaultSourceSubagentRunner({
+      source: 'metrics',
+      childAgentFactory: { create: () => child },
+      childTools: { create: () => [
+        { name: 'metrics.settlement', description: 'read metrics', kind: 'evidence', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+        { name: 'source_report', description: 'report', kind: 'utility', inputSchema: z.object({}).strict(), call: () => ({ blocks: [] }) },
+      ] },
+      checkpoints: {
+        load: () => {
+          checkpointLoads += 1;
+          if (checkpointLoads === 1) return Promise.resolve(null);
+          return Promise.resolve({
+            failure: {
+              code: 'MODEL_ERROR', message: 'Model request was rejected.', retryable: false,
+              details: { category: 'protocol', disposition: 'fallback_only', status: 400 },
+            },
+          } as unknown as AgentContext);
+        },
+        save: () => Promise.resolve(),
+        hasExecuted: () => Promise.resolve(false),
+        recordExecuted: () => Promise.resolve(),
+      },
+      clock: { now: () => new Date('2026-09-14T00:00:00.000Z') },
+    });
+
+    const failure = await drainFailure(runner.run(request(), executionContext()));
+
+    expect(failure).toMatchObject({
+      code: 'MODEL_ERROR', retryable: false,
+      details: { category: 'protocol', disposition: 'fallback_only', status: 400 },
+    });
+    expect(checkpointLoads).toBe(2);
+  });
 });
 
 function request(): SourceSubagentRequest {

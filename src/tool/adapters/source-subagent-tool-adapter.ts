@@ -424,7 +424,12 @@ function safeErrorMessage(error: unknown): string {
 
 function toSourceToolFailure(error: unknown, code: AgentErrorCode): SourceToolFailure {
   if (error instanceof SourceToolFailure) return error;
-  return new SourceToolFailure(code, safeErrorMessage(error), isAgentErrorLike(error) && error.retryable);
+  return new SourceToolFailure(
+    code,
+    safeErrorMessage(error),
+    isAgentErrorLike(error) && error.retryable,
+    isAgentErrorLike(error) ? error.details : undefined,
+  );
 }
 
 function toValidatorFailure(error: unknown): SourceToolFailure {
@@ -433,14 +438,22 @@ function toValidatorFailure(error: unknown): SourceToolFailure {
 }
 
 function toAgentError(error: unknown, fallback: AgentErrorCode) {
-  if (isAgentErrorLike(error)) return { code: error.code, message: error.message, retryable: error.retryable };
+  if (isAgentErrorLike(error)) return {
+    code: error.code,
+    message: error.message,
+    retryable: error.retryable,
+    ...(error.details === undefined ? {} : { details: error.details }),
+  };
   return { code: fallback, message: 'Invalid source subagent input.', retryable: false };
 }
 
-function isAgentErrorLike(value: unknown): value is { code: AgentErrorCode; message: string; retryable: boolean } {
+function isAgentErrorLike(value: unknown): value is { code: AgentErrorCode; message: string; retryable: boolean; details?: Record<string, unknown> } {
   if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as { code?: unknown; message?: unknown; retryable?: unknown };
-  return typeof candidate.code === 'string' && typeof candidate.message === 'string' && typeof candidate.retryable === 'boolean';
+  const candidate = value as { code?: unknown; message?: unknown; retryable?: unknown; details?: unknown };
+  return typeof candidate.code === 'string'
+    && typeof candidate.message === 'string'
+    && typeof candidate.retryable === 'boolean'
+    && (candidate.details === undefined || (typeof candidate.details === 'object' && candidate.details !== null && !Array.isArray(candidate.details)));
 }
 
 function isSourceSubagentFailure(value: unknown): value is { partialResult?: SourceSubagentResult; code: string } {
@@ -508,6 +521,7 @@ class SourceToolFailure extends Error {
     public readonly code: AgentErrorCode,
     message: string,
     public readonly retryable: boolean,
+    public readonly details?: Record<string, unknown>,
   ) {
     super(message);
     this.name = 'SourceToolFailure';

@@ -23,9 +23,14 @@ describe('metrics OpenAI-compatible nested loop', () => {
         const body = parsed;
         bodies.push(body);
         const names = (body.tools as Array<{ function: { name: string } }>).map((tool) => tool.function.name);
+        if (names.some((name) => !/^[a-zA-Z0-9_-]{1,64}$/.test(name))) {
+          response.writeHead(400, { 'content-type': 'application/json' });
+          response.end(JSON.stringify({ error: { code: 'invalid_function_name', message: 'invalid tool name' } }));
+          return;
+        }
         const isParent = names.includes('metrics_subagent');
         const turn = isParent ? ++calls.parent : ++calls.child;
-        const toolName = isParent ? 'metrics_subagent' : turn === 1 ? 'metrics.settlement' : 'source_report';
+        const toolName = isParent ? 'metrics_subagent' : turn === 1 ? 'metrics_settlement' : 'source_report';
         const args = isParent ? { profileId: 'simulation', service: 'checkout', start, end, question: '调查结算' }
           : turn === 1 ? { service: 'checkout' }
             : { summary: '完成', findings: [{ kind: 'observation', statement: '已读取', evidenceIds: ['e-1'] }],
@@ -69,8 +74,8 @@ describe('metrics OpenAI-compatible nested loop', () => {
       expect(bodies).toHaveLength(5);
       expect(bodies.map((body) => (body.tools as Array<{ function: { name: string } }>)
         .map((tool) => tool.function.name))).toEqual([
-        ['metrics_subagent'], ['metrics.settlement', 'source_report'],
-        ['metrics.settlement', 'source_report'], ['metrics.settlement', 'source_report'], ['metrics_subagent'],
+        ['metrics_subagent'], ['metrics_settlement', 'source_report'],
+        ['metrics_settlement', 'source_report'], ['metrics_settlement', 'source_report'], ['metrics_subagent'],
       ]);
       expect(JSON.stringify(bodies)).not.toContain('raw-only-marker');
       const context = await parent.checkpoints.load(result.runId);

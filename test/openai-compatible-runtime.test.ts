@@ -13,15 +13,22 @@ describe('OpenAI-compatible runtime composition', () => {
       response.end([
         'data: {"choices":[{"index":0,"delta":{"content":"本地诊断"},"finish_reason":null}]}\n\n',
         'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n',
+        'data: {"choices":[],"usage":{"prompt_tokens":42,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":10}}}\n\n',
         'data: [DONE]\n\n',
       ].join(''));
     }, async (baseUrl) => {
       const model = createOpenAICompatibleModel({ baseUrl, apiKey: 'test-api-key', model: 'deepseek-chat' });
       const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false });
       const result = await runtime.agent.reply({ message: 'inspect', profileId: 'settlement' });
+      const events = await runtime.eventStoreV2.readRun(result.runId, 0, 100);
+      const runFinished = events.find((event) => event.type === 'RUN_FINISHED');
 
       expect(result.finalText).toBe('本地诊断');
       expect(result.status).toBe('completed');
+      expect(runFinished?.payload).toMatchObject({
+        usage: { inputTokens: 42, outputTokens: 7, cachedInputTokens: 10 },
+        usageCompleteness: 'complete',
+      });
       await runtime.close();
     });
   });
@@ -29,6 +36,7 @@ describe('OpenAI-compatible runtime composition', () => {
   it('preserves interleaved raw tool calls through the four admission gates and into the next request', async () => {
     const requestBodies: Record<string, unknown>[] = [];
     let requestCount = 0;
+    let toolExecutions = 0;
     await withServer((incoming, response) => {
       let body = '';
       incoming.setEncoding('utf8');
@@ -38,7 +46,7 @@ describe('OpenAI-compatible runtime composition', () => {
         requestCount += 1;
         const events = requestCount === 1
           ? [
-            'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"tc-0","type":"function","function":{"name":"metrics.settlement","arguments":"{\\"window\\":"}},{"index":1,"id":"tc-1","type":"function","function":{"name":"metrics.settlement","arguments":"{\\"window\\":"}}]},"finish_reason":null}]}\n\n',
+            'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"tc-0","type":"function","function":{"name":"metrics_settlement","arguments":"{\\"window\\":"}},{"index":1,"id":"tc-1","type":"function","function":{"name":"metrics_settlement","arguments":"{\\"window\\":"}}]},"finish_reason":null}]}\n\n',
             'data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\\"5m\\"}"}},{"index":0,"function":{"arguments":"\\"5m\\"}"}]},"finish_reason":"tool_calls"}]}\n\n',
           ]
           : [
@@ -60,7 +68,7 @@ describe('OpenAI-compatible runtime composition', () => {
           description: 'Read settlement metrics.',
           kind: 'evidence',
           inputSchema: z.object({ window: z.string() }),
-          call: () => ({ blocks: [{ type: 'text', text: 'failure_rate=0.15' }] }),
+          call: () => { toolExecutions += 1; return { blocks: [{ type: 'text', text: 'failure_rate=0.15' }] }; },
           isConcurrencySafe: () => true,
         }],
       });
@@ -69,8 +77,51 @@ describe('OpenAI-compatible runtime composition', () => {
 
       expect(result.finalText).toBe('已完成取证');
       expect(requestCount).toBe(2);
+      const firstTools = requestBodies[0]?.tools as Array<{ function: { name: string } }>;
+      expect(firstTools.map((tool) => tool.function.name)).toEqual(['metrics_settlement']);
+      const typedSecondMessages = secondMessages as Array<Record<string, unknown>>;
+      const assistantToolCalls = typedSecondMessages.flatMap((message) => {
+        if (message.role !== 'assistant' || !Array.isArray(message.tool_calls)) return [];
+        return message.tool_calls as Array<{ function: { name: string } }>;
+      });
+      expect(assistantToolCalls.map((call) => call.function.name)).toEqual(['metrics_settlement', 'metrics_settlement']);
+      expect(toolExecutions).toBe(2);
       expect(Array.isArray(secondMessages)).toBe(true);
-      expect((secondMessages as Array<Record<string, unknown>>).some((message) => message.role === 'tool')).toBe(true);
+      expect(typedSecondMessages.some((message) => message.role === 'tool')).toBe(true);
+      await runtime.close();
+    });
+  });
+
+  it('fails closed when the provider returns an internal dotted name that was never advertised on the wire', async () => {
+    let requestCount = 0;
+    let toolExecutions = 0;
+    await withServer((_request, response) => {
+      requestCount += 1;
+      const event = requestCount === 1
+        ? { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'unadvertised', type: 'function',
+          function: { name: 'metrics.settlement', arguments: '{"window":"5m"}' } }] }, finish_reason: 'tool_calls' }] }
+        : { choices: [{ index: 0, delta: { content: '已安全拒绝' }, finish_reason: 'stop' }] };
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      response.end(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`);
+    }, async (baseUrl) => {
+      const runtime = createAgentRuntime({
+        model: createOpenAICompatibleModel({ baseUrl, apiKey: 'test-api-key', model: 'deepseek-chat' }),
+        workspaceRoots: [],
+        includeExternalBash: false,
+        tools: [{
+          name: 'metrics.settlement',
+          description: 'Read settlement metrics.',
+          kind: 'evidence',
+          inputSchema: z.object({ window: z.string() }),
+          call: () => { toolExecutions += 1; return { blocks: [{ type: 'text', text: 'must not execute' }] }; },
+        }],
+      });
+
+      const result = await runtime.agent.reply({ message: 'inspect', profileId: 'settlement', maxIterations: 2 });
+
+      expect(result.finalText).toBe('已安全拒绝');
+      expect(requestCount).toBe(2);
+      expect(toolExecutions).toBe(0);
       await runtime.close();
     });
   });
@@ -79,8 +130,8 @@ describe('OpenAI-compatible runtime composition', () => {
 function toolCallEvents(): Array<Record<string, unknown>> {
   return [
     { choices: [{ index: 0, delta: { tool_calls: [
-      { index: 0, id: 'tc-0', type: 'function', function: { name: 'metrics.settlement', arguments: '{"window":' } },
-      { index: 1, id: 'tc-1', type: 'function', function: { name: 'metrics.settlement', arguments: '{"window":' } },
+      { index: 0, id: 'tc-0', type: 'function', function: { name: 'metrics_settlement', arguments: '{"window":' } },
+      { index: 1, id: 'tc-1', type: 'function', function: { name: 'metrics_settlement', arguments: '{"window":' } },
     ] }, finish_reason: null }] },
     { choices: [{ index: 0, delta: { tool_calls: [
       { index: 1, function: { arguments: '"5m"}' } },
