@@ -149,6 +149,7 @@ describe('local Agent web runtime', () => {
       model,
       clock: { now: () => new Date('2026-10-02T12:34:56.789Z') },
       metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:1/mcp' },
+      sourceInvocationLimit: 1,
       port: 0,
       allowedOrigins: ['http://127.0.0.1:5173'],
     });
@@ -292,6 +293,15 @@ describe('local Agent web runtime', () => {
       ...base,
       metrics: { profileId: 'production' as 'simulation', mcpUrl: 'http://127.0.0.1:19110/mcp' },
     })).rejects.toThrow('Unsupported metrics Profile');
+    await expect(startAgentWebRuntime({
+      ...base,
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19110/mcp' },
+      sourceInvocationLimit: 2 as 1,
+    })).rejects.toThrow('exactly one per source');
+    await expect(startAgentWebRuntime({
+      ...base,
+      sourceInvocationLimit: 1,
+    })).rejects.toThrow('sourceInvocationLimit requires the Metrics');
   });
 });
 

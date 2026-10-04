@@ -15,6 +15,7 @@ import { WebQueryService, type ConfiguredWebProfile } from '../application/web-q
 import { RunExecutionCoordinator } from '../application/run-execution-coordinator.js';
 import { WebConfirmationService } from '../application/web-confirmation-service.js';
 import { startInspectionHttpServer, type InspectionHttpServer } from '../api/http-server.js';
+import { SourceInvocationLimiter } from '../tool/source-invocation-limiter.js';
 
 const DEFAULT_PROFILES: readonly AgentWebProfileConfig[] = Object.freeze([{
   id: 'group-buy-market',
@@ -63,6 +64,8 @@ export interface AgentWebRuntimeOptions {
   observability?: Observability;
   eventObservability?: Observability;
   modelIdentity?: ModelIdentity;
+  /** Opt-in per-parent-Run limit for the source smoke acceptance only. */
+  sourceInvocationLimit?: 1;
 }
 
 export interface AgentWebRuntime {
@@ -79,6 +82,12 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   validateLocalHost(host);
   const metrics = normalizeMetricsConfig(options.metrics);
   const logs = normalizeLogsConfig(options.logs);
+  if (options.sourceInvocationLimit !== undefined && metrics === undefined) {
+    throw new Error('sourceInvocationLimit requires the Metrics simulation source.');
+  }
+  const sourceInvocationLimiter = options.sourceInvocationLimit === undefined
+    ? undefined
+    : new SourceInvocationLimiter({ maxPerSource: options.sourceInvocationLimit });
   if (logs !== undefined && metrics === undefined) {
     throw new Error('Logs Web source requires the Metrics simulation Profile.');
   }
@@ -113,18 +122,24 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     allowedToolNames,
     ...(metrics === undefined ? {} : {
       toolFactories: [
-        (ports: Parameters<typeof createMetricsWebSource>[0]) => createMetricsWebSource(ports, {
-          mcpUrl: metrics.mcpUrl,
-          model: metricsModel,
-          ...(metricsModelIdentity === undefined ? {} : { modelIdentity: metricsModelIdentity }),
-        }),
+        (ports: Parameters<typeof createMetricsWebSource>[0]) => {
+          const tools = createMetricsWebSource(ports, {
+            mcpUrl: metrics.mcpUrl,
+            model: metricsModel,
+            ...(metricsModelIdentity === undefined ? {} : { modelIdentity: metricsModelIdentity }),
+          });
+          return sourceInvocationLimiter === undefined ? tools : tools.map((tool) => sourceInvocationLimiter.wrap(tool));
+        },
         ...(logs === undefined ? [] : [
-          (ports: RuntimeToolPorts) => createLogsWebSource(ports, {
-            mcpUrl: logs.mcpUrl,
-            model: logsModel,
-            cursorSecret: logs.cursorSecret,
-            ...(logsModelIdentity === undefined ? {} : { modelIdentity: logsModelIdentity }),
-          }),
+          (ports: RuntimeToolPorts) => {
+            const tools = createLogsWebSource(ports, {
+              mcpUrl: logs.mcpUrl,
+              model: logsModel,
+              cursorSecret: logs.cursorSecret,
+              ...(logsModelIdentity === undefined ? {} : { modelIdentity: logsModelIdentity }),
+            });
+            return sourceInvocationLimiter === undefined ? tools : tools.map((tool) => sourceInvocationLimiter.wrap(tool));
+          },
         ]),
       ],
     }),
@@ -180,12 +195,20 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
           await execution.close();
           await server.close();
         } finally {
-          await runtime.close();
+          try {
+            await runtime.close();
+          } finally {
+            sourceInvocationLimiter?.clear();
+          }
         }
       },
     };
   } catch (error) {
-    await runtime.close();
+    try {
+      await runtime.close();
+    } finally {
+      sourceInvocationLimiter?.clear();
+    }
     throw error;
   }
 }

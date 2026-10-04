@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createOpenAICompatibleModel } from '../src/bootstrap/openai-compatible.js';
 import { RetryingChatModel } from '../src/model/retrying-model.js';
+import { SmokeRequestBudget } from '../src/model/smoke-request-budget.js';
 import { createBoundedSmokeFetch } from './fixtures/bounded-smoke-fetch.js';
 
 const COMPLETIONS_URL = 'https://models.invalid/v1/chat/completions';
@@ -75,6 +76,21 @@ describe('bounded smoke fetch', () => {
     expect(await blocked.text()).not.toMatch(/test-model|Bearer|secret|chat\/completions/);
   });
 
+  it('reserves the shared request ledger before concurrent requests reach transport', async () => {
+    const transport = fakeFetch();
+    const budget = new SmokeRequestBudget(10);
+    const wrapper = createBoundedSmokeFetch({
+      fetch: transport.fetch, budget, limit: 10, maxOutputTokens: 512, onAttempt: () => undefined,
+    });
+    const responses = await Promise.all(Array.from({ length: 11 }, () => wrapper(COMPLETIONS_URL, {
+      method: 'POST', body: JSON.stringify({ model: 'test-model', max_tokens: 4096 }),
+    })));
+
+    expect(transport.calls).toHaveLength(10);
+    expect(responses.filter((response) => response.status === 402)).toHaveLength(1);
+    expect(budget.snapshot()).toEqual({ limit: 10, attempted: 11, sent: 10, rejected: 1 });
+  });
+
   it('stops the model retry pipeline when the local request cap returns 402', async () => {
     const transport = fakeFetch();
     const attempts: number[] = [];
@@ -115,24 +131,24 @@ describe('bounded smoke fetch', () => {
     expect(JSON.parse(await sent.text())).toEqual({ model: 'test-model', max_tokens: 512 });
   });
 
-  it('passes other URLs through unchanged without spending the model budget', async () => {
+  it('blocks every non-chat-completion URL without forwarding unknown paid API requests', async () => {
     const transport = fakeFetch();
     const attempts: number[] = [];
     const wrapper = createBoundedSmokeFetch({
-      fetch: transport.fetch, limit: 1, maxOutputTokens: 512, onAttempt: (count) => attempts.push(count),
+      fetch: transport.fetch, limit: 10, maxOutputTokens: 512, onAttempt: (count) => attempts.push(count),
     });
     const init = { method: 'POST', body: 'not JSON' };
 
-    await wrapper('https://models.invalid/v1/chat/completions-extra', init);
-    await wrapper('https://models.invalid/v1/models', init);
+    const wrongPath = await wrapper('https://models.invalid/v1/chat/completions-extra', init);
+    const modelsPath = await wrapper('https://models.invalid/v1/models', init);
     const completion = await wrapper(COMPLETIONS_URL, { method: 'POST', body: '{}' });
 
-    expect(transport.calls.slice(0, 2)).toEqual([
-      { input: 'https://models.invalid/v1/chat/completions-extra', init },
-      { input: 'https://models.invalid/v1/models', init },
-    ]);
+    expect(wrongPath.status).toBe(402);
+    expect(modelsPath.status).toBe(402);
+    expect(transport.calls).toHaveLength(1);
+    expect(transport.calls[0]?.input).toBe(COMPLETIONS_URL);
     expect(completion.status).toBe(200);
-    expect(attempts).toEqual([1]);
+    expect(attempts).toEqual([1, 2, 3]);
   });
 
   it.each([undefined, '{bad', 'null', '[]', '"string"', '{"model":"test","max_tokens":Infinity}', '{"model":"test","temperature":1e999}'])(
