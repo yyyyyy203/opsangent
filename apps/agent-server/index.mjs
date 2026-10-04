@@ -1,5 +1,9 @@
 import process from 'node:process';
 import { startAgentWebRuntime } from '../../dist/bootstrap/agent-web-runtime.js';
+import {
+  createLangSmithEventObservability,
+  readLangSmithEventConfig,
+} from '../../dist/bootstrap/langsmith.js';
 
 const dataDirectory = required('AGENTOPS_DATA_DIR');
 const workspaceRoots = required('AGENTOPS_WORKSPACE_ROOTS').split(';').map((value) => value.trim()).filter(Boolean);
@@ -7,6 +11,9 @@ if (workspaceRoots.length === 0) throw new Error('AGENTOPS_WORKSPACE_ROOTS must 
 const webProfile = required('AGENTOPS_WEB_PROFILE');
 const metricsMcpUrl = required('AGENTOPS_METRICS_MCP_URL');
 const logsMcpUrl = optional('AGENTOPS_LOGS_MCP_URL');
+const langSmith = createLangSmithEventObservability(readLangSmithEventConfig(process.env));
+const modelName = process.env.AGENTOPS_MODEL ?? 'deepseek-chat';
+const modelProvider = process.env.AGENTOPS_MODEL_PROVIDER?.trim() || 'openai-compatible';
 if (webProfile !== 'simulation') throw new Error('AGENTOPS_WEB_PROFILE must be simulation.');
 const allowedOrigins = optionalList('AGENTOPS_ALLOWED_ORIGINS');
 const logs = logsMcpUrl === undefined ? undefined : {
@@ -17,6 +24,8 @@ const logs = logsMcpUrl === undefined ? undefined : {
 const runtime = await startAgentWebRuntime({
   dataDirectory,
   workspaceRoots,
+  eventObservability: langSmith.eventObservability,
+  modelIdentity: { provider: modelProvider, model: modelName },
   metrics: { profileId: 'simulation', mcpUrl: metricsMcpUrl },
   ...(logs === undefined ? {} : { logs }),
   ...(process.env.AGENTOPS_HOST === undefined ? {} : { host: process.env.AGENTOPS_HOST }),
