@@ -26,6 +26,18 @@ describe('ElasticsearchHttp', () => {
     expect(init?.method).toBe('POST');
   });
 
+  it('omits the body and JSON content type when the request has no body', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValue(Response.json({ _shards: { failed: 0 } }));
+    const client = new ElasticsearchHttp({ url: 'http://127.0.0.1:19200', fetch });
+
+    await expect(client.request('/checkout/_refresh', undefined, { method: 'POST', signal }))
+      .resolves.toEqual({ _shards: { failed: 0 } });
+
+    const init = fetch.mock.calls[0]?.[1];
+    expect(init?.body).toBeUndefined();
+    expect(new Headers(init?.headers).has('content-type')).toBe(false);
+  });
+
   it('rejects absolute and traversal request paths before network access', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>();
     const client = new ElasticsearchHttp({ url: 'http://127.0.0.1:19200', fetch });

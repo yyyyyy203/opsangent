@@ -72,7 +72,6 @@ export function createLogsWebSource(
     manifests: evidenceManifests,
     reader,
     budget: LOG_EVIDENCE_BUDGET,
-    id: () => ports.ids.next('evidence'),
     clock: ports.clock,
     childAgentFactory,
     checkpoints: ports.checkpoints,

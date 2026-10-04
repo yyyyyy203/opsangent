@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import {
   assertEvidenceCaptureBudget,
@@ -34,7 +34,7 @@ export interface LogEvidenceToolOptions {
   manifests: EvidenceManifestStore;
   reader: LogEvidenceReader;
   budget: EvidenceCaptureBudget;
-  id?: () => string;
+  id?: (captureKey: string) => string;
   maxModelBytes?: number;
   clock?: Clock;
 }
@@ -86,7 +86,7 @@ const sliceInput = z.object({
 /** Creates ordinary evidence Tools. The reader is the only port allowed to inspect committed Blob data. */
 export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonly Tool[] {
   assertEvidenceCaptureBudget(options.budget);
-  const id = options.id ?? randomUUID;
+  const id = options.id ?? ((captureKey: string) => `log-evidence-${digest(captureKey)}`);
   const clock = options.clock ?? systemClock;
   const maxModelBytes = options.maxModelBytes ?? DEFAULT_MAX_MODEL_BYTES;
   if (!Number.isSafeInteger(maxModelBytes) || maxModelBytes <= 0) throw new RangeError('maxModelBytes must be positive');
@@ -112,9 +112,9 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
       const query = toCaptureQuery(input);
       requireToolCallId(callOptions);
       throwIfAborted(callOptions.signal);
-      const evidenceId = id();
       const queryDigest = digest(query);
       const captureKey = `log:${callOptions.runId}:${callOptions.toolCallId}:${queryDigest}`;
+      const evidenceId = id(captureKey);
       const startedAt = clock.now().getTime();
       const deadline = Math.min(callOptions.deadline ?? Number.POSITIVE_INFINITY, startedAt + options.budget.maxDurationMs);
       if (startedAt >= deadline) throw new SourceFailure('BUDGET_EXCEEDED');
@@ -140,15 +140,25 @@ export function createLogEvidenceTools(options: LogEvidenceToolOptions): readonl
       } catch (error) {
         throw normalizeCaptureError(error);
       }
-      if (result.evidenceId !== evidenceId || result.manifest.evidenceId !== evidenceId
-        || result.manifest.runId !== callOptions.runId || result.manifest.source !== 'log') {
-        throw new SourceFailure('POLICY_DENIED');
+      if (result.manifest.evidenceId !== result.evidenceId
+        || result.manifest.captureKey !== captureKey
+        || result.manifest.queryDigest !== queryDigest
+        || result.manifest.runId !== callOptions.runId
+        || result.manifest.toolCallId !== callOptions.toolCallId
+        || result.manifest.source !== 'log') {
+        throw new SourceFailure('MCP_PROTOCOL_ERROR');
+      }
+      const visible = await options.manifests.getVisible(result.evidenceId);
+      if (visible === null || visible.evidenceId !== result.evidenceId || visible.captureKey !== captureKey
+        || visible.queryDigest !== queryDigest || visible.runId !== callOptions.runId
+        || visible.toolCallId !== callOptions.toolCallId || visible.source !== 'log') {
+        throw new SourceFailure('MCP_PROTOCOL_ERROR');
       }
       throwIfAborted(callOptions.signal);
       const value = boundedCaptureView(result, maxModelBytes);
       return {
-        blocks: [{ type: 'json', value }, { type: 'evidence_ref', evidenceId }],
-        evidenceIds: [evidenceId],
+        blocks: [{ type: 'json', value }, { type: 'evidence_ref', evidenceId: result.evidenceId }],
+        evidenceIds: [result.evidenceId],
       } satisfies ToolResponse;
     },
   };

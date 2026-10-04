@@ -144,7 +144,7 @@ class ElasticsearchLogSource implements LogsPageBackend {
       });
       let pitId: string | undefined;
       try {
-        const opened = await this.http.request(`/${this.index}/_pit?keep_alive=${PIT_KEEP_ALIVE}`, {}, {
+        const opened = await this.http.request(`/${this.index}/_pit?keep_alive=${PIT_KEEP_ALIVE}`, undefined, {
           method: 'POST', signal,
         });
         pitId = readPitId(opened, 'id');
@@ -285,7 +285,7 @@ function buildSearchBody(
   return {
     size: pageSize,
     pit: { id: pitId, keep_alive: PIT_KEEP_ALIVE },
-    sort: [{ timestamp: 'asc' }, { _shard_doc: 'asc' }],
+    sort: [{ timestamp: { order: 'asc', format: 'strict_date_optional_time' } }, { _shard_doc: 'asc' }],
     query: { bool: { filter: filters } },
     track_total_hits: false,
     ...(searchAfter === undefined ? {} : { search_after: searchAfter }),

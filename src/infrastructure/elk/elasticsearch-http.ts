@@ -41,23 +41,28 @@ export class ElasticsearchHttp {
   ): Promise<unknown> {
     if (options.signal.aborted) throw new SourceFailure('ABORTED');
     const url = this.resolvePath(path);
-    let encodedBody: string;
-    try {
-      encodedBody = JSON.stringify(body);
-      if (encodedBody === undefined) throw new TypeError('No JSON body');
-    } catch {
-      throw new SourceFailure('MCP_PROTOCOL_ERROR');
+    let encodedBody: string | undefined;
+    if (body !== undefined) {
+      try {
+        encodedBody = JSON.stringify(body);
+        if (encodedBody === undefined) throw new TypeError('No JSON body');
+      } catch {
+        throw new SourceFailure('MCP_PROTOCOL_ERROR');
+      }
     }
 
     let response: Response;
     try {
-      response = await this.fetch(url, {
+      const headers: Record<string, string> = { accept: 'application/json' };
+      if (encodedBody !== undefined) headers['content-type'] = 'application/json';
+      const init: RequestInit = {
         method: options.method,
-        headers: { accept: 'application/json', 'content-type': 'application/json' },
-        body: encodedBody,
+        headers,
         redirect: 'manual',
         signal: options.signal,
-      });
+      };
+      if (encodedBody !== undefined) init.body = encodedBody;
+      response = await this.fetch(url, init);
     } catch {
       throw new SourceFailure(options.signal.aborted ? 'ABORTED' : 'MCP_NETWORK_ERROR');
     }

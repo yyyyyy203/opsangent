@@ -12,6 +12,7 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 import type {
   EvidenceCaptureBudget,
   EvidenceCaptureResult,
+  EvidenceManifestSummary,
   EvidenceManifestStore,
   LogEvidenceReader,
   StreamingEvidenceCaptureRequest,
@@ -201,6 +202,7 @@ function sourceReportCallOptions() {
 }
 
 function evidenceOptions() {
+  let recordedManifest: EvidenceManifestSummary | null = null;
   const manifest = {
     manifestId: 'manifest-1',
     evidenceId: 'evidence-1',
@@ -232,27 +234,38 @@ function evidenceOptions() {
     commit: () => Promise.resolve({ ...manifest, chunks: [] }),
     markFailed: () => Promise.resolve({ ...manifest, state: 'failed' as const, chunks: [] }),
     get: () => Promise.resolve({ ...manifest, chunks: [] }),
-    getVisible: (evidenceId) => Promise.resolve(evidenceId === manifest.evidenceId ? manifest : null),
+    getVisible: (evidenceId) => Promise.resolve(recordedManifest?.evidenceId === evidenceId ? recordedManifest : null),
   };
   const recorder: StreamingEvidenceRecorder = {
-    capture: (request: StreamingEvidenceCaptureRequest): Promise<EvidenceCaptureResult> => Promise.resolve({
-      evidenceId: request.evidenceId,
-      summary: {
-        recordCount: 1,
-        sourceBytes: 100,
-        firstTimestamp: request.timeRange.start,
-        lastTimestamp: request.timeRange.start,
-        levels: [{ value: 'ERROR', count: 1 }],
-        services: [{ value: 'checkout', count: 1 }],
-        exceptionSignatures: [],
-        traceIds: ['trace-1'],
-        samples: [{ timestamp: request.timeRange.start, service: 'checkout', level: 'ERROR', message: 'timeout' }],
-      },
-      manifest: { ...manifest, evidenceId: request.evidenceId, runId: request.runId, toolCallId: request.toolCallId },
-      coverage: 1,
-      truncated: false,
-      missingEvidence: [],
-    }),
+    capture: (request: StreamingEvidenceCaptureRequest): Promise<EvidenceCaptureResult> => {
+      recordedManifest = {
+        ...manifest,
+        evidenceId: request.evidenceId,
+        runId: request.runId,
+        stepId: request.stepId,
+        toolCallId: request.toolCallId,
+        captureKey: request.captureKey,
+        queryDigest: request.queryDigest,
+      };
+      return Promise.resolve({
+        evidenceId: request.evidenceId,
+        summary: {
+          recordCount: 1,
+          sourceBytes: 100,
+          firstTimestamp: request.timeRange.start,
+          lastTimestamp: request.timeRange.start,
+          levels: [{ value: 'ERROR', count: 1 }],
+          services: [{ value: 'checkout', count: 1 }],
+          exceptionSignatures: [],
+          traceIds: ['trace-1'],
+          samples: [{ timestamp: request.timeRange.start, service: 'checkout', level: 'ERROR', message: 'timeout' }],
+        },
+        manifest: recordedManifest,
+        coverage: 1,
+        truncated: false,
+        missingEvidence: [],
+      });
+    },
   };
   const source: LogEvidencePageSource = {
     pages: async function* () { /* source pages are not read by this deterministic recorder */ },

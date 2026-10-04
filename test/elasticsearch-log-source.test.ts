@@ -34,6 +34,20 @@ function response(body: unknown): Response {
 }
 
 describe('Elasticsearch log page source', () => {
+  it('opens a PIT without sending an unnecessary request body', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(response({ id: 'pit-open-without-body' }))
+      .mockResolvedValueOnce(response({ hits: { hits: [hit('first', [lastTimestamp, 1])] } }));
+    const source = createSource({
+      url: 'http://127.0.0.1:19200', index: 'logs-test', cursorSecret: secret,
+      fetch, now: () => now,
+    });
+
+    await expect(source.searchPage({ service: 'checkout', start, end, requestId: 'pit-without-body' }, signal))
+      .resolves.toMatchObject({ status: 'available' });
+    expect(fetch.mock.calls[0]?.[1]?.body).toBeUndefined();
+  });
+
   it('closes the latest PIT when expiry cleanup meets an in-flight rotation', async () => {
     let clock = now;
     let release: (value: Response) => void = () => {};
@@ -220,7 +234,7 @@ describe('Elasticsearch log page source', () => {
     expect(search).toMatchObject({
       size: 1,
       pit: { id: 'pit-1', keep_alive: '2m' },
-      sort: [{ timestamp: 'asc' }, { _shard_doc: 'asc' }],
+      sort: [{ timestamp: { order: 'asc', format: 'strict_date_optional_time' } }, { _shard_doc: 'asc' }],
       track_total_hits: false,
       query: { bool: { filter: [
         { term: { service: 'checkout' } },

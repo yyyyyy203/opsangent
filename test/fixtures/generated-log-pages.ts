@@ -8,6 +8,35 @@ export interface GeneratedLogPageOptions {
   marker?: string;
 }
 
+export interface GeneratedLogRecordOptions {
+  count: number;
+  paddingBytes: number;
+  start: string;
+  end: string;
+}
+
+/** Lazily yields padded records; it never materializes the requested capture in memory. */
+export async function* generateLargeLogRecords(
+  options: GeneratedLogRecordOptions,
+): AsyncIterable<NormalizedLogRecord> {
+  await Promise.resolve();
+  if (!Number.isSafeInteger(options.count) || options.count <= 0) throw new RangeError('count must be positive');
+  if (!Number.isSafeInteger(options.paddingBytes) || options.paddingBytes < 0) throw new RangeError('paddingBytes must be non-negative');
+  const startMs = Date.parse(options.start);
+  const endMs = Date.parse(options.end);
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || startMs >= endMs) throw new RangeError('start/end must be a valid ascending time window');
+  for (let sequence = 0; sequence < options.count; sequence += 1) {
+    yield {
+      timestamp: new Date(startMs + Math.floor((endMs - startMs) * sequence / options.count)).toISOString(),
+      service: 'checkout',
+      level: 'ERROR',
+      exception: 'SettlementException',
+      traceId: `large-trace-${sequence}`,
+      message: `RAW_LOG_CANARY:${sequence}:` + 'x'.repeat(options.paddingBytes),
+    };
+  }
+}
+
 export async function* generatedLogPages(options: GeneratedLogPageOptions): AsyncIterable<EvidenceSourcePage> {
   await Promise.resolve();
   if (!Number.isSafeInteger(options.totalBytes) || options.totalBytes <= 0) throw new RangeError('totalBytes must be positive');

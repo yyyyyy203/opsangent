@@ -72,14 +72,27 @@ function manifestFor(runId: string): EvidenceManifest {
   return { ...visible, runId, state: 'committed', chunks: [], summary: summary() };
 }
 
-function createManifests(runId = 'run-1'): EvidenceManifestStore {
+function createManifests(runId = 'run-1', captures: readonly StreamingEvidenceCaptureRequest[] = []): EvidenceManifestStore {
+  const visibleFor = (evidenceId: string) => {
+    const request = captures.find((candidate) => candidate.evidenceId === evidenceId);
+    return request === undefined ? visible : {
+      ...visible,
+      evidenceId,
+      runId: request.runId,
+      stepId: request.stepId,
+      toolCallId: request.toolCallId,
+      captureKey: request.captureKey,
+      queryDigest: request.queryDigest,
+    };
+  };
   return {
     createPending: () => Promise.resolve(manifestFor(runId)),
     recordChunk: () => Promise.resolve(manifestFor(runId)),
     commit: () => Promise.resolve(manifestFor(runId)),
     markFailed: () => Promise.resolve({ ...manifestFor(runId), state: 'failed' as const }),
     get: (evidenceId) => Promise.resolve(evidenceId === visible.evidenceId ? manifestFor(runId) : null),
-    getVisible: (evidenceId) => Promise.resolve(evidenceId === visible.evidenceId && runId === 'run-1' ? visible : null),
+    getVisible: (evidenceId) => Promise.resolve((evidenceId === visible.evidenceId || captures.some((request) => request.evidenceId === evidenceId))
+      && runId === 'run-1' ? visibleFor(evidenceId) : null),
   };
 }
 
@@ -118,7 +131,19 @@ function createRecorder(captured: StreamingEvidenceCaptureRequest[]): StreamingE
   return {
     capture: (request) => {
       captured.push(request);
-      return Promise.resolve(result);
+      return Promise.resolve({
+        ...result,
+        evidenceId: request.evidenceId,
+        manifest: {
+          ...visible,
+          evidenceId: request.evidenceId,
+          runId: request.runId,
+          stepId: request.stepId,
+          toolCallId: request.toolCallId,
+          captureKey: request.captureKey,
+          queryDigest: request.queryDigest,
+        },
+      });
     },
   };
 }
@@ -162,7 +187,7 @@ function options(captured: StreamingEvidenceCaptureRequest[]) {
   return {
     source: source(),
     recorder: createRecorder(captured),
-    manifests: createManifests(),
+    manifests: createManifests('run-1', captured),
     reader: createReader(),
     budget,
     id: () => visible.evidenceId,
@@ -215,6 +240,126 @@ describe('log evidence Tools', () => {
     expect(sourceRequest?.networkAttemptBudget).toBe(ledger);
     expect(sourceRequest?.requestId).toBe(captured[0]?.captureKey);
     expect(sourceRequest?.requestId).toMatch(/^log:run-1:call-1:/);
+  });
+
+  it('returns the committed evidence identity selected by captureKey replay', async () => {
+    const accepted: StreamingEvidenceCaptureRequest[] = [];
+    const replayedId = 'evidence-from-first-attempt';
+    const manifests: EvidenceManifestStore = {
+      ...createManifests(),
+      getVisible: (evidenceId) => {
+        const request = accepted[0];
+        return Promise.resolve(evidenceId === replayedId && request !== undefined ? {
+          ...visible,
+          evidenceId: replayedId,
+          runId: request.runId,
+          stepId: request.stepId,
+          toolCallId: request.toolCallId,
+          captureKey: request.captureKey,
+          queryDigest: request.queryDigest,
+        } : null);
+      },
+    };
+    const recorder: StreamingEvidenceRecorder = {
+      capture: (request) => {
+        accepted.push(request);
+        return Promise.resolve({
+          evidenceId: replayedId,
+          manifest: {
+            ...visible,
+            evidenceId: replayedId,
+            runId: request.runId,
+            stepId: request.stepId,
+            toolCallId: request.toolCallId,
+            captureKey: request.captureKey,
+            queryDigest: request.queryDigest,
+          },
+          summary: summary(),
+          coverage: 1,
+          truncated: false,
+          missingEvidence: [],
+        });
+      },
+    };
+    const tools = createLogEvidenceTools({
+      ...options(accepted),
+      recorder,
+      manifests,
+      id: (() => {
+        let sequence = 0;
+        return () => `new-id-${++sequence}`;
+      })(),
+    });
+
+    const result = await callTool(findTool(tools, 'logs.capture'), {
+      service: 'checkout',
+      start: '2026-09-13T00:00:00.000Z',
+      end: '2026-09-13T01:00:00.000Z',
+    });
+
+    expect(result.blocks).toContainEqual({ type: 'evidence_ref', evidenceId: replayedId });
+    expect(result.evidenceIds).toEqual([replayedId]);
+  });
+
+  it('uses a stable evidence identity for the same capture key across tool factory restarts', async () => {
+    const first: StreamingEvidenceCaptureRequest[] = [];
+    const second: StreamingEvidenceCaptureRequest[] = [];
+    const makeTools = (captured: StreamingEvidenceCaptureRequest[]) => {
+      const recorder: StreamingEvidenceRecorder = {
+        capture: (request) => {
+          captured.push(request);
+          return Promise.resolve({
+            evidenceId: request.evidenceId,
+            manifest: {
+              ...visible,
+              evidenceId: request.evidenceId,
+              runId: request.runId,
+              stepId: request.stepId,
+              toolCallId: request.toolCallId,
+              captureKey: request.captureKey,
+              queryDigest: request.queryDigest,
+            },
+            summary: summary(),
+            coverage: 1,
+            truncated: false,
+            missingEvidence: [],
+          });
+        },
+      };
+      const manifests: EvidenceManifestStore = {
+        ...createManifests(),
+        getVisible: (evidenceId) => {
+          const request = captured[0];
+          return Promise.resolve(request?.evidenceId === evidenceId ? {
+            ...visible,
+            evidenceId,
+            runId: request.runId,
+            stepId: request.stepId,
+            toolCallId: request.toolCallId,
+            captureKey: request.captureKey,
+            queryDigest: request.queryDigest,
+          } : null);
+        },
+      };
+      return createLogEvidenceTools({
+        source: source(),
+        recorder,
+        manifests,
+        reader: createReader(),
+        budget,
+      });
+    };
+    const input = {
+      service: 'checkout',
+      start: '2026-09-13T00:00:00.000Z',
+      end: '2026-09-13T01:00:00.000Z',
+    };
+
+    await callTool(findTool(makeTools(first), 'logs.capture'), input);
+    await callTool(findTool(makeTools(second), 'logs.capture'), input);
+
+    expect(first[0]?.captureKey).toBe(second[0]?.captureKey);
+    expect(first[0]?.evidenceId).toBe(second[0]?.evidenceId);
   });
 
   it('exposes read, aggregate and slice tools with safe restart policies', async () => {

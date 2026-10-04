@@ -59,7 +59,7 @@ export async function writeLogFixture(options: LogFixtureWriteOptions): Promise<
   }
   await flush();
 
-  const refreshed = await http.request(`/${index}/_refresh`, {}, { method: 'POST', signal });
+  const refreshed = await http.request(`/${index}/_refresh`, undefined, { method: 'POST', signal });
   if (!isObject(refreshed) || !isObject(refreshed._shards) || refreshed._shards.failed !== 0) {
     throw new Error('FIXTURE_REFRESH_FAILED');
   }

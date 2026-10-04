@@ -10,12 +10,13 @@ async function* records(count: number, message = 'ok'): AsyncIterable<Normalized
 }
 
 function fakeElasticsearch(input?: { itemFailure?: boolean; hideTopLevelError?: boolean; count?: number }) {
-  const requests: { url: string; method: string; body: string }[] = [];
+  const requests: { url: string; method: string; body: string; contentType: string }[] = [];
   const fetcher = vi.fn<typeof fetch>((resource, init) => {
     const url = typeof resource === 'string' ? resource : resource instanceof URL ? resource.href : resource.url;
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? init.body : '';
-    requests.push({ url, method, body });
+    const contentType = new Headers(init?.headers).get('content-type') ?? '';
+    requests.push({ url, method, body, contentType });
     if (url.endsWith('/_bulk')) {
       const rows = body.trimEnd().split('\n');
       const items = Array.from({ length: rows.length / 2 }, (_, i) => ({ index: { status: input?.itemFailure && i === 0 ? 400 : 201 } }));
@@ -36,6 +37,7 @@ describe('isolated log fixture writer', () => {
     expect(fake.requests.map(({ url, method }) => [method, new URL(url).pathname])).toEqual([
       ['PUT', `/${index}`], ['POST', '/_bulk'], ['POST', `/${index}/_refresh`], ['POST', `/${index}/_count`],
     ]);
+    expect(fake.requests[2]).toMatchObject({ body: '', contentType: '' });
     const bulk = fake.requests[1]!.body;
     expect(bulk.endsWith('\n')).toBe(true);
     expect(bulk.split('\n').filter(Boolean)).toHaveLength(4);

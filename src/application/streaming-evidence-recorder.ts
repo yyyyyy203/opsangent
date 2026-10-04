@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { randomIdGenerator, systemClock, type Clock, type IdGenerator } from '../contracts/common.js';
-import { canonicalJson, assertEvidenceCaptureBudget, redactLogRecord } from '../contracts/index.js';
+import { canonicalJson, assertEvidenceCaptureBudget, isAgentError, redactLogRecord } from '../contracts/index.js';
 import type { EvidenceRecorderEventChannel } from './evidence-recorder.js';
 import type {
   CommitEvidenceManifestInput,
@@ -263,10 +263,13 @@ export class DefaultStreamingEvidenceRecorder implements StreamingEvidenceRecord
       }
       await this.options.manifests.markFailed({
         evidenceId: request.evidenceId,
-        reasonCode: error instanceof StreamingEvidenceCaptureError ? error.code : 'CAPTURE_FAILED',
+        reasonCode: error instanceof StreamingEvidenceCaptureError
+          ? error.code
+          : isPreservableSourceFailure(error) ? error.code : 'CAPTURE_FAILED',
         updatedAt: this.clock.now().toISOString(),
       }).catch(() => undefined);
       if (error instanceof StreamingEvidenceCaptureError) throw error;
+      if (isPreservableSourceFailure(error)) throw error;
       throw new StreamingEvidenceCaptureError('STORAGE_ERROR', 'Evidence capture failed');
     }
   }
@@ -458,6 +461,14 @@ function validateRequest(request: StreamingEvidenceCaptureRequest): void {
   ] as const) if (value.length === 0) throw new StreamingEvidenceCaptureError('MCP_PROTOCOL_ERROR', name + ' cannot be empty');
   if (request.source !== 'log' && request.source !== 'trace') throw new StreamingEvidenceCaptureError('MCP_PROTOCOL_ERROR', 'Evidence source is invalid');
   validateRange(request.timeRange);
+}
+
+function isPreservableSourceFailure(error: unknown): error is Error & { code: string; retryable: boolean } {
+  if (!isAgentError(error)) return false;
+  return new Set([
+    'BUDGET_EXCEEDED', 'MCP_NETWORK_ERROR', 'MCP_TIMEOUT', 'MCP_RATE_LIMITED', 'MCP_SERVER_ERROR',
+    'MCP_AUTH_ERROR', 'MCP_PROTOCOL_ERROR', 'CIRCUIT_OPEN', 'TIMEOUT', 'UNAVAILABLE',
+  ]).has(error.code);
 }
 
 function validatePage(page: EvidenceSourcePage, maxPageBytes: number): void {
