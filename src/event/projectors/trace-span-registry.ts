@@ -69,6 +69,10 @@ export class TraceSpanRegistry {
     return this.active.has(spanKey);
   }
 
+  public isRememberedSpanKey(spanKey: string): boolean {
+    return this.rememberedSpanKeys.has(spanKey);
+  }
+
   public recordParentMissing(): void {
     this.counts.TRACE_PARENT_MISSING = (this.counts.TRACE_PARENT_MISSING ?? 0) + 1;
   }

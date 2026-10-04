@@ -17,7 +17,12 @@ interface SourceInvocation {
   readonly spanKey: string;
   readonly parentRunId: string;
   readonly childRunId: string;
+  readonly toolCallId: string;
+  readonly subagentType: string;
+  readonly budget: Extract<AgentEventEnvelopeV2, { type: 'SUBAGENT_STARTED' }>['payload']['budget'];
 }
+
+const MAX_PAUSED_INVOCATIONS = 1_024;
 
 export class LangSmithEventProjectorV2 implements EventProjectorV2 {
   public readonly name = 'langsmith';
@@ -26,6 +31,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
   private readonly toolKeys = new Map<string, string>();
   private readonly modelKeys = new Map<string, string>();
   private readonly invocationsByChildRun = new Map<string, SourceInvocation>();
+  private readonly pausedInvocationsByChildRun = new Map<string, SourceInvocation>();
 
   public constructor(private readonly observability: Observability, registryOptions: TraceSpanRegistryOptions = {}) {
     this.registry = new TraceSpanRegistry(observability, registryOptions);
@@ -41,6 +47,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
           break;
         case 'RUN_RESUMED':
           // newStreamId is authoritative; the envelope may still identify the old stream.
+          this.resumeSourceInvocation(event, event.payload.newStreamId);
           this.startExecutionSegment(event, event.payload.newStreamId);
           break;
         case 'RUN_FINISHED':
@@ -50,7 +57,6 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
             durationMs: event.payload.durationMs,
             ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage }),
             ...(event.payload.usageCompleteness === undefined ? {} : { usageCompleteness: event.payload.usageCompleteness }),
-            ...(event.payload.reportId === undefined ? {} : { reportId: event.payload.reportId }),
           });
           break;
         case 'RUN_FAILED':
@@ -176,13 +182,16 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     safeInput?: Record<string, unknown>,
   ): void {
     if (this.registry.isRunTerminal(event.runId)) return;
+    const key = segmentKey(event.runId, streamId);
+    if (this.registry.isRememberedSpanKey(key)) return;
+    const current = this.segments.get(event.runId);
+    if (current?.spanKey === key && this.registry.isActive(key)) return;
     const orphanKey = orphanSegmentKey(event.runId, streamId);
     if (this.registry.isActive(orphanKey)) {
       this.registry.closeDescendants(orphanKey, 'incomplete');
       this.registry.end(orphanKey, { status: 'incomplete', reasonCode: 'run_start_arrived_after_child_event' });
     }
 
-    const key = segmentKey(event.runId, streamId);
     const previous = this.segments.get(event.runId);
     if (previous !== undefined && previous.spanKey !== key && this.registry.isActive(previous.spanKey)) {
       this.registry.closeDescendants(previous.spanKey, 'incomplete');
@@ -245,6 +254,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     output: Record<string, unknown>,
     failed = false,
   ): void {
+    if (status === 'paused') this.pauseDescendantInvocations(event.runId);
     const current = this.segments.get(event.runId);
     if (current !== undefined && event.streamId !== undefined && current.streamId !== event.streamId) return;
     const segment = current ?? this.ensureExecutionSegment(event.runId, event.streamId);
@@ -258,14 +268,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     if (status === 'paused') return;
 
     this.registry.markRunTerminal(event.runId);
-    for (const [childRunId, invocation] of this.invocationsByChildRun) {
-      if (invocation.parentRunId !== event.runId) continue;
-      this.registry.end(invocation.spanKey, { status: 'incomplete', terminalStatus: status });
-      this.registry.markRunTerminal(childRunId);
-      this.segments.delete(childRunId);
-      this.clearAttemptKeys(childRunId);
-      this.invocationsByChildRun.delete(childRunId);
-    }
+    this.closeDescendantRuns(event.runId, status);
   }
 
   private startSourceInvocation(event: Extract<AgentEventEnvelopeV2, { type: 'SUBAGENT_STARTED' }>): void {
@@ -279,6 +282,14 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     if (missingParent) this.registry.recordParentMissing();
     const spanKey = invocationKey(parentRunId, toolCallId ?? 'unknown-tool', childRunId);
     const invocationStreamId = event.streamId ?? parentSegment?.streamId;
+    const invocation: SourceInvocation = {
+      spanKey,
+      parentRunId,
+      childRunId,
+      toolCallId: toolCallId ?? 'unknown-tool',
+      subagentType,
+      budget,
+    };
     const started = this.startSpan({
       name: `subagent.${subagentType}`,
       kind: 'chain',
@@ -295,7 +306,108 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
         ...(missingParent ? { orphan: true } : {}),
       },
     });
-    if (started) this.invocationsByChildRun.set(childRunId, { spanKey, parentRunId, childRunId });
+    if (started) this.invocationsByChildRun.set(childRunId, invocation);
+  }
+
+  private resumeSourceInvocation(
+    event: Extract<AgentEventEnvelopeV2, { type: 'RUN_RESUMED' }>,
+    childStreamId: string,
+  ): void {
+    const prior = this.pausedInvocationsByChildRun.get(event.runId);
+    if (prior === undefined) return;
+    const parentSegment = this.segments.get(prior.parentRunId);
+    const activeToolKey = parentSegment === undefined
+      ? undefined
+      : this.toolKeys.get(toolLookupKey(prior.parentRunId, parentSegment.streamId, prior.toolCallId));
+    const parentSpanKey = activeToolKey ?? parentSegment?.spanKey;
+    const missingParent = parentSpanKey === undefined || !this.registry.isActive(parentSpanKey);
+    if (missingParent) this.registry.recordParentMissing();
+    const spanKey = resumedInvocationKey(prior.spanKey, childStreamId);
+    const started = this.startSpan({
+      name: `subagent.${prior.subagentType}`,
+      kind: 'chain',
+      runId: prior.parentRunId,
+      ...(parentSegment?.streamId === undefined ? {} : { streamId: parentSegment.streamId }),
+      spanKey,
+      ...(missingParent ? {} : { parentSpanKey }),
+      attributes: {
+        subagentType: prior.subagentType,
+        toolCallId: prior.toolCallId,
+        budget: { type: prior.budget.type, limit: prior.budget.limit, used: prior.budget.used },
+        continuedAfterPause: true,
+        ...(missingParent ? { orphan: true } : {}),
+      },
+    });
+    if (!started) return;
+    this.invocationsByChildRun.set(event.runId, { ...prior, spanKey });
+    this.pausedInvocationsByChildRun.delete(event.runId);
+  }
+
+  private pauseDescendantInvocations(runId: string): void {
+    const pendingRunIds = [runId];
+    const visitedRunIds = new Set(pendingRunIds);
+    while (pendingRunIds.length > 0) {
+      const parentRunId = pendingRunIds.shift();
+      if (parentRunId === undefined) continue;
+      for (const [childRunId, invocation] of this.invocationsByChildRun) {
+        if (invocation.parentRunId !== parentRunId) continue;
+        this.registry.closeDescendants(invocation.spanKey, 'paused');
+        this.registry.end(invocation.spanKey, { status: 'incomplete', terminalStatus: 'paused' });
+        this.invocationsByChildRun.delete(childRunId);
+        this.segments.delete(childRunId);
+        this.clearAttemptKeys(childRunId);
+        this.rememberPausedInvocation(invocation);
+        if (!visitedRunIds.has(childRunId)) {
+          visitedRunIds.add(childRunId);
+          pendingRunIds.push(childRunId);
+        }
+      }
+    }
+  }
+
+  private rememberPausedInvocation(invocation: SourceInvocation): void {
+    this.pausedInvocationsByChildRun.delete(invocation.childRunId);
+    this.pausedInvocationsByChildRun.set(invocation.childRunId, invocation);
+    while (this.pausedInvocationsByChildRun.size > MAX_PAUSED_INVOCATIONS) {
+      const oldest = this.pausedInvocationsByChildRun.keys().next().value;
+      if (oldest === undefined) break;
+      this.pausedInvocationsByChildRun.delete(oldest);
+      this.registry.recordParentMissing();
+    }
+  }
+
+  private closeDescendantRuns(runId: string, status: TraceTerminalStatus): void {
+    const pendingRunIds = [runId];
+    const visitedRunIds = new Set(pendingRunIds);
+    while (pendingRunIds.length > 0) {
+      const parentRunId = pendingRunIds.shift();
+      if (parentRunId === undefined) continue;
+      const children = new Map<string, SourceInvocation>();
+      for (const [childRunId, invocation] of this.invocationsByChildRun) {
+        if (invocation.parentRunId === parentRunId) children.set(childRunId, invocation);
+      }
+      for (const [childRunId, invocation] of this.pausedInvocationsByChildRun) {
+        if (invocation.parentRunId === parentRunId) children.set(childRunId, invocation);
+      }
+      for (const [childRunId, invocation] of children) {
+        this.registry.closeDescendants(invocation.spanKey, status);
+        const childSegment = this.segments.get(childRunId);
+        if (childSegment !== undefined) {
+          this.registry.closeDescendants(childSegment.spanKey, status);
+          this.registry.end(childSegment.spanKey, { status: 'incomplete', terminalStatus: status });
+        }
+        this.registry.end(invocation.spanKey, { status: 'incomplete', terminalStatus: status });
+        this.registry.markRunTerminal(childRunId);
+        this.segments.delete(childRunId);
+        this.clearAttemptKeys(childRunId);
+        this.invocationsByChildRun.delete(childRunId);
+        this.pausedInvocationsByChildRun.delete(childRunId);
+        if (!visitedRunIds.has(childRunId)) {
+          visitedRunIds.add(childRunId);
+          pendingRunIds.push(childRunId);
+        }
+      }
+    }
   }
 
   private finishSourceInvocation(
@@ -384,6 +496,10 @@ function toolKey(runId: string, streamId: string | undefined, toolCallId: string
 
 function invocationKey(parentRunId: string, toolCallId: string, childRunId: string): string {
   return `source:${parentRunId}:${toolCallId}:${childRunId}`;
+}
+
+function resumedInvocationKey(spanKey: string, streamId: string): string {
+  return `${spanKey}:resume:${streamId}`;
 }
 
 function attemptLookupKey(runId: string, streamId: string | undefined, attemptId: string): string {

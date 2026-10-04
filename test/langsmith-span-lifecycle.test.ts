@@ -55,7 +55,7 @@ describe('LangSmith V2 span lifecycle', () => {
 
     await projector.project(event('RUN_FINISHED', {
       outcome: 'complete', finalText: canary, durationMs: 42,
-      usage: { inputTokens: 12, outputTokens: 8 }, usageCompleteness: 'complete',
+      usage: { inputTokens: 12, outputTokens: 8 }, usageCompleteness: 'complete', reportId: canary,
     }, { streamId: 'stream-2' }));
 
     expect(observer.starts.filter((span) => span.name === 'agent.run').map((span) => span.spanKey))
@@ -174,6 +174,135 @@ describe('LangSmith V2 span lifecycle', () => {
     expect(observer.endings.filter((item) => item.spanKey !== 'run:run-1:failure-stream')
       .every((item) => (item.output as { status?: string } | undefined)?.status === 'incomplete')).toBe(true);
     expect(JSON.stringify({ starts: observer.starts, endings: observer.endings })).not.toContain(canary);
+  });
+
+  it('closes child spans when a terminal parent owns an orphan invocation', async () => {
+    const observer = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observer);
+    const parentRunId = 'orphan-parent';
+    const childRunId = 'orphan-child';
+
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'manual', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: parentRunId, streamId: 'parent-stream' }));
+    await projector.project(event('SUBAGENT_STARTED', {
+      subagentType: 'metrics', childRunId, parentRunId,
+      budget: { type: 'tool_calls', limit: 4, used: 1 },
+    }, { runId: parentRunId, parentRunId, streamId: 'parent-stream', toolCallId: 'missing-tool' }));
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'child', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream' }));
+    await projector.project(event('MODEL_CALL_STARTED', {
+      provider: 'test-provider', model: 'child-model', purpose: 'diagnosis', attempt: 1, inputSummary: 'safe',
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream', attemptId: 'child-attempt' }));
+    await projector.project(event('RUN_FAILED', {
+      error: { code: 'MODEL_ERROR', message: 'private error', retryable: false },
+      stage: 'hypothesis', recoverable: false,
+    }, { runId: parentRunId, streamId: 'parent-stream' }));
+
+    expect(projector.getTraceDiagnostics().activeSpans).toBe(0);
+    expect(observer.endings.some((ending) => ending.spanKey === 'model:orphan-child:child-stream:child-attempt'
+      && hasStringField(ending.output, 'status', 'incomplete'))).toBe(true);
+  });
+
+  it('recreates a source invocation parent when a descendant resumes after parent pause', async () => {
+    const observer = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observer);
+    const parentRunId = 'paused-parent';
+    const childRunId = 'paused-child';
+
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'manual', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+    await projector.project(event('TOOL_STARTED', {
+      toolName: 'metrics_subagent', source: 'subagent', attempt: 1,
+    }, { runId: parentRunId, streamId: 'parent-stream-1', toolCallId: 'metrics-call', attemptId: 'tool-attempt' }));
+    await projector.project(event('SUBAGENT_STARTED', {
+      subagentType: 'metrics', childRunId, parentRunId,
+      budget: { type: 'tool_calls', limit: 4, used: 1 },
+    }, { runId: parentRunId, parentRunId, streamId: 'parent-stream-1', toolCallId: 'metrics-call' }));
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'child', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream-1' }));
+    await projector.project(event('RUN_PAUSED', {
+      interruptId: 'parent-interrupt', reason: 'approval', expiresAt: '2026-10-04T10:05:00.000Z', checkpointVersion: 'checkpoint-1',
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+
+    await projector.project(event('RUN_RESUMED', {
+      checkpointVersion: 'checkpoint-1', resumeReason: 'approved', newStreamId: 'parent-stream-2',
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+    await projector.project(event('RUN_RESUMED', {
+      checkpointVersion: 'checkpoint-1', resumeReason: 'approved', newStreamId: 'child-stream-2',
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream-1' }));
+
+    const resumedInvocation = observer.starts.find((span) => span.runId === parentRunId
+      && span.name === 'subagent.metrics' && span.spanKey !== 'source:paused-parent:metrics-call:paused-child');
+    const resumedChildSegment = observer.starts.find((span) => span.spanKey === 'run:paused-child:child-stream-2');
+    expect(resumedInvocation?.parentSpanKey).toBe('run:paused-parent:parent-stream-2');
+    expect(resumedChildSegment?.parentSpanKey).toBe(resumedInvocation?.spanKey);
+    expect(resumedChildSegment?.attributes?.orphan).not.toBe(true);
+    expect(projector.getTraceDiagnostics().activeSpans).toBe(3);
+  });
+
+  it('releases suspended descendant mappings when the parent terminates before child resume', async () => {
+    const observer = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observer);
+    const parentRunId = 'abandoned-parent';
+    const childRunId = 'abandoned-child';
+
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'manual', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+    await projector.project(event('TOOL_STARTED', {
+      toolName: 'metrics_subagent', source: 'subagent', attempt: 1,
+    }, { runId: parentRunId, streamId: 'parent-stream-1', toolCallId: 'metrics-call', attemptId: 'tool-attempt' }));
+    await projector.project(event('SUBAGENT_STARTED', {
+      subagentType: 'metrics', childRunId, parentRunId,
+      budget: { type: 'tool_calls', limit: 4, used: 1 },
+    }, { runId: parentRunId, parentRunId, streamId: 'parent-stream-1', toolCallId: 'metrics-call' }));
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'child', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream-1' }));
+    await projector.project(event('RUN_PAUSED', {
+      interruptId: 'parent-interrupt', reason: 'approval', expiresAt: '2026-10-04T10:05:00.000Z', checkpointVersion: 'checkpoint-1',
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+    await projector.project(event('RUN_RESUMED', {
+      checkpointVersion: 'checkpoint-1', resumeReason: 'approved', newStreamId: 'parent-stream-2',
+    }, { runId: parentRunId, streamId: 'parent-stream-1' }));
+    await projector.project(event('RUN_FINISHED', { outcome: 'partial', durationMs: 5 }, {
+      runId: parentRunId, streamId: 'parent-stream-2',
+    }));
+    await projector.project(event('RUN_RESUMED', {
+      checkpointVersion: 'checkpoint-1', resumeReason: 'late-child-resume', newStreamId: 'child-stream-2',
+    }, { runId: childRunId, parentRunId, streamId: 'child-stream-1' }));
+
+    expect(observer.starts.some((span) => span.spanKey === `run:${childRunId}:child-stream-2`)).toBe(false);
+    expect(projector.getTraceDiagnostics().activeSpans).toBe(0);
+  });
+
+  it('does not replace an active resumed segment with a replayed old semantic start', async () => {
+    const observer = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observer, { maxSeenEventIds: 1 });
+    const runId = 'stale-start-run';
+    const oldStreamId = 'old-stream';
+    const newStreamId = 'new-stream';
+    const started = event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'manual', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId, streamId: oldStreamId });
+
+    await projector.project(started);
+    await projector.project(event('RUN_PAUSED', {
+      interruptId: 'interrupt-1', reason: 'approval', expiresAt: '2026-10-04T10:05:00.000Z', checkpointVersion: 'checkpoint-1',
+    }, { runId, streamId: oldStreamId }));
+    await projector.project(event('RUN_RESUMED', {
+      checkpointVersion: 'checkpoint-1', resumeReason: 'approved', newStreamId,
+    }, { runId, streamId: oldStreamId }));
+    await projector.project(event('RUN_STARTED', {
+      profile: 'simulation', trigger: 'replayed', deadline: '2026-10-04T10:01:00.000Z', versionSnapshot: {},
+    }, { runId, streamId: oldStreamId }));
+
+    expect(projector.getTraceDiagnostics().activeSpans).toBe(1);
+    expect(observer.endings.some((ending) => ending.spanKey === `run:${runId}:${newStreamId}`)).toBe(false);
   });
 
   it('marks a missing segment parent as orphan, diagnoses it, and releases group state', async () => {
