@@ -128,10 +128,10 @@ describe('LangSmithEventProjectorV2', () => {
     }, { parentRunId: 'run-1', toolCallId: 'tool-1' }));
 
     expect(observability.starts).toEqual([
-      expect.objectContaining({ name: 'agent.run', kind: 'chain', runId: 'run-1', spanKey: 'run:run-1', sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-1' }),
-      expect.objectContaining({ name: 'model.deepseek-chat', kind: 'llm', runId: 'run-1', spanKey: 'model:run-1:attempt-1', parentSpanKey: 'run:run-1' }),
-      expect.objectContaining({ name: 'tool.metrics_subagent', kind: 'tool', runId: 'run-1', spanKey: 'tool:run-1:tool-1:tool-attempt-1', parentSpanKey: 'run:run-1' }),
-      expect.objectContaining({ name: 'subagent.metrics', kind: 'chain', runId: 'child-run-1', spanKey: 'run:child-run-1', parentSpanKey: 'tool:run-1:tool-1:tool-attempt-1' }),
+      expect.objectContaining({ name: 'agent.run', kind: 'chain', runId: 'run-1', spanKey: 'run:run-1:stream-1', sessionId: 'session-1', replyId: 'reply-1', streamId: 'stream-1' }),
+      expect.objectContaining({ name: 'model.deepseek-chat', kind: 'llm', runId: 'run-1', spanKey: 'model:run-1:stream-1:attempt-1', parentSpanKey: 'run:run-1:stream-1' }),
+      expect.objectContaining({ name: 'tool.metrics_subagent', kind: 'tool', runId: 'run-1', spanKey: 'tool:run-1:stream-1:tool-1:tool-attempt-1', parentSpanKey: 'run:run-1:stream-1' }),
+      expect.objectContaining({ name: 'subagent.metrics', kind: 'chain', runId: 'run-1', streamId: 'stream-1', spanKey: 'source:run-1:tool-1:child-run-1', parentSpanKey: 'tool:run-1:stream-1:tool-1:tool-attempt-1' }),
     ]);
   });
 
@@ -183,7 +183,8 @@ describe('LangSmithEventProjectorV2', () => {
       evidenceIds: ['evidence-1'],
     }, { toolCallId: 'tool-1', attemptId: 'tool-attempt-1' }));
 
-    expect(observability.handles[0]?.output).toEqual({
+    const toolHandleIndex = observability.starts.findIndex((span) => span.kind === 'tool');
+    expect(observability.handles[toolHandleIndex]?.output).toEqual({
       toolCallId: 'tool-1',
       toolName: 'logs_subagent',
       status: 'success',
@@ -192,8 +193,8 @@ describe('LangSmithEventProjectorV2', () => {
       startedAt: '2026-09-07T10:00:00.000Z',
       finishedAt: '2026-09-07T10:00:01.000Z',
     });
-    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('raw log line');
-    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('raw-trace');
-    expect(JSON.stringify(observability.handles[0]?.output)).not.toContain('rawEvidence');
+    expect(JSON.stringify(observability.handles[toolHandleIndex]?.output)).not.toContain('raw log line');
+    expect(JSON.stringify(observability.handles[toolHandleIndex]?.output)).not.toContain('raw-trace');
+    expect(JSON.stringify(observability.handles[toolHandleIndex]?.output)).not.toContain('rawEvidence');
   });
 });

@@ -33,6 +33,7 @@ export * from './event/projectors/public-message-projector.js';
 export * from './event/projectors/v1-projector.js';
 export * from './event/projectors/audit-projector.js';
 export * from './event/projectors/langsmith-projector.js';
+export * from './event/projectors/trace-span-registry.js';
 export * from './guard/guard-engine.js';
 export * from './guard/bash-guardian.js';
 export * from './guard/governance-evaluator.js';
