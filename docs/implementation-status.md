@@ -1,5 +1,19 @@
 # 实现进度与验证记录
 
+## 最新增量：Task 7 本地验收 CLI 与人工复核入口
+
+2026-10-05：新增 opt-in `acceptance:real-model` 命令。必须显式设置 `AGENTOPS_REAL_MODEL_SMOKE=1`；未授权时在加载运行器前返回固定 `PRECHECK_SMOKE_NOT_ENABLED`，并声明模型请求数为 0、未创建父 Run。命令只从本地服务端环境读取凭证，使用有界模型预算和本地模拟 Logs Lab，安全报告只保留确定性检查、预算/usage、LangSmith 状态与关联 ID。
+
+新增 `acceptance:review` 本地命令，校验 v1 报告后调用 `applyManualReview`，只记录人工决定和 unsupported-claim 数，白名单重建输出到同目录新文件；不会覆盖原报告、保存消息正文或访问网络。审批无法越过失败检查或 LangSmith `failed/unavailable`。`test-results/` 已被忽略，不会把测试产物或凭证提交进仓库。
+
+新增 [真实模型与 LangSmith 联合验收指南](./guides/real-model-langsmith-acceptance.md)，说明 Node/pnpm 基线、后端准备、隐藏输入凭证、独立 secret、绝对测试目录、单次预算、复核流程和结果边界。此增量没有运行真实模型、真实 Elasticsearch/Prometheus 后端或真实 LangSmith 查询，因此不代表任何在线闭环通过。
+
+本轮复验：Node 24 下 `pnpm lint`、`pnpm typecheck`、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build` 均通过；默认 `pnpm test` 在 Node 20 下为 145 个文件、901 项通过，3 个真实后端 opt-in 文件的 7 项按设计跳过。默认浏览器 E2E 在 Node 20 下 4/4 通过。Node 24 的本地 E2E/SQLite 测试被当前 `better-sqlite3` 原生模块 ABI 阻断：依赖按 Node ABI 115 编译，而 Node 24 要求 ABI 137；尝试在原 worktree 重建时 Windows 返回文件占用/`EPERM`，因此没有覆盖或强制结束占用进程。Node 24 的数据库/E2E门仍需在干净依赖目录或 CI 验证。
+
+独立复审发现 LangSmith 的 start/completion 队列原为分开计数，可能使全局 pending 超出 Spec 的 256 上限；现已改为共享 admission 预算，并覆盖慢 start、挂起 completion、flush 等待和队列饱和。复审确认该问题已关闭；`metrics-web-durable` 单文件顺序复跑 3 次通过，全量套件最终复跑通过。
+
+没有运行真实模型、真实 Elasticsearch/Prometheus 后端、LangSmith 远端查询或人工消息审核；本轮只验证了默认离线测试、CLI opt-in 防线和本地 E2E，不能描述为真实生产数据闭环或真实模型通过。真实联合验收仍需按指南显式授权并单独审核。
+
 ## 最新增量：Run / Evidence 只读查询 API 与公共消息投影
 
 2026-10-01：按 [Run / Evidence 只读查询 API](./superpowers/specs/2026-10-01-run-evidence-read-api.md) 完成第一轮查询面。新增稳定的 `InspectionQueryService` 公开读模型、内存和 SQLite 实现，支持 Run/Evidence keyset 分页、SQLite 重启恢复、跨 Run evidence 隔离，以及 inline evidence 与已提交/partial Manifest 的统一目录。SQLite 公开查询只读取证据摘要列，不读取 `raw_json`；pending/failed/deleting Manifest 不可见。

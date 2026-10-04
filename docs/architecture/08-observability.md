@@ -82,4 +82,10 @@ SSE、审计、测试共用事件契约。订阅者错误隔离，不使远程�
 
 数据集包含触发输入、Profile/工具/提示词版本、模拟 fixture 版本、预期事实和证据约束。评测覆盖诊断正确性、数值一致性、引用回查、缺失证据说明、失败恢复、时延与成本。确定性评测先行，LLM judge 仅辅助评价可读性，不替代事实判定。
 
-当前存在 LangSmith 适配器骨架，嵌套 span、脱敏、可靠发送、数据集和完整评测尚需实施与验证。
+### 一次性真实模型 / LangSmith 验收
+
+仓库提供 opt-in `acceptance:real-model` CLI：只有环境变量 `AGENTOPS_REAL_MODEL_SMOKE=1` 时才进入配置和 Run 流程；一次最多 10 个模型 HTTP 请求、每次最多 512 输出 tokens、Run 最长 90 秒，不自动重跑整轮。CLI 从本机服务端环境读凭证，保存安全报告摘要；它不把最终回答或原始证据打印到终端或写入报告。
+
+`acceptance:review` 对同一个持久化 Run 的人工判断只记录 `approved/rejected` 和 unsupported-claim 数量，生成新报告，不覆盖原报告，不发网络请求，也不保留消息正文。人工批准不能覆盖失败的确定性检查或 LangSmith `failed/unavailable`。若 LangSmith 未启用，报告只能保持待复核，不能声称远端链路已通过。
+
+上述 CLI 和 fake-client/fake-fetch 测试不等于真实外部联调。只有实际执行一次烟测并单独核对本地 Run、模型 usage、远端父子 span 和人工复核后，才能报告该次闭环结果；生产业务可观测数据集、生产凭证和业务系统接入仍需另外验收。

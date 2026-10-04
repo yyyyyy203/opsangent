@@ -28,12 +28,14 @@
 
 最新已实现能力与检查结果见 [实现进度](./implementation-status.md)。
 
+个人开发环境的一次性真实模型/LangSmith 验收入口及人工复核操作见 [真实模型与 LangSmith 联合验收指南](./guides/real-model-langsmith-acceptance.md)。指南只描述受限烟测机制，不代表已经执行线上验收。
+
 V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./documentation-audit-v2.md)。
 
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地。项目声明的 Node.js 基线为 24；适配器在 Node 24 下的兼容性待 CI 验证。真实 DeepSeek 在线验收、真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期接入仍按实现进度推进。
+- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地。Task 7 的一次性真实模型 CLI 与本地人工复核 CLI 已提供；具体在线模型、实验后端和 LangSmith 远端验收仍须按指南由用户显式运行并人工确认。真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期仍按实现进度推进。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
 

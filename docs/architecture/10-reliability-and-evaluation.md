@@ -40,3 +40,11 @@ LangSmith 评测覆盖正常场景、黄金故障、少样本、窗口不匹配�
 - 正常、partial、inconclusive、cancelled、failed 均有测试，不仅检查自然语言是否“看起来正确”。
 
 这些是验收目标，不是当前已测结果。真实业务接入及生产上线需单独完成凭证管理、认证授权、负载、备份恢复、留存、部署运维和动作审查。
+
+## 当前一次性真实模型验收入口
+
+`pnpm acceptance:real-model` 是 opt-in、单次、有界的开发验收命令，不是默认测试的一部分。它要求 `AGENTOPS_REAL_MODEL_SMOKE=1`，并将模型调用限制为最多 10 次、单次输出最多 512 tokens、Run 最长 90 秒；完整 Run 不自动重试。使用本地模拟 Logs Lab 和已有后端，不等价于生产 ELK、业务 Prometheus 或真实 Trace 接入。
+
+验收报告将确定性检查、模型预算/usage 完整度、LangSmith 远端状态和人工复核分开记录。`pnpm acceptance:review -- --report <绝对路径> --decision approved|rejected --unsupported-claims <非负整数>` 只处理本地 v1 报告：approved 的数量必须为 0，输出到同目录新的 `<runId>.reviewed.json`，不覆盖原件或将消息正文混入报告；该命令不读取凭证、不访问网络。`failed` 或 `unavailable` 的远端核验不可被人工批准改成通过。
+
+默认自动化门禁只验证确定性代码和 fake-client/fake-fetch 路径，不会调用收费模型或真实 LangSmith。真实烟测需由操作者按 [联合验收指南](../guides/real-model-langsmith-acceptance.md) 明确授权；未执行的线上步骤必须报告为未验证，不能用 skip 或本地协议测试代替。
