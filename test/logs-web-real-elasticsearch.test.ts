@@ -29,11 +29,12 @@ describe.skipIf(!enabled)('real Elasticsearch Logs Web acceptance', () => {
       scenario: SettlementScenario;
       total: number;
       failed: number;
+      exceptionCount: number;
       metricStatus: 'healthy' | 'breached' | 'insufficient_data';
     }[] = [
-      { scenario: 'normal', total: 100, failed: 0, metricStatus: 'healthy' },
-      { scenario: 'settlement_failure', total: 100, failed: 15, metricStatus: 'breached' },
-      { scenario: 'low_sample', total: 10, failed: 8, metricStatus: 'insufficient_data' },
+      { scenario: 'normal', total: 100, failed: 0, exceptionCount: 0, metricStatus: 'healthy' },
+      { scenario: 'settlement_failure', total: 100, failed: 15, exceptionCount: 15, metricStatus: 'breached' },
+      { scenario: 'low_sample', total: 10, failed: 8, exceptionCount: 8, metricStatus: 'insufficient_data' },
     ];
 
     for (const fixture of cases) {
@@ -76,6 +77,13 @@ describe.skipIf(!enabled)('real Elasticsearch Logs Web acceptance', () => {
         expect(metricsChild?.evidence.items[0]).toMatchObject({ source: 'metric', retrievable: false });
         expect(logsChild?.evidence.items[0]).toMatchObject({ source: 'log', state: 'committed', retrievable: false });
         expect(logsChild?.evidence.items[0]?.recordCount).toBe(fixture.total);
+        expect(models.logs.observedAggregates).toHaveLength(1);
+        expect(models.logs.observedAggregates[0]).toMatchObject({
+          recordCount: fixture.total,
+          exceptionSignatures: fixture.exceptionCount === 0
+            ? []
+            : [{ value: 'SQLTimeoutException', count: fixture.exceptionCount }],
+        });
         expect(metricsChild?.evidence.items[0]?.summary).toMatchObject({
           status: fixture.metricStatus,
           total: fixture.total,
@@ -340,10 +348,29 @@ class MetricsModel implements ChatModel {
 
 class LogsModel implements ChatModel {
   public calls = 0;
+  public readonly observedAggregates: Array<{
+    evidenceId: string;
+    recordCount: number;
+    exceptionSignatures: Array<{ value: string; count: number }>;
+  }> = [];
+  private readonly observedAggregateIds = new Set<string>();
+
   public constructor(private readonly window: CurrentWindow) {}
   public async *stream(messages: AgentMessage[], _tools: Tool[], options: ModelCallOptions): AsyncGenerator<ModelStreamEvent, ModelResponse> {
     this.calls += 1;
     await Promise.resolve();
+    const aggregate = findJsonValue(messages, 'logs.aggregate_evidence');
+    if (isRecord(aggregate) && typeof aggregate.evidenceId === 'string' && !this.observedAggregateIds.has(aggregate.evidenceId)) {
+      this.observedAggregateIds.add(aggregate.evidenceId);
+      this.observedAggregates.push({
+        evidenceId: aggregate.evidenceId,
+        recordCount: typeof aggregate.recordCount === 'number' ? aggregate.recordCount : -1,
+        exceptionSignatures: Array.isArray(aggregate.exceptionSignatures)
+          ? aggregate.exceptionSignatures.filter((item): item is { value: string; count: number } => isRecord(item)
+            && typeof item.value === 'string' && typeof item.count === 'number')
+          : [],
+      });
+    }
     if (!hasToolResultNamed(messages, 'logs.capture')) {
       const call = { id: `logs-capture-${options.runId}`, name: 'logs.capture', input: { service: 'checkout', ...this.window } };
       yield { type: 'tool_call', call };

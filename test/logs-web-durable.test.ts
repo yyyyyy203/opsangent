@@ -165,7 +165,7 @@ describe('Logs Web durable evidence acceptance', () => {
     }
   });
 
-  it.each(['MCP_AUTH_ERROR', 'MCP_TIMEOUT'] as const)(
+  it.each(['MCP_AUTH_ERROR', 'MCP_TIMEOUT', 'INVALID_INPUT', 'POLICY_DENIED'] as const)(
     'preserves %s when the source fails before its first page instead of reporting STORAGE_ERROR',
     async (code) => {
       const root = await mkdtemp(join(tmpdir(), 'agentops-logs-source-error-'));
@@ -276,7 +276,7 @@ describe('Logs Web durable evidence acceptance', () => {
   });
 });
 
-function failedPages(code: 'MCP_AUTH_ERROR' | 'MCP_TIMEOUT'): AsyncIterable<EvidenceSourcePage> {
+function failedPages(code: 'MCP_AUTH_ERROR' | 'MCP_TIMEOUT' | 'INVALID_INPUT' | 'POLICY_DENIED'): AsyncIterable<EvidenceSourcePage> {
   return {
     [Symbol.asyncIterator]: () => ({
       next: (): Promise<IteratorResult<EvidenceSourcePage>> => Promise.reject(new SourceFailure(code)),

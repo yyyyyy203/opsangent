@@ -466,8 +466,9 @@ function validateRequest(request: StreamingEvidenceCaptureRequest): void {
 function isPreservableSourceFailure(error: unknown): error is Error & { code: string; retryable: boolean } {
   if (!isAgentError(error)) return false;
   return new Set([
-    'BUDGET_EXCEEDED', 'MCP_NETWORK_ERROR', 'MCP_TIMEOUT', 'MCP_RATE_LIMITED', 'MCP_SERVER_ERROR',
+    'BUDGET_EXCEEDED', 'INVALID_INPUT', 'MCP_NETWORK_ERROR', 'MCP_TIMEOUT', 'MCP_RATE_LIMITED', 'MCP_SERVER_ERROR',
     'MCP_AUTH_ERROR', 'MCP_PROTOCOL_ERROR', 'CIRCUIT_OPEN', 'TIMEOUT', 'UNAVAILABLE',
+    'POLICY_DENIED',
   ]).has(error.code);
 }
 

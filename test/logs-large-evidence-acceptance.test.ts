@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import type { EvidenceCaptureBudget, EvidenceSourcePage, NormalizedLogRecord, Tool, ToolResponse } from '../src/contracts/index.js';
+import type { Clock, EvidenceCaptureBudget, EvidenceSourcePage, NormalizedLogRecord, Tool, ToolResponse } from '../src/contracts/index.js';
 import type { RuntimeToolPorts } from '../src/application/create-runtime.js';
 import { SourceFailure } from '../src/mcp/resilience.js';
 import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js';
@@ -19,7 +19,7 @@ const maxPageBytes = 512 * 1024;
 const budget: EvidenceCaptureBudget = {
   maxSourceBytes: 64 * 1024 * 1024,
   maxRecords: 50_000,
-  maxDurationMs: 10 * 60_000,
+  maxDurationMs: 60_000,
   maxModelSummaryBytes: 16 * 1024,
   maxSamples: 3,
 };
@@ -95,6 +95,76 @@ describe('large Logs evidence acceptance', () => {
       await runtime.close();
     }
   }, 30_000);
+
+  it('returns partial evidence when the injected production 60-second capture deadline is reached', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-log-duration-budget-'));
+    roots.push(root);
+    let nowMs = Date.parse(start);
+    const clock: Clock = { now: () => new Date(nowMs) };
+    let runtimePorts: RuntimeToolPorts | undefined;
+    const runtime = createInspectionRuntime({
+      model: new ScriptedModel([{ text: 'ready for duration budget acceptance', toolCalls: [] }]),
+      workspaceRoots: [],
+      sqlitePath: join(root, 'runtime.sqlite'),
+      evidenceBlobRootPath: join(root, 'evidence-blobs'),
+      clock,
+      allowedToolNames: ['logs.capture', 'logs.search_evidence', 'logs.aggregate_evidence', 'logs.read_evidence_slice'],
+      toolFactories: [(ports) => {
+        runtimePorts = ports;
+        if (ports.evidenceBlobs === undefined || ports.evidenceManifests === undefined
+          || ports.streamingEvidenceRecorder === undefined) throw new Error('Logs evidence data plane is unavailable');
+        const source = {
+          pages: async function* (): AsyncIterable<EvidenceSourcePage> {
+            await Promise.resolve();
+            const first = [{ timestamp: '2026-10-04T11:30:00.000Z', service: 'checkout', level: 'ERROR', message: 'before deadline' }];
+            yield {
+              records: first,
+              encodedBytes: Buffer.byteLength(canonicalJson(first), 'utf8'),
+              nextCursor: 'duration-cursor',
+              sourceSnapshotId: 'duration-snapshot',
+            };
+            nowMs += 60_000;
+            const afterDeadline = [{ timestamp: '2026-10-04T11:31:00.000Z', service: 'checkout', level: 'ERROR', message: 'after deadline' }];
+            yield { records: afterDeadline, encodedBytes: Buffer.byteLength(canonicalJson(afterDeadline), 'utf8'), sourceSnapshotId: 'duration-snapshot' };
+          },
+        };
+        return createLogEvidenceTools({
+          source,
+          recorder: ports.streamingEvidenceRecorder,
+          manifests: ports.evidenceManifests,
+          reader: new LocalEvidenceReader({
+            blobStore: ports.evidenceBlobs,
+            manifests: ports.evidenceManifests,
+            cursorSecret: 'duration-budget-cursor-secret-0123456789',
+          }),
+          budget,
+          clock: ports.clock,
+        });
+      }],
+    });
+    try {
+      await runtime.ready;
+      const run = await runtime.agent.reply({ message: 'initialize the run for duration budget acceptance', profileId: 'simulation' });
+      const tool = runtime.toolkit.get('logs.capture');
+      if (tool === undefined || runtimePorts?.evidenceManifests === undefined) throw new Error('Logs capture data plane is unavailable');
+      const response = await invoke(tool, { service: 'checkout', start, end }, run.runId, 'duration-capture', { remaining: 2 });
+      const result = response.blocks.find((block) => block.type === 'json');
+      const evidenceId = response.evidenceIds?.[0];
+      if (result?.type !== 'json' || !isRecord(result.value) || evidenceId === undefined) {
+        throw new Error('duration capture response is incomplete');
+      }
+      expect(result.value.status).toBe('partial');
+      expect(result.value.recordCount).toBe(1);
+      const missingEvidence = result.value.missingEvidence;
+      if (!Array.isArray(missingEvidence)
+        || !missingEvidence.some((item: unknown) => item === 'ELK_CAPTURE_DURATION_BUDGET_EXCEEDED')) {
+        throw new Error('duration budget result omitted its explicit missing-evidence reason');
+      }
+      expect(await runtimePorts.evidenceManifests.getVisible(evidenceId)).toMatchObject({ state: 'partial', recordCount: 1 });
+    } finally {
+      await runtime.close();
+    }
+  });
 
   it('preserves already committed pages as partial evidence when a two-attempt source budget is exhausted', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentops-partial-log-evidence-'));
@@ -216,4 +286,8 @@ function findTool(tools: readonly Tool[], name: string): Tool {
   const tool = tools.find((candidate) => candidate.name === name);
   if (tool === undefined) throw new Error(`missing tool: ${name}`);
   return tool;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
