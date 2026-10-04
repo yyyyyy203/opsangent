@@ -5,7 +5,7 @@
 ## 1. 项目身份
 
 - 项目：生产级智能巡检诊断 Agent。
-- 技术栈：TypeScript、Node.js 20、pnpm。
+- 技术栈：TypeScript、Node.js 24（`>=24.0.0 <25.0.0`）、pnpm 11.19.0。
 - 第一目标系统：`D:\xfg\group-buy-market`。
 - 第一真实数据源：Prometheus。
 - 后续数据源：ELK、Trace、配置和发布变更。

@@ -13,7 +13,7 @@
 
 ## 手动启动（三个终端）
 
-需要 Node.js 20 和仓库依赖已安装。实验栈使用固定 Elasticsearch 8.19.12 与 Prometheus 3.5.0 镜像。
+需要 Node.js 24（`>=24.0.0 <25.0.0`）和仓库依赖已安装；Node.js 20 不再是受支持的开发或部署基线。实验栈使用固定 Elasticsearch 8.19.12 与 Prometheus 3.5.0 镜像。
 
 先在将要运行命令的 PowerShell 中确认 `pnpm` shim 可由子进程找到：
 

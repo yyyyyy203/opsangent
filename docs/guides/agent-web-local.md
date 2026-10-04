@@ -1,6 +1,6 @@
 # Agent Web 本地工作台
 
-Agent Web 是个人开发验证用的本地浏览器界面。它通过 HTTP 查询/命令和 Public V2 SSE 访问 Agent，不接触模型密钥、MCP 凭据、原始日志或 `AgentContext`。模拟器管理页面仍是独立入口，本页面不提供模拟器控制。
+Agent Web 是个人开发验证用的本地浏览器界面。开发和部署使用 Node.js 24（`>=24.0.0 <25.0.0`）；Node.js 20 不再是受支持基线。它通过 HTTP 查询/命令和 Public V2 SSE 访问 Agent，不接触模型密钥、MCP 凭据、原始日志或 `AgentContext`。模拟器管理页面仍是独立入口，本页面不提供模拟器控制。
 
 需要同时验证 Elasticsearch 日志与 Prometheus 指标时，请使用独立的 [Logs Web 本地验收指南](logs-web-elasticsearch-local.md)。该流程需显式设置 `AGENTOPS_REAL_LOGS_WEB=1`，浏览器验收使用脚本模型，与本文的 Metrics-only 流程分开启动。
 
