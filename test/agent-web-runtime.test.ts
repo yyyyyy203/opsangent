@@ -95,7 +95,10 @@ describe('local Agent web runtime', () => {
       modelIdentity: { provider: 'test-provider', model: 'parent-child-model' },
       eventObservability: exporter,
       clock: { now: () => new Date('2026-10-02T12:34:56.789Z') },
-      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:1/mcp', childModel: model },
+      metrics: {
+        profileId: 'simulation', mcpUrl: 'http://127.0.0.1:1/mcp', childModel: model,
+        modelIdentity: { provider: 'incorrect-override', model: 'incorrect-override' },
+      },
       port: 0,
     });
     try {

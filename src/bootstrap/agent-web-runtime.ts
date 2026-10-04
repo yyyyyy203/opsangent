@@ -89,10 +89,8 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   const model = resolveModel(options);
   const metricsModel = metrics?.childModel ?? model;
   const logsModel = logs?.childModel ?? model;
-  const metricsModelIdentity = metrics?.modelIdentity
-    ?? (metricsModel === model ? options.modelIdentity : undefined);
-  const logsModelIdentity = logs?.modelIdentity
-    ?? (logsModel === model ? options.modelIdentity : undefined);
+  const metricsModelIdentity = metricsModel === model ? options.modelIdentity : metrics?.modelIdentity;
+  const logsModelIdentity = logsModel === model ? options.modelIdentity : logs?.modelIdentity;
   const profiles = metrics === undefined
     ? normalizeProfiles(options.profiles ?? DEFAULT_PROFILES)
     : normalizeProfiles([{
