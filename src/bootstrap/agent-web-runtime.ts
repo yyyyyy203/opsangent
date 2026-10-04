@@ -2,6 +2,7 @@ import { mkdir } from 'node:fs/promises';
 import { isIP } from 'node:net';
 import { isAbsolute, join } from 'node:path';
 import type { ChatModel, Clock, IdGenerator, Observability, Tool } from '../contracts/index.js';
+import type { ModelIdentity } from './model-identity.js';
 import type { RuntimeToolPorts } from '../application/create-runtime.js';
 import type { ReplyOptions } from '../agent/types.js';
 import { systemClock, randomIdGenerator } from '../contracts/index.js';
@@ -43,11 +44,13 @@ export interface AgentWebRuntimeOptions {
     profileId: 'simulation';
     mcpUrl: string;
     childModel?: ChatModel;
+    modelIdentity?: ModelIdentity;
   };
   logs?: {
     profileId: 'simulation';
     mcpUrl: string;
     childModel?: ChatModel;
+    modelIdentity?: ModelIdentity;
     cursorSecret: string;
   };
   profiles?: readonly AgentWebProfileConfig[];
@@ -58,11 +61,14 @@ export interface AgentWebRuntimeOptions {
   clock?: Clock;
   ids?: IdGenerator;
   observability?: Observability;
+  eventObservability?: Observability;
+  modelIdentity?: ModelIdentity;
 }
 
 export interface AgentWebRuntime {
   readonly url: string;
   readonly server: InspectionHttpServer;
+  flushEventObservability(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -81,6 +87,12 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   const clock = options.clock ?? systemClock;
   const ids = options.ids ?? randomIdGenerator;
   const model = resolveModel(options);
+  const metricsModel = metrics?.childModel ?? model;
+  const logsModel = logs?.childModel ?? model;
+  const metricsModelIdentity = metrics?.modelIdentity
+    ?? (metricsModel === model ? options.modelIdentity : undefined);
+  const logsModelIdentity = logs?.modelIdentity
+    ?? (logsModel === model ? options.modelIdentity : undefined);
   const profiles = metrics === undefined
     ? normalizeProfiles(options.profiles ?? DEFAULT_PROFILES)
     : normalizeProfiles([{
@@ -105,13 +117,15 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
       toolFactories: [
         (ports: Parameters<typeof createMetricsWebSource>[0]) => createMetricsWebSource(ports, {
           mcpUrl: metrics.mcpUrl,
-          model: metrics.childModel ?? model,
+          model: metricsModel,
+          ...(metricsModelIdentity === undefined ? {} : { modelIdentity: metricsModelIdentity }),
         }),
         ...(logs === undefined ? [] : [
           (ports: RuntimeToolPorts) => createLogsWebSource(ports, {
             mcpUrl: logs.mcpUrl,
-            model: logs.childModel ?? model,
+            model: logsModel,
             cursorSecret: logs.cursorSecret,
+            ...(logsModelIdentity === undefined ? {} : { modelIdentity: logsModelIdentity }),
           }),
         ]),
       ],
@@ -121,6 +135,11 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     clock,
     ids,
     ...(options.observability === undefined ? {} : { observability: options.observability }),
+    ...(options.eventObservability === undefined ? {} : { eventObservability: options.eventObservability }),
+    ...(options.modelIdentity === undefined ? {} : {
+      modelProvider: options.modelIdentity.provider,
+      modelName: options.modelIdentity.model,
+    }),
   });
 
   try {
@@ -155,6 +174,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     return {
       url: server.url,
       server,
+      flushEventObservability: runtime.flushEventObservability,
       async close(): Promise<void> {
         if (closed) return;
         closed = true;

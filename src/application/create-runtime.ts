@@ -127,6 +127,8 @@ export interface AgentRuntimeOptions {
   evidence?: EvidenceStore;
   evidenceRecorder?: EvidenceRecorder;
   observability?: Observability;
+  /** Observability used only by the V2 event projector (for example LangSmith). */
+  eventObservability?: Observability;
   clock?: Clock;
   ids?: IdGenerator;
   includeExternalBash?: boolean;
@@ -208,6 +210,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     ?? (durableState === undefined ? new InMemoryCheckpointStore() : new VersionedCheckpointStoreAdapter(durableState.checkpoints));
   const evidence = options.evidence ?? persistence?.evidence ?? inMemoryDurable?.evidence ?? new InMemoryEvidenceStore();
   const observability = options.observability ?? new NoopObservability();
+  const eventObservability = options.eventObservability ?? observability;
   const events = new EventBus();
   const eventFactory = new EventFactory(clock);
   const localEventStoreV2: EventMessageStore = options.eventMessageStore
@@ -256,7 +259,10 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
   const projectionCheckpointsV2 = persistence?.projectionCheckpoints ?? new InMemoryProjectionCheckpointStore();
   const auditProjectorV2 = new AuditProjectorV2();
   const auditProjectionRunnerV2 = new ProjectionRunnerV2(auditProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
-  const langSmithProjectorV2 = new LangSmithEventProjectorV2(observability);
+  const langSmithProjectorV2 = new LangSmithEventProjectorV2(eventObservability);
+  const flushEventObservability = async (): Promise<void> => {
+    if (options.sharedEvents === undefined) await langSmithProjectorV2.flush();
+  };
   const langSmithProjectionRunnerV2 = new ProjectionRunnerV2(langSmithProjectorV2, projectionCheckpointsV2, projectionFailuresV2, { maxAttempts: 2 });
   const messageAssemblerV2 = new MessageAssemblerV2(eventStoreV2);
   if (options.sharedEvents === undefined) {
@@ -508,6 +514,7 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
     hookRegistry,
     auditProjectionRunnerV2,
     langSmithProjectionRunnerV2,
+    flushEventObservability,
     ready,
     messageAssemblerV2,
     webMessages: (cursorCodec: MessageCursorCodec): WebMessageQueries => (
@@ -528,7 +535,11 @@ export function createAgentRuntime(options: AgentRuntimeOptions) {
         try {
           await runShutdownHooks();
         } finally {
-          persistence?.close();
+          try {
+            await flushEventObservability();
+          } finally {
+            persistence?.close();
+          }
         }
       }
     },

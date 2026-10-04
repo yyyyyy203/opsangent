@@ -4,7 +4,9 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { AgentMessage, ChatModel, ModelResponse, ModelStreamEvent } from '../src/contracts/index.js';
 import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
+import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import { RecordingObservability } from './fixtures/recording-observability.js';
 
 const roots: string[] = [];
 
@@ -69,6 +71,58 @@ describe('local Agent web runtime', () => {
       .rejects.toThrow('dataDirectory must be an absolute path');
     await expect(startAgentWebRuntime({ dataDirectory: 'C:\\agentops-data', workspaceRoots: [], model: new ScriptedModel([]), host: '0.0.0.0' }))
       .rejects.toThrow('bind to loopback');
+  });
+
+  it('exports Web and inherited Metrics child spans through the event-only port and exposes flush', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-web-observability-'));
+    roots.push(root);
+    const exporter = new RecordingObservability();
+    const runId = 'identity-parent-run';
+    const childRunId = stableSourceChildRunId('metrics', runId, 'metrics-tool-call');
+    const model = new ScriptedModel([
+      { toolCalls: [{ id: 'metrics-tool-call', name: 'metrics_subagent', input: {
+        profileId: 'simulation', service: 'checkout',
+        start: '2026-10-02T12:29:56.000Z', end: '2026-10-02T12:34:56.000Z',
+        question: '检查结算指标',
+      } }] },
+      { text: '子 Agent 不查询来源。', toolCalls: [] },
+      { text: '巡检结束。', toolCalls: [] },
+    ]);
+    const runtime = await startAgentWebRuntime({
+      dataDirectory: root,
+      workspaceRoots: [root],
+      model,
+      modelIdentity: { provider: 'test-provider', model: 'parent-child-model' },
+      eventObservability: exporter,
+      clock: { now: () => new Date('2026-10-02T12:34:56.789Z') },
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:1/mcp', childModel: model },
+      port: 0,
+    });
+    try {
+      const started = await fetch(`${runtime.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runId, message: '检查结算', profileId: 'simulation' }),
+      });
+      expect(started.status).toBe(202);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const detail = await fetch(`${runtime.url}/runs/${runId}`);
+        if (detail.status === 200 && (await detail.clone().json() as { status: string }).status === 'completed') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+
+      const parentModelSpan = exporter.starts.find((span) => span.runId === runId && span.name === 'model.parent-child-model');
+      const childModelSpan = exporter.starts.find((span) => span.runId === childRunId && span.name === 'model.parent-child-model');
+      expect(parentModelSpan?.attributes).toMatchObject({ provider: 'test-provider', model: 'parent-child-model' });
+      expect(childModelSpan?.attributes).toMatchObject({ provider: 'test-provider', model: 'parent-child-model' });
+      expect('flushEventObservability' in runtime).toBe(true);
+      if ('flushEventObservability' in runtime && typeof runtime.flushEventObservability === 'function') {
+        await runtime.flushEventObservability();
+      }
+      expect(exporter.flushes).toBe(1);
+    } finally {
+      await runtime.close();
+    }
+    expect(exporter.flushes).toBe(2);
   });
 
   it('exposes only the simulation Profile and injects one host-generated window without connecting at startup', async () => {

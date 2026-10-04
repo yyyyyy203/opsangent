@@ -5,10 +5,12 @@ import { createLazySettlementEvidenceTool } from './lazy-settlement-tool.js';
 import { createSharedSourceChildAgentFactory } from './shared-source-child.js';
 import { settlementMetricsLabProfile } from '../profiles/settlement.js';
 import { ResilientExecutor, SourceCircuitBreaker } from '../mcp/resilience.js';
+import type { ModelIdentity } from './model-identity.js';
 
 export interface MetricsWebSourceOptions {
   mcpUrl: string;
   model: ChatModel;
+  modelIdentity?: ModelIdentity;
 }
 
 /**
@@ -36,6 +38,7 @@ export function createMetricsWebSource(
   });
   const childAgentFactory = createSharedSourceChildAgentFactory({
     model: options.model,
+    ...(options.modelIdentity === undefined ? {} : { modelIdentity: options.modelIdentity }),
     workspaceRoots: [],
     checkpoints: ports.checkpoints,
     evidence: ports.evidence,

@@ -9,6 +9,7 @@ import { createInspectionRuntime } from '../src/bootstrap/inspection-runtime.js'
 import { createLogsWebSource } from '../src/bootstrap/logs-web-source.js';
 import { stableSourceChildRunId } from '../src/bootstrap/source-subagent-identity.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
+import { RecordingObservability } from './fixtures/recording-observability.js';
 
 const roots: string[] = [];
 const cursorSecret = '0123456789abcdef0123456789abcdef';
@@ -97,9 +98,38 @@ describe('Web Logs source composition', () => {
       await captured.close();
     }
   });
+
+  it('passes an explicit child model identity into the shared Logs child runtime', async () => {
+    const exporter = new RecordingObservability();
+    const captured = await capturePorts(true, exporter);
+    const childRunId = stableSourceChildRunId('logs', 'logs-parent-run', 'parent-tool-1');
+    try {
+      const logsTool = createLogsWebSource(captured.ports, {
+        mcpUrl: 'http://127.0.0.1:1/mcp',
+        model: new ScriptedModel([{ text: '不请求来源数据。', toolCalls: [] }]),
+        cursorSecret,
+        modelIdentity: { provider: 'logs-provider', model: 'logs-child-model' },
+      })[0];
+      if (logsTool === undefined) throw new Error('Logs parent Tool missing');
+
+      await drainTool(logsTool, {
+        profileId: 'simulation', service: 'checkout',
+        start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z',
+        question: '检查结算日志',
+      }, 'logs-parent-run');
+
+      const modelSpan = exporter.starts.find((span) => span.runId === childRunId && span.kind === 'llm');
+      expect(modelSpan).toMatchObject({
+        name: 'model.logs-child-model',
+        attributes: { provider: 'logs-provider', model: 'logs-child-model' },
+      });
+    } finally {
+      await captured.close();
+    }
+  });
 });
 
-async function capturePorts(withLogsDataPlane: boolean): Promise<{
+async function capturePorts(withLogsDataPlane: boolean, observability?: RecordingObservability): Promise<{
   root: string;
   runtime: ReturnType<typeof createInspectionRuntime>;
   ports: RuntimeToolPorts;
@@ -121,6 +151,7 @@ async function capturePorts(withLogsDataPlane: boolean): Promise<{
     ...(withLogsDataPlane ? { evidenceBlobRootPath: join(root, 'evidence-blobs') } : {}),
     clock,
     ids,
+    ...(observability === undefined ? {} : { eventObservability: observability }),
     toolFactories: [(value) => { ports = value; return []; }],
   });
   try {

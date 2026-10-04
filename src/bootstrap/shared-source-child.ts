@@ -3,6 +3,7 @@ import type { EvidenceRecorder } from '../application/evidence-recorder.js';
 import type { SharedRuntimeEventPorts } from '../application/runtime-ports.js';
 import { createInspectionRuntime } from './inspection-runtime.js';
 import type { SourceChildAgentFactory } from '../application/source-subagent-runner.js';
+import type { ModelIdentity } from './model-identity.js';
 
 export interface SharedSourceChildFactoryOptions {
   model: ChatModel;
@@ -11,6 +12,7 @@ export interface SharedSourceChildFactoryOptions {
   evidence: EvidenceStore;
   evidenceRecorder: EvidenceRecorder;
   sharedEvents: SharedRuntimeEventPorts;
+  modelIdentity?: ModelIdentity;
   /** Keep child deadlines and event/message identities on the parent runtime clock. */
   clock?: Clock;
   ids?: IdGenerator;
@@ -32,6 +34,10 @@ export function createSharedSourceChildAgentFactory(
         evidenceRecorder: options.evidenceRecorder,
         eventMessageStore: options.sharedEvents.store,
         sharedEvents: options.sharedEvents,
+        ...(options.modelIdentity === undefined ? {} : {
+          modelProvider: options.modelIdentity.provider,
+          modelName: options.modelIdentity.model,
+        }),
         ...(options.clock === undefined ? {} : { clock: options.clock }),
         ...(options.ids === undefined ? {} : { ids: options.ids }),
         includeExternalBash: false,

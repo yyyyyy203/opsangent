@@ -8,6 +8,7 @@ import { ResilientExecutor, SourceCircuitBreaker } from '../mcp/resilience.js';
 import { createLazyElkEvidenceSource } from './lazy-elk-evidence-source.js';
 import { createLogsSubagentTool } from './logs-subagent.js';
 import { createSharedSourceChildAgentFactory } from './shared-source-child.js';
+import type { ModelIdentity } from './model-identity.js';
 
 const MAX_QUESTION_BYTES = 2 * 1024;
 const MIN_CURSOR_SECRET_BYTES = 32;
@@ -25,6 +26,7 @@ export interface LogsWebSourceOptions {
   model: ChatModel;
   /** Stable across Web restarts so previously issued evidence cursors remain valid. */
   cursorSecret: string;
+  modelIdentity?: ModelIdentity;
 }
 
 /** Compose the parent-facing Logs Subagent over the Web runtime's existing data plane. */
@@ -58,6 +60,7 @@ export function createLogsWebSource(
   });
   const childAgentFactory = createSharedSourceChildAgentFactory({
     model: options.model,
+    ...(options.modelIdentity === undefined ? {} : { modelIdentity: options.modelIdentity }),
     workspaceRoots: [],
     checkpoints: ports.checkpoints,
     evidence: ports.evidence,
