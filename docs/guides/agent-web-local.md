@@ -2,6 +2,8 @@
 
 Agent Web 是个人开发验证用的本地浏览器界面。它通过 HTTP 查询/命令和 Public V2 SSE 访问 Agent，不接触模型密钥、MCP 凭据、原始日志或 `AgentContext`。模拟器管理页面仍是独立入口，本页面不提供模拟器控制。
 
+需要同时验证 Elasticsearch 日志与 Prometheus 指标时，请使用独立的 [Logs Web 本地验收指南](logs-web-elasticsearch-local.md)。该流程需显式设置 `AGENTOPS_REAL_LOGS_WEB=1`，浏览器验收使用脚本模型，与本文的 Metrics-only 流程分开启动。
+
 ## 启动
 
 在仓库根目录安装依赖：
@@ -58,6 +60,7 @@ pnpm web:dev
 - SSE 只作为进度/失效通知，消息正文以分页公开快照为准；浏览器会合并相同 `messageId`，旧 `version` 不得覆盖新内容。
 - 父 Run 的证据区域汇总子 Run 树的摘要与引用，保留证据所属 `runId`，最多查询 100 个 Run、展示 500 条证据；分页失败或触及上限时提示不完整，并保留已取得的证据。原始 Prometheus、ELK、Trace、ToolResponse 不进入浏览器；`retrievable=false` 不是下载失败提示。
 - 模型用量分别展示本 Run、子 Run 合计与整棵调用树的输入、输出及缓存输入 token。数据来源为持久化模型调用完成事件，缺失或失败记录标记为不完整；不把 token 数当成账单金额。
+- Run 状态为“运行中”时可请求取消当前 Agent Web 宿主进程内的活跃 Run；页面显示取消进行中，收到终态快照后显示“已取消”。暂停、等待确认和终态 Run 不提供取消按钮；取消通过 AbortSignal 协作停止，不会回滚已经完成的工具副作用。宿主重启后没有活跃执行器可供取消。
 - HIGH/CRITICAL 或工具声明需要确认时，批准/拒绝只作用于当前 `toolCallId + expectedRevision`。任何确认结果都不会自动恢复，必须点击“继续调查”；冲突不会自动重发。
 - 断线、SSE 背压或游标失效时页面提示重新同步，不伪造完整诊断。刷新页面不会自动 resume。
 - 当前宿主为单进程本地 MVP；协调器和消息游标不是分布式锁/跨进程认证方案，不得直接公网暴露。
@@ -93,7 +96,7 @@ pnpm exec playwright test test/e2e/metrics-web.spec.ts --project=real-metrics
 Remove-Item Env:AGENTOPS_REAL_PROMETHEUS_WEB
 ```
 
-这些测试使用模拟器产生遥测、真实 Prometheus 查询和脚本模型；父 Run 记录子 Run 身份和证据引用，当前父页面也会汇总子 Run 的证据摘要。验收还检查父子 Run 的公开消息与 SSE 不泄漏原始指标。浏览器测试验证已完成 Run 的 SSE 连接在 Web 重启前存在，重启后可以重新连接并查询父子 Run 和子 Run 证据。运行中 Run 的关闭、取消与 checkpoint 排空不在本次验收范围内。
+这些测试使用模拟器产生遥测、真实 Prometheus 查询和脚本模型；父 Run 记录子 Run 身份和证据引用，当前父页面也会汇总子 Run 的证据摘要。验收还检查父子 Run 的公开消息与 SSE 不泄漏原始指标。浏览器测试验证已完成 Run 的 SSE 连接在 Web 重启前存在，重启后可以重新连接并查询父子 Run 和子 Run 证据。运行中 Run 可通过显式取消命令发出 cooperative abort，并以 `RUN_CANCELLED` 与 `cancelled` checkpoint 结束；取消不会回滚已完成工具副作用。
 
 ## 历史验证记录（2026-10-02）
 

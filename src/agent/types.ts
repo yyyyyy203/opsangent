@@ -1,5 +1,8 @@
 import type { AgentContext, AgentEvent } from '../contracts/index.js';
 
+/** Internal sentinel used to preserve the trusted origin of a user cancel command. */
+export const USER_RUN_CANCELLATION_REASON: unique symbol = Symbol('user-run-cancellation');
+
 export interface ReplyOptions {
   message: string;
   profileId: string;

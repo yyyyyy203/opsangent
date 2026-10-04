@@ -8,7 +8,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: { allowDefaultProject: ['apps/metrics-lab/*.mjs', 'apps/agent-server/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts'] },
+        projectService: { allowDefaultProject: ['apps/metrics-lab/*.mjs', 'apps/agent-server/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts', 'playwright.logs.config.ts', 'test/e2e/logs-fixture-server.mjs'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -17,5 +17,15 @@ export default tseslint.config(
       '@typescript-eslint/no-explicit-any': 'error',
       '@typescript-eslint/no-floating-promises': 'error',
     },
+  },
+  {
+    // The Node fixture is JavaScript (like the existing E2E fixture scripts),
+    // so check its syntax/basic rules without treating unannotated JS as `any` TS.
+    files: ['test/e2e/logs-fixture-server.mjs'],
+    languageOptions: {
+      ...tseslint.configs.disableTypeChecked.languageOptions,
+      globals: { process: 'readonly', fetch: 'readonly', Buffer: 'readonly', AbortSignal: 'readonly' },
+    },
+    rules: tseslint.configs.disableTypeChecked.rules,
   },
 );

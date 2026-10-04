@@ -51,6 +51,17 @@ describe('V1CompatibilityProjector', () => {
 });
 
 describe('PublicEventProjectorV2', () => {
+  it('projects safe cancellation lifecycle fields for public SSE', () => {
+    const projected = new PublicEventProjectorV2().project(event('RUN_CANCELLED', {
+      actor: 'user', reason: 'user_requested', stage: 'evidence_collection',
+    }));
+
+    expect(projected).toMatchObject({
+      type: 'RUN_CANCELLED',
+      payload: { actor: 'user', reason: 'user_requested', stage: 'evidence_collection' },
+    });
+  });
+
   it('drops non-public events and raw tool-call blocks', () => {
     const projector = new PublicEventProjectorV2();
     expect(projector.project(event('MODEL_CALL_STARTED', {

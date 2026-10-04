@@ -22,6 +22,7 @@ export interface RunViewClient {
   getConfirmation(runId: string): Promise<PublicConfirmation | null>;
   startRun(input: { runId: string; message: string; profileId: string }): Promise<{ runId: string; status: string; eventsUrl: string }>;
   resumeRun(runId: string): Promise<{ runId: string; status: string; eventsUrl: string }>;
+  cancelRun(runId: string): Promise<{ runId: string; status: string }>;
   decideConfirmation(runId: string, input: ConfirmationDecisionInput): Promise<ConfirmationDecisionResult>;
   openRunEvents(runId: string, lastEventId: string | undefined, onEvent: (frame: PublicEventFrame) => void, onError?: (error: Error) => void): EventSubscription;
 }
@@ -42,7 +43,7 @@ export interface RunViewState {
   connected: boolean;
   /** A confirmation decision changes durable state but intentionally does not invoke resume. */
   resumeRequired: boolean;
-  pendingCommand: 'start' | 'resume' | 'confirmation' | null;
+  pendingCommand: 'start' | 'resume' | 'cancel' | 'confirmation' | null;
   notice: string | null;
 }
 
@@ -112,7 +113,7 @@ export class RunViewController {
     this.closeRunResources();
     const generation = ++this.generation;
     const snapshotRequest = ++this.snapshotRequest;
-    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], evidenceIncomplete: false, descendantUsage: null, subtreeUsage: null, confirmation: null, toolActivity: null, status: 'loading', connected: false, resumeRequired: false, notice: null });
+    this.patch({ runId, detail: null, messages: mergeMessagePage([], { items: initialMessages }, runId), evidence: [], evidenceIncomplete: false, descendantUsage: null, subtreeUsage: null, confirmation: null, toolActivity: null, status: 'loading', connected: false, resumeRequired: false, pendingCommand: null, notice: null });
     this.stream = this.client.openRunEvents(runId, undefined, (frame) => this.onEvent(generation, frame), (error) => this.onStreamError(generation, error));
     this.patch({ connected: true });
     this.calibrationTimer = this.timers.setInterval(() => { void this.refreshRun(generation); }, 2_000);
@@ -185,6 +186,25 @@ export class RunViewController {
     }
   }
 
+  public async cancelRun(): Promise<void> {
+    const runId = this.state.runId;
+    if (runId === null) return;
+    this.patch({ pendingCommand: 'cancel', notice: null });
+    let accepted = false;
+    try {
+      await this.client.cancelRun(runId);
+      accepted = true;
+      // The server returns 202 before the aborted model/tool call necessarily
+      // reaches its terminal checkpoint. Keep the button disabled until a
+      // fresh public snapshot confirms a terminal state.
+      await this.refreshRun(this.generation);
+    } catch (error) {
+      this.patch({ notice: errorMessage(error) });
+    } finally {
+      if (!accepted) this.patch({ pendingCommand: null });
+    }
+  }
+
   public close(): void {
     this.closeRunResources();
     this.generation += 1;
@@ -243,7 +263,15 @@ export class RunViewController {
     if (detail.status === 'fulfilled') {
       const evidence = await collectRunTreeEvidence(this.client, detail.value, runId);
       if (!this.acceptSnapshot(generation, snapshotRequest)) return;
-      this.patch({ detail: detail.value, evidence: evidence.incomplete ? mergeEvidenceSnapshot(this.state.evidence, evidence.items) : evidence.items, evidenceIncomplete: evidence.incomplete, descendantUsage: evidence.descendantUsage, subtreeUsage: evidence.subtreeUsage, status: 'ready' });
+      this.patch({
+        detail: detail.value,
+        evidence: evidence.incomplete ? mergeEvidenceSnapshot(this.state.evidence, evidence.items) : evidence.items,
+        evidenceIncomplete: evidence.incomplete,
+        descendantUsage: evidence.descendantUsage,
+        subtreeUsage: evidence.subtreeUsage,
+        status: 'ready',
+        ...(this.state.pendingCommand === 'cancel' && isTerminalRunStatus(detail.value.status) ? { pendingCommand: null } : {}),
+      });
     }
     await this.refreshConfirmation(generation, snapshotRequest);
     await this.refreshMessages(generation);
@@ -285,6 +313,10 @@ export class RunViewController {
     this.state = { ...this.state, ...patch };
     for (const listener of this.listeners) listener();
   }
+}
+
+function isTerminalRunStatus(status: PublicRunDetail['status']): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
 const MAX_EVIDENCE_TREE_RUNS = 100;

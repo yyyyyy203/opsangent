@@ -76,7 +76,7 @@ export default function App(): ReactElement {
         </section>
 
         <aside className="side-column">
-          <RunStatus detail={state.detail} descendantUsage={state.descendantUsage} subtreeUsage={state.subtreeUsage} connected={state.connected} pending={state.pendingCommand === 'resume'} resumeAvailable={state.resumeRequired} toolActivity={state.toolActivity} onResume={() => void controller.resumeRun()} />
+          <RunStatus detail={state.detail} descendantUsage={state.descendantUsage} subtreeUsage={state.subtreeUsage} connected={state.connected} pending={state.pendingCommand === 'resume'} cancelPending={state.pendingCommand === 'cancel'} resumeAvailable={state.resumeRequired} toolActivity={state.toolActivity} onResume={() => void controller.resumeRun()} onCancel={() => void controller.cancelRun()} />
           <ConfirmationCard confirmation={state.confirmation} pending={state.pendingCommand === 'confirmation'} onDecision={(confirmed, reason) => {
             if (state.confirmation === null) return;
             void controller.decideConfirmation({ toolCallId: state.confirmation.toolCallId, confirmed, expectedRevision: state.confirmation.expectedRevision, ...(reason === undefined ? {} : { reason }) });

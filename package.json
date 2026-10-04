@@ -24,7 +24,8 @@
     "web:dev": "pnpm --dir apps/agent-web dev",
     "web:build": "pnpm --dir apps/agent-web build",
     "web:typecheck": "pnpm --dir apps/agent-web typecheck",
-    "e2e": "pnpm build && pnpm web:build && playwright test"
+    "e2e": "pnpm build && pnpm web:build && playwright test",
+    "logs:e2e": "pnpm build && pnpm web:build && playwright test --config=playwright.logs.config.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

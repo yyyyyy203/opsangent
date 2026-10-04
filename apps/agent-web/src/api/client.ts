@@ -101,6 +101,10 @@ export class ApiClient {
     return this.request(`${this.runPath(runId)}/resume`, { method: 'POST' });
   }
 
+  public async cancelRun(runId: string): Promise<{ runId: string; status: string }> {
+    return this.request(`${this.runPath(runId)}/cancel`, { method: 'POST' });
+  }
+
   public async decideConfirmation(runId: string, input: ConfirmationDecisionInput): Promise<ConfirmationDecisionResult> {
     return this.request<ConfirmationDecisionResult>(`${this.runPath(runId)}/confirmation`, { method: 'POST', body: input });
   }

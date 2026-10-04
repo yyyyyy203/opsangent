@@ -119,6 +119,15 @@ async function handleRequest(request: IncomingMessage, response: ServerResponse,
     return;
   }
 
+  const cancelMatch = method === 'POST' ? /^\/runs\/([^/]+)\/cancel$/u.exec(parsed.pathname) : null;
+  if (cancelMatch?.[1] !== undefined) {
+    if (options.execution === undefined) throw unavailable();
+    const runId = decodePath(cancelMatch[1]);
+    await options.execution.cancel(runId);
+    writeJson(response, 202, { runId, status: 'cancelling' });
+    return;
+  }
+
   const resumeMatch = method === 'POST' ? /^\/runs\/([^/]+)\/resume$/u.exec(parsed.pathname) : null;
   if (resumeMatch?.[1] !== undefined) {
     const runId = decodePath(resumeMatch[1]);

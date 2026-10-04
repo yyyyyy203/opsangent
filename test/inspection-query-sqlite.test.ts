@@ -89,6 +89,39 @@ async function commitManifest(
 }
 
 describe('SQLite inspection query read model', () => {
+  it('includes safe structured source missing-evidence codes in the parent Run detail', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-missing-evidence-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      const parent = context('parent-run', 'profile-a');
+      parent.messages.push({
+        id: 'logs-subagent-result',
+        role: 'tool',
+        createdAt: now,
+        blocks: [{
+          type: 'tool_result',
+          result: {
+            toolCallId: 'logs-call', toolName: 'logs_subagent', status: 'failed', startedAt: now,
+            response: { blocks: [{ type: 'json', value: {
+              source: 'logs', status: 'unavailable', missingEvidence: [
+                'logs_capture_unavailable', 'traces', 'raw log text from 10.0.0.5:9200',
+                'elasticsearch:9200', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+              ],
+            } }] },
+          },
+        }],
+      });
+      await persistence.checkpoints.save(parent, null);
+
+      const detail = await persistence.queries.getRun('parent-run');
+
+      expect(detail?.missingEvidence).toEqual(['logs', 'logs_capture_unavailable', 'traces']);
+    } finally {
+      persistence.close();
+    }
+  });
+
   it('reconstructs token usage from durable audit events after reopening the database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-usage-'));
     roots.push(root);

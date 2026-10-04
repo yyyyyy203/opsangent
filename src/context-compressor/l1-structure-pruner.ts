@@ -4,6 +4,7 @@ import type {
   ContextSummary,
   ToolCall,
 } from '../contracts/index.js';
+import { publicRunMissingEvidence } from '../contracts/read-model.js';
 import { checkpointChecksum } from '../contracts/stable-json.js';
 
 export interface L1StructurePruneInput {
@@ -93,7 +94,7 @@ export class L1StructurePruner {
     const summary: ContextSummary = {
       confirmedFacts: existingSummary.confirmedFacts,
       hypotheses: existingSummary.hypotheses,
-      missingEvidence: uniqueInOrder([...existingSummary.missingEvidence, ...context.missingEvidence]),
+      missingEvidence: uniqueInOrder([...existingSummary.missingEvidence, ...publicRunMissingEvidence(context)]),
       pendingActionIds: uniqueInOrder([
         ...existingSummary.pendingActionIds,
         ...context.pendingToolCalls.map((call) => call.id),

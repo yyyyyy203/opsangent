@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AgentContext, AgentMessage, ToolCall, ToolExecutionResult } from '../src/contracts/index.js';
 import { createInitialRunGovernanceState } from '../src/contracts/index.js';
+import { publicRunMissingEvidence } from '../src/contracts/read-model.js';
 import { L1StructurePruner } from '../src/context-compressor/l1-structure-pruner.js';
 
 const timestamp = '2026-09-14T00:00:00.000Z';
@@ -133,5 +134,58 @@ describe('L1StructurePruner', () => {
     expect(candidate.context.governance?.compression.sourceMessageIds).toEqual(candidate.sourceMessageIds);
     expect(candidate.context).not.toBe(before);
     expect(before.governance?.compression.summaryVersion).toBe(0);
+  });
+
+  it('preserves structured source missing evidence when pruning its historical ToolResult', () => {
+    const callId = 'call-logs';
+    const sourcePair: AgentMessage[] = [
+      {
+        id: 'message-call-' + callId,
+        role: 'assistant',
+        createdAt: timestamp,
+        blocks: [{ type: 'tool_call', call: { id: callId, name: 'logs_subagent', input: {} } }],
+      },
+      {
+        id: 'message-result-' + callId,
+        role: 'tool',
+        createdAt: timestamp,
+        blocks: [{
+          type: 'tool_result',
+          result: {
+            toolCallId: callId,
+            toolName: 'logs_subagent',
+            status: 'success',
+            response: { blocks: [{ type: 'json', value: {
+              source: 'logs', status: 'unavailable', missingEvidence: [
+                'logs_capture_unavailable', 'traces', 'elasticsearch:9200', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+              ],
+            } }] },
+            startedAt: timestamp,
+            finishedAt: timestamp,
+          },
+        }],
+      },
+    ];
+    const recent = Array.from({ length: 40 }, (_, index) => textMessage('recent-' + index, 'recent'));
+
+    const candidate = new L1StructurePruner().prune({
+      context: context([...sourcePair, ...recent]),
+      keepRecentMessages: 4,
+      maxMessages: 8,
+      now: () => new Date(timestamp),
+    });
+
+    const summaryMissingEvidence = candidate.context.messages.flatMap((message) => message.blocks.flatMap((block) => (
+      block.type === 'context_summary' ? block.summary.missingEvidence : []
+    )));
+    expect(visibleToolResultIds(candidate.context)).not.toContain(callId);
+    expect(summaryMissingEvidence).toContain('logs_capture_unavailable');
+    expect(summaryMissingEvidence).toContain('traces');
+    expect(summaryMissingEvidence).not.toContain('elasticsearch:9200');
+    expect(summaryMissingEvidence).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
+    expect(publicRunMissingEvidence(candidate.context)).toContain('logs_capture_unavailable');
+    expect(publicRunMissingEvidence(candidate.context)).toContain('traces');
+    expect(publicRunMissingEvidence(candidate.context)).not.toContain('elasticsearch:9200');
+    expect(publicRunMissingEvidence(candidate.context)).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   });
 });

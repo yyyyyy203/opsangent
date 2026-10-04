@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { startInspectionHttpServer } from '../src/api/http-server.js';
+import type { ChatModel } from '../src/contracts/index.js';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
+import { RunExecutionCoordinator } from '../src/application/run-execution-coordinator.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
 describe('inspection HTTP/SSE bootstrap', () => {
@@ -106,6 +108,65 @@ describe('inspection HTTP/SSE bootstrap', () => {
       expect((await fetch(`${server.url}/runs`, { method: 'POST', body: '{bad' })).status).toBe(400);
     } finally {
       await server.close();
+    }
+  }, 15_000);
+
+  it('cancels an active Run through the explicit command and persists the Harness terminal checkpoint', async () => {
+    let enteredModel!: () => void;
+    const modelEntered = new Promise<void>((resolve) => { enteredModel = resolve; });
+    let releaseModel: (() => void) | undefined;
+    const model: ChatModel = {
+      async *stream(_messages, _tools, options) {
+        enteredModel();
+        await new Promise<void>((resolve) => {
+          const release = (): void => {
+            options.signal.removeEventListener('abort', release);
+            releaseModel = undefined;
+            resolve();
+          };
+          releaseModel = release;
+          options.signal.addEventListener('abort', release, { once: true });
+          if (options.signal.aborted) release();
+        });
+        if (options.signal.aborted) throw new Error('Model observed cancellation.');
+        yield { type: 'text_delta', delta: 'done' };
+        return { text: 'done', toolCalls: [] };
+      },
+    };
+    const runtime = createAgentRuntime({ model, workspaceRoots: [], includeExternalBash: false });
+    if (runtime.queries === undefined) throw new Error('runtime query service is not configured');
+    const execution = new RunExecutionCoordinator(runtime.agent, runtime.checkpoints);
+    const server = await startInspectionHttpServer({
+      agent: runtime.agent, events: runtime.eventStreamV2, queries: runtime.queries, execution,
+    });
+    const runId = 'cancel-active-run';
+    try {
+      const started = await fetch(`${server.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runId, message: 'inspect', profileId: 'simulation' }),
+      });
+      expect(started.status).toBe(202);
+      await modelEntered;
+
+      const cancelled = await fetch(`${server.url}/runs/${runId}/cancel`, { method: 'POST' });
+
+      expect(cancelled.status).toBe(202);
+      expect(await cancelled.json()).toMatchObject({ runId, status: 'cancelling' });
+      for (let attempt = 0; attempt < 100 && execution.isActive(runId); attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      const checkpoint = await runtime.checkpoints.load(runId);
+      expect(checkpoint?.status).toBe('cancelled');
+      expect(checkpoint?.failure?.code).toBe('ABORTED');
+      const runEvents = await runtime.eventStoreV2.readRun(runId, 0, 100);
+      const cancelledEvent = runEvents.find((event) => event.type === 'RUN_CANCELLED');
+      expect(cancelledEvent?.payload).toMatchObject({ actor: 'user', reason: 'user_requested_cancel' });
+      expect(runEvents.map((event) => event.type)).not.toContain('RUN_FAILED');
+    } finally {
+      releaseModel?.();
+      await execution.close();
+      await server.close();
+      await runtime.close();
     }
   }, 15_000);
 });

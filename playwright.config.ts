@@ -21,10 +21,10 @@ const webEnv = {
 
 const projects = realMetrics
   ? [
-      { name: 'fixed-tools', testIgnore: /metrics-web\.spec\.ts/ },
+      { name: 'fixed-tools', testIgnore: /(?:metrics|logs)-web\.spec\.ts/ },
       { name: 'real-metrics', testMatch: /metrics-web\.spec\.ts/ },
     ]
-  : [{ name: 'fixed-tools', testIgnore: /metrics-web\.spec\.ts/ }];
+  : [{ name: 'fixed-tools', testIgnore: /(?:metrics|logs)-web\.spec\.ts/ }];
 
 export default defineConfig({
   testDir: './test/e2e',

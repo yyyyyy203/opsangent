@@ -43,6 +43,23 @@ describe('browser API client', () => {
     expect(calls).toBe(1);
   });
 
+  it('posts cancellation to the encoded Run endpoint without a body', async () => {
+    let captured: Request | undefined;
+    const client = new ApiClient({
+      baseUrl: 'http://127.0.0.1:4100',
+      fetchImpl: (input, init) => {
+        captured = new Request(input, init);
+        return Promise.resolve(new Response(JSON.stringify({ runId: 'run/1', status: 'cancelling' }), { status: 202 }));
+      },
+      eventSourceFactory: () => ({ close: () => undefined }),
+    });
+
+    await expect(client.cancelRun('run/1')).resolves.toEqual({ runId: 'run/1', status: 'cancelling' });
+    expect(captured?.url).toBe('http://127.0.0.1:4100/runs/run%2F1/cancel');
+    expect(captured?.method).toBe('POST');
+    expect(captured?.body).toBeNull();
+  });
+
   it('binds the default browser fetch to the global object', async () => {
     const originalFetch = globalThis.fetch;
     let invokedWithGlobal = false;

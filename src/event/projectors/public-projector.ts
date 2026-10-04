@@ -79,6 +79,8 @@ export class PublicEventProjectorV2 {
           stage: event.payload.stage,
           recoverable: event.payload.recoverable,
         });
+      case 'RUN_CANCELLED':
+        return sanitizeRecord({ actor: safeText(event.payload.actor), reason: safeText(event.payload.reason), stage: event.payload.stage });
       case 'STEP_STARTED':
         return sanitizeRecord({ iteration: event.payload.iteration, stage: event.payload.stage, budgetSnapshot: pickNumbers(event.payload.budgetSnapshot) });
       case 'STEP_COMPLETED':

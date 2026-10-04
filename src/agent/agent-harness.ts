@@ -39,6 +39,7 @@ import { legacyRunFinishedPayload } from '../event/v1-payloads.js';
 import { admitToolBatch } from './admit-tool-batch.js';
 import { planPendingBatchRecovery } from './run-recovery.js';
 import { toolInputDigest } from '../tool/schema.js';
+import { USER_RUN_CANCELLATION_REASON } from './types.js';
 import type { DiagnosisAgent, DiagnosisRunResult, ReplyOptions } from './types.js';
 import { createLoopCallSignature, isLoopCallBlocked, recordLoopSample, type LoopIntervention } from './loop-detection/index.js';
 import { readRunUsageSummary } from '../contracts/run-usage.js';
@@ -243,8 +244,20 @@ export class AgentHarness implements DiagnosisAgent {
         stage: context.stage,
         recoverable: failure.retryable,
       };
+      const cancellationPayload = signal.reason === USER_RUN_CANCELLATION_REASON
+        ? { actor: 'user', reason: 'user_requested_cancel' }
+        : { actor: 'runtime', reason: 'run_aborted' };
+      const publishTerminalTransition = (): Promise<void> => signal.aborted
+        ? this.publishTransitionV2(frame, 'RUN_CANCELLED', {
+          ...cancellationPayload,
+          stage: frame.context.stage,
+        })
+        : this.publishTransitionV2(frame, 'RUN_FAILED', {
+          ...failurePayload,
+          stage: frame.context.stage,
+        });
       try {
-        await this.publishTransitionV2(frame, 'RUN_FAILED', failurePayload);
+        await publishTerminalTransition();
       } catch (failureCommitError) {
         if (this.dependencies.durableState === undefined || !(failureCommitError instanceof CheckpointConflictError)) throw failureCommitError;
         const latest = await this.dependencies.durableState.checkpoints.load(context.runId);
@@ -253,18 +266,17 @@ export class AgentHarness implements DiagnosisAgent {
         frame.context.status = signal.aborted ? 'cancelled' : 'failed';
         frame.context.failure = failure;
         frame.checkpointRevision = latest.revision;
-        await this.publishTransitionV2(frame, 'RUN_FAILED', {
-          ...failurePayload,
-          stage: frame.context.stage,
-        });
+        await publishTerminalTransition();
       }
       rootSpan.fail(error);
-      yield* this.publishStream('RUN_FAILED', frame.context, {
-        message: failure.message,
-        code: failure.code,
-        retryable: failure.retryable,
-        ...(failureCategory === undefined ? {} : { category: failureCategory }),
-      });
+      if (!signal.aborted) {
+        yield* this.publishStream('RUN_FAILED', frame.context, {
+          message: failure.message,
+          code: failure.code,
+          retryable: failure.retryable,
+          ...(failureCategory === undefined ? {} : { category: failureCategory }),
+        });
+      }
       frame.naturalExit = true;
       if (error instanceof CheckpointConflictError) throw error;
       return this.result(frame.context, frame.finalText);

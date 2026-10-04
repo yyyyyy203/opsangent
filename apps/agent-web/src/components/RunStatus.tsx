@@ -2,7 +2,7 @@ import type { PublicRunDetail, RunUsageSummary } from '../api/types.js';
 import type { PublicToolActivity } from '../state/run-view.js';
 import type { ReactElement } from 'react';
 
-export function RunStatus({ detail, descendantUsage, subtreeUsage, connected, pending, resumeAvailable, toolActivity, onResume }: { detail: PublicRunDetail | null; descendantUsage: RunUsageSummary | null; subtreeUsage: RunUsageSummary | null; connected: boolean; pending: boolean; resumeAvailable: boolean; toolActivity: PublicToolActivity | null; onResume: () => void }): ReactElement {
+export function RunStatus({ detail, descendantUsage, subtreeUsage, connected, pending, cancelPending, resumeAvailable, toolActivity, onResume, onCancel }: { detail: PublicRunDetail | null; descendantUsage: RunUsageSummary | null; subtreeUsage: RunUsageSummary | null; connected: boolean; pending: boolean; cancelPending: boolean; resumeAvailable: boolean; toolActivity: PublicToolActivity | null; onResume: () => void; onCancel: () => void }): ReactElement {
   return <section className="panel status-panel"><div className="panel-heading"><div><p className="eyebrow">RUN STATUS</p><h2>运行状态</h2></div>{connected && <span className="live-label">LIVE</span>}</div>
     {detail === null ? <div className="list-empty">打开一个 Run 查看状态。</div> : <>
       <div className="status-hero"><span className={`status-dot status-${detail.status}`} /><strong>{statusLabel(detail.status)}</strong><span>{detail.stage}</span></div>
@@ -10,6 +10,7 @@ export function RunStatus({ detail, descendantUsage, subtreeUsage, connected, pe
       <dl className="detail-list"><div><dt>Run ID</dt><dd><code>{detail.runId}</code></dd></div><div><dt>上下文版本</dt><dd>{detail.contextVersion}</dd></div><div><dt>证据数量</dt><dd>{detail.evidenceIds.length}</dd></div></dl>
       <div className="token-usage"><strong>模型用量</strong><dl className="detail-list"><div><dt>本 Run</dt><dd>{formatUsage(detail.usage)}</dd></div><div><dt>子 Run 合计</dt><dd>{descendantUsage === null ? '无子 Run' : formatUsage(descendantUsage)}</dd></div><div><dt>整棵调用链</dt><dd>{formatUsage(subtreeUsage)}</dd></div></dl><small>显示 token 数量，不等同于账单金额；实际费用需结合模型价格和供应商账单核对。</small></div>
       {(resumeAvailable || detail.status === 'paused' || detail.status === 'awaiting_confirmation') && <button className="secondary-button full-width" onClick={onResume} disabled={pending}>{pending ? '恢复中…' : resumeAvailable ? '继续调查' : '显式恢复 Run'}</button>}
+      {detail.status === 'running' && <button className="secondary-button full-width" onClick={onCancel} disabled={cancelPending}>{cancelPending ? '正在取消…' : '取消运行'}</button>}
       {detail.failure !== undefined && <div className="error-block"><strong>{detail.failure.code}</strong><p>{detail.failure.message}</p></div>}
     </>}
   </section>;

@@ -15,7 +15,7 @@ import type {
   StoredRunCheckpoint,
   VersionedCheckpointStore,
 } from '../contracts/index.js';
-import { publicEvidenceFromManifest, publicEvidenceFromRecord } from '../contracts/read-model.js';
+import { publicEvidenceFromManifest, publicEvidenceFromRecord, publicRunMissingEvidence } from '../contracts/read-model.js';
 import { readRunUsageSummary } from '../contracts/run-usage.js';
 import type { AgentContext } from '../contracts/context.js';
 
@@ -134,7 +134,7 @@ function toRunDetail(loaded: LoadedCheckpoint, parentRunId: string | undefined, 
     updatedAt: loaded.updatedAt,
     ...(parentRunId === undefined ? {} : { parentRunId }),
     evidenceIds: [...context.evidenceIds],
-    missingEvidence: context.missingEvidence.map((item) => item.slice(0, 500)),
+    missingEvidence: publicRunMissingEvidence(context),
     childRunIds: [...childRunIds],
     ...(context.failure === undefined ? {} : {
       failure: { code: context.failure.code, message: context.failure.message.slice(0, 500), retryable: context.failure.retryable },

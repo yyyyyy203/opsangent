@@ -35,6 +35,26 @@ function page(...items: PublicMessageItem[]): PublicMessagePage {
 }
 
 describe('browser run view state', () => {
+  it('keeps an accepted cancel pending while the latest Run snapshot is active', async () => {
+    const initial: PublicRunDetail = { ...runDetail('cancel-run', 0), status: 'running' };
+    const client = viewClient(initial);
+    let cancelCalls = 0;
+    client.cancelRun = (runId) => {
+      expect(runId).toBe(initial.runId);
+      cancelCalls += 1;
+      return Promise.resolve({ runId, status: 'cancelling' });
+    };
+    client.getRun = () => Promise.resolve(initial);
+    const controller = new RunViewController(client);
+    try {
+      await controller.openRun(initial.runId);
+      await controller.cancelRun();
+      expect(cancelCalls).toBe(1);
+      expect(controller.getState().detail?.status).toBe('running');
+      expect(controller.getState().pendingCommand).toBe('cancel');
+    } finally { controller.close(); }
+  });
+
   it('keeps successful initial messages when a newer refresh cannot load them', async () => {
     const detail = runDetail('initial-message-race', 10);
     const client = viewClient(detail);
@@ -180,6 +200,7 @@ describe('browser run view state', () => {
       getConfirmation: () => Promise.resolve(null),
       startRun: () => Promise.resolve({ runId: parent.runId, status: 'started', eventsUrl: `/runs/${parent.runId}/events` }),
       resumeRun: () => Promise.resolve({ runId: parent.runId, status: 'resuming', eventsUrl: `/runs/${parent.runId}/events` }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
       openRunEvents: () => ({ close: () => undefined }),
     };
@@ -210,6 +231,7 @@ describe('browser run view state', () => {
       getConfirmation: () => Promise.resolve(null),
       startRun: () => Promise.resolve({ runId: parent.runId, status: 'started', eventsUrl: `/runs/${parent.runId}/events` }),
       resumeRun: () => Promise.resolve({ runId: parent.runId, status: 'resuming', eventsUrl: `/runs/${parent.runId}/events` }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
       openRunEvents: () => ({ close: () => undefined }),
     };
@@ -249,6 +271,7 @@ describe('browser run view state', () => {
       getConfirmation: () => Promise.resolve(null),
       startRun: () => Promise.resolve({ runId: 'run-1', status: 'started', eventsUrl: '/runs/run-1/events' }),
       resumeRun: () => Promise.resolve({ runId: 'run-1', status: 'resuming', eventsUrl: '/runs/run-1/events' }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
       openRunEvents: () => events,
     };
@@ -283,6 +306,7 @@ describe('browser run view state', () => {
       listEvidence: () => Promise.resolve({ items: [] }), getConfirmation: () => Promise.resolve({ runId: 'run-approval', toolCallId: 'call-1', expectedRevision: 2, summary: '确认只读查询' }),
       startRun: () => Promise.resolve({ runId: 'run-approval', status: 'started', eventsUrl: '/runs/run-approval/events' }),
       resumeRun: () => Promise.resolve({ runId: 'run-approval', status: 'resuming', eventsUrl: '/runs/run-approval/events' }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'approved', revision: 3 }),
       openRunEvents: () => ({ close: () => undefined }),
     };
@@ -306,6 +330,7 @@ describe('browser run view state', () => {
       listEvidence: () => Promise.resolve({ items: [] }), getConfirmation: () => Promise.resolve(null),
       startRun: () => Promise.resolve({ runId: 'run-rejection', status: 'started', eventsUrl: '/runs/run-rejection/events' }),
       resumeRun: () => Promise.resolve({ runId: 'run-rejection', status: 'resuming', eventsUrl: '/runs/run-rejection/events' }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 2 }),
       openRunEvents: () => ({ close: () => undefined }),
     };
@@ -331,6 +356,7 @@ describe('browser run view state', () => {
       listEvidence: () => Promise.resolve({ items: [] }), getConfirmation: () => Promise.resolve(null),
       startRun: () => Promise.resolve({ runId: 'run-tool', status: 'started', eventsUrl: '/runs/run-tool/events' }),
       resumeRun: () => Promise.resolve({ runId: 'run-tool', status: 'resuming', eventsUrl: '/runs/run-tool/events' }),
+      cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
       decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
       openRunEvents: (_runId, _lastEventId, onEvent, onError) => { emit = onEvent; fail = onError; return { close: () => undefined }; },
     };
@@ -372,6 +398,7 @@ function viewClient(detail: PublicRunDetail): RunViewClient {
     listEvidence: () => Promise.resolve({ items: [] }), getConfirmation: () => Promise.resolve(null),
     startRun: () => Promise.resolve({ runId: detail.runId, status: 'started', eventsUrl: `/runs/${detail.runId}/events` }),
     resumeRun: () => Promise.resolve({ runId: detail.runId, status: 'resuming', eventsUrl: `/runs/${detail.runId}/events` }),
+    cancelRun: (runId) => Promise.resolve({ runId, status: 'cancelling' }),
     decideConfirmation: () => Promise.resolve({ outcome: 'rejected', revision: 1 }),
     openRunEvents: () => ({ close: () => undefined }),
   };
