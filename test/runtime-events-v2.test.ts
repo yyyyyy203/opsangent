@@ -53,7 +53,7 @@ describe('runtime V2 event wiring', () => {
     expect(events.every((item) => item.runId === result.runId)).toBe(true);
   });
 
-  it('emits one terminal V2 result from the tool pipeline', async () => {
+  it('correlates actual V2 tool start and durable result events', async () => {
     const runtime = createAgentRuntime({
       model: new ScriptedModel([{ toolCalls: [{ id: 'query-1', name: 'metrics.query', input: { service: 'settlement' } }] }, { text: 'done', toolCalls: [] }]),
       workspaceRoots: [],
@@ -61,7 +61,12 @@ describe('runtime V2 event wiring', () => {
     });
     const result = await runtime.agent.reply({ message: 'inspect', profileId: 'group-buy-market' });
     const events = await runtime.eventStoreV2.readRun(result.runId, 0, 200);
-    expect(events.filter((item) => item.type === 'TOOL_RESULT')).toHaveLength(1);
+    const starts = events.filter((item) => item.type === 'TOOL_STARTED');
+    const results = events.filter((item) => item.type === 'TOOL_RESULT');
+    expect(starts).toHaveLength(1);
+    expect(results).toHaveLength(1);
+    expect(starts[0]?.attemptId).toBeDefined();
+    expect(results[0]?.attemptId).toBe(starts[0]?.attemptId);
     expect(events.map((item) => item.type)).toContain('RISK_EVALUATED');
   });
 

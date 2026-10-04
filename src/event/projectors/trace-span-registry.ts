@@ -17,6 +17,8 @@ export interface TraceSpanRegistryOptions {
   readonly maxRememberedSpanKeys?: number;
   readonly maxSeenEventIds?: number;
   readonly maxTerminalRuns?: number;
+  readonly maxRunStreamFences?: number;
+  readonly maxStreamsPerRun?: number;
 }
 
 interface ActiveSpan {
@@ -29,6 +31,14 @@ const DEFAULT_MAX_ACTIVE_SPANS = 1_024;
 const DEFAULT_MAX_REMEMBERED_SPAN_KEYS = 4_096;
 const DEFAULT_MAX_SEEN_EVENT_IDS = 8_192;
 const DEFAULT_MAX_TERMINAL_RUNS = 1_024;
+const DEFAULT_MAX_RUN_STREAM_FENCES = 1_024;
+const DEFAULT_MAX_STREAMS_PER_RUN = 256;
+
+interface RunStreamFence {
+  currentStreamId: string | undefined;
+  retiredStreamId: string | undefined;
+  readonly seenStreamIds: Set<string>;
+}
 
 /** Bounded, vendor-neutral ownership for active spans and lifecycle deduplication. */
 export class TraceSpanRegistry {
@@ -37,11 +47,14 @@ export class TraceSpanRegistry {
   private readonly rememberedSpanKeys = new Map<string, string>();
   private readonly seenEventIds = new Map<string, string>();
   private readonly terminalRuns = new Map<string, true>();
+  private readonly runStreamFences = new Map<string, RunStreamFence>();
   private readonly counts: Partial<Record<TraceDiagnosticCode, number>> = {};
   private readonly maxActiveSpans: number;
   private readonly maxRememberedSpanKeys: number;
   private readonly maxSeenEventIds: number;
   private readonly maxTerminalRuns: number;
+  private readonly maxRunStreamFences: number;
+  private readonly maxStreamsPerRun: number;
   private droppedSpans = 0;
 
   public constructor(
@@ -52,6 +65,8 @@ export class TraceSpanRegistry {
     this.maxRememberedSpanKeys = positiveLimit(options.maxRememberedSpanKeys, DEFAULT_MAX_REMEMBERED_SPAN_KEYS);
     this.maxSeenEventIds = positiveLimit(options.maxSeenEventIds, DEFAULT_MAX_SEEN_EVENT_IDS);
     this.maxTerminalRuns = positiveLimit(options.maxTerminalRuns, DEFAULT_MAX_TERMINAL_RUNS);
+    this.maxRunStreamFences = positiveLimit(options.maxRunStreamFences, DEFAULT_MAX_RUN_STREAM_FENCES);
+    this.maxStreamsPerRun = positiveLimit(options.maxStreamsPerRun, DEFAULT_MAX_STREAMS_PER_RUN);
   }
 
   public rememberEvent(runId: string, eventId: string): boolean {
@@ -71,6 +86,72 @@ export class TraceSpanRegistry {
 
   public isRememberedSpanKey(spanKey: string): boolean {
     return this.rememberedSpanKeys.has(spanKey);
+  }
+
+  public isCurrentExecutionStream(runId: string, streamId: string | undefined): boolean {
+    const fence = this.runStreamFences.get(runId);
+    if (fence === undefined) return true;
+    if (streamId === undefined && fence.seenStreamIds.size > 1) return false;
+    return fence.currentStreamId === (streamId ?? '');
+  }
+
+  /** A resume event identifies its new stream; it must be fresh and follow a retired stream. */
+  public canResumeExecutionStream(runId: string, newStreamId: string | undefined): boolean {
+    const fence = this.runStreamFences.get(runId);
+    if (fence === undefined) return true;
+    const normalizedStreamId = newStreamId ?? '';
+    return fence.currentStreamId === undefined
+      && fence.retiredStreamId !== undefined
+      && fence.retiredStreamId !== normalizedStreamId
+      && !fence.seenStreamIds.has(normalizedStreamId);
+  }
+
+  /** Keeps stream fencing per live Run, outside the cross-Run LRU. */
+  public acceptExecutionStream(runId: string, streamId: string | undefined): boolean {
+    if (this.terminalRuns.has(runId)) return false;
+    const normalizedStreamId = streamId ?? '';
+    let fence = this.runStreamFences.get(runId);
+    if (fence === undefined) {
+      if (this.runStreamFences.size >= this.maxRunStreamFences) {
+        this.recordParentMissing();
+        return false;
+      }
+      fence = {
+        currentStreamId: normalizedStreamId,
+        retiredStreamId: undefined,
+        seenStreamIds: new Set([normalizedStreamId]),
+      };
+      this.runStreamFences.set(runId, fence);
+      return true;
+    }
+    if (fence.seenStreamIds.has(normalizedStreamId)) {
+      if (fence.currentStreamId !== normalizedStreamId) return false;
+      return true;
+    }
+    if (fence.currentStreamId !== undefined || fence.seenStreamIds.size >= this.maxStreamsPerRun) {
+      this.recordParentMissing();
+      return false;
+    }
+    fence.seenStreamIds.add(normalizedStreamId);
+    fence.currentStreamId = normalizedStreamId;
+    fence.retiredStreamId = undefined;
+    return true;
+  }
+
+  public retireExecutionStream(runId: string, streamId: string | undefined): void {
+    const fence = this.runStreamFences.get(runId);
+    if (fence?.currentStreamId === (streamId ?? '')) {
+      fence.currentStreamId = undefined;
+      fence.retiredStreamId = streamId ?? '';
+    }
+  }
+
+  /** Parent pauses retire children even when span creation failed for a child segment. */
+  public retireCurrentExecutionStream(runId: string): void {
+    const fence = this.runStreamFences.get(runId);
+    if (fence?.currentStreamId === undefined) return;
+    fence.retiredStreamId = fence.currentStreamId;
+    fence.currentStreamId = undefined;
   }
 
   public recordParentMissing(): void {
@@ -150,6 +231,7 @@ export class TraceSpanRegistry {
     if (this.terminalRuns.has(runId)) return;
     this.terminalRuns.set(runId, true);
     this.trimOldest(this.terminalRuns, this.maxTerminalRuns);
+    this.runStreamFences.delete(runId);
     this.removeOwnedEntries(this.rememberedSpanKeys, runId);
     this.removeOwnedEntries(this.seenEventIds, runId);
   }

@@ -15,6 +15,8 @@ interface ExecutionSegment {
 
 interface SourceInvocation {
   readonly spanKey: string;
+  readonly baseSpanKey: string;
+  readonly resumeCount: number;
   readonly parentRunId: string;
   readonly childRunId: string;
   readonly toolCallId: string;
@@ -43,12 +45,15 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     try {
       switch (event.type) {
         case 'RUN_STARTED':
+          if (!this.registry.acceptExecutionStream(event.runId, event.streamId)) break;
           this.startExecutionSegment(event, event.streamId, { profile: event.payload.profile });
           break;
         case 'RUN_RESUMED':
-          // newStreamId is authoritative; the envelope may still identify the old stream.
-          this.resumeSourceInvocation(event, event.payload.newStreamId);
-          this.startExecutionSegment(event, event.payload.newStreamId);
+          if (event.streamId !== event.payload.newStreamId
+            || !this.registry.canResumeExecutionStream(event.runId, event.streamId)
+            || !this.registry.acceptExecutionStream(event.runId, event.streamId)) break;
+          this.resumeSourceInvocation(event, event.streamId);
+          this.startExecutionSegment(event, event.streamId);
           break;
         case 'RUN_FINISHED':
           this.finishRun(event, 'completed', {
@@ -114,7 +119,8 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
           const segment = this.ensureExecutionSegment(event.runId, event.streamId);
           if (segment === undefined) break;
           const toolCallId = event.toolCallId ?? event.payload.toolName;
-          const key = toolKey(event.runId, segment.streamId, toolCallId, event.attemptId ?? String(event.payload.attempt));
+          const attemptId = event.attemptId ?? String(event.payload.attempt);
+          const key = toolKey(event.runId, segment.streamId, toolCallId, attemptId);
           const started = this.startSpan({
             name: `tool.${event.payload.toolName}`,
             kind: 'tool',
@@ -126,14 +132,15 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
             event,
             attributes: { source: event.payload.source, attempt: event.payload.attempt },
           });
-          if (started) this.toolKeys.set(toolLookupKey(event.runId, segment.streamId, toolCallId), key);
+          if (started) this.toolKeys.set(toolLookupKey(event.runId, segment.streamId, toolCallId, attemptId), key);
           break;
         }
         case 'TOOL_RESULT': {
           const toolCallId = event.toolCallId ?? event.payload.result.toolCallId;
-          const lookupKey = toolLookupKey(event.runId, event.streamId, toolCallId);
+          const attemptId = event.attemptId ?? '1';
+          const lookupKey = toolLookupKey(event.runId, event.streamId, toolCallId, attemptId);
           const key = this.toolKeys.get(lookupKey)
-            ?? toolKey(event.runId, event.streamId, toolCallId, event.attemptId ?? '1');
+            ?? toolKey(event.runId, event.streamId, toolCallId, attemptId);
           this.registry.end(key, toolResultOutput(event.payload));
           this.toolKeys.delete(lookupKey);
           break;
@@ -141,7 +148,8 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
         case 'TOOL_FAILED': {
           const toolCallId = event.toolCallId;
           if (toolCallId !== undefined) {
-            const lookupKey = toolLookupKey(event.runId, event.streamId, toolCallId);
+            const attemptId = event.attemptId ?? String(event.payload.attempt);
+            const lookupKey = toolLookupKey(event.runId, event.streamId, toolCallId, attemptId);
             const key = this.toolKeys.get(lookupKey);
             if (key !== undefined) this.registry.fail(key, errorSummary(event.payload.error));
             this.toolKeys.delete(lookupKey);
@@ -254,9 +262,10 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     output: Record<string, unknown>,
     failed = false,
   ): void {
-    if (status === 'paused') this.pauseDescendantInvocations(event.runId);
     const current = this.segments.get(event.runId);
+    if (!this.registry.isCurrentExecutionStream(event.runId, event.streamId)) return;
     if (current !== undefined && event.streamId !== undefined && current.streamId !== event.streamId) return;
+    if (status === 'paused') this.pauseDescendantInvocations(event.runId);
     const segment = current ?? this.ensureExecutionSegment(event.runId, event.streamId);
     if (segment !== undefined) {
       this.registry.closeDescendants(segment.spanKey, status);
@@ -265,7 +274,10 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
       if (this.segments.get(event.runId)?.spanKey === segment.spanKey) this.segments.delete(event.runId);
     }
     this.clearAttemptKeys(event.runId);
-    if (status === 'paused') return;
+    if (status === 'paused') {
+      this.registry.retireExecutionStream(event.runId, event.streamId);
+      return;
+    }
 
     this.registry.markRunTerminal(event.runId);
     this.closeDescendantRuns(event.runId, status);
@@ -277,13 +289,15 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     const parentSegment = this.segments.get(parentRunId);
     const parentSpanKey = toolCallId === undefined || parentSegment === undefined
       ? undefined
-      : this.toolKeys.get(toolLookupKey(parentRunId, parentSegment.streamId, toolCallId));
+      : this.findToolSpanKey(parentRunId, parentSegment.streamId, toolCallId, event.attemptId);
     const missingParent = parentSpanKey === undefined || !this.registry.isActive(parentSpanKey);
     if (missingParent) this.registry.recordParentMissing();
     const spanKey = invocationKey(parentRunId, toolCallId ?? 'unknown-tool', childRunId);
     const invocationStreamId = event.streamId ?? parentSegment?.streamId;
     const invocation: SourceInvocation = {
       spanKey,
+      baseSpanKey: spanKey,
+      resumeCount: 0,
       parentRunId,
       childRunId,
       toolCallId: toolCallId ?? 'unknown-tool',
@@ -318,11 +332,12 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     const parentSegment = this.segments.get(prior.parentRunId);
     const activeToolKey = parentSegment === undefined
       ? undefined
-      : this.toolKeys.get(toolLookupKey(prior.parentRunId, parentSegment.streamId, prior.toolCallId));
+      : this.findToolSpanKey(prior.parentRunId, parentSegment.streamId, prior.toolCallId);
     const parentSpanKey = activeToolKey ?? parentSegment?.spanKey;
     const missingParent = parentSpanKey === undefined || !this.registry.isActive(parentSpanKey);
     if (missingParent) this.registry.recordParentMissing();
-    const spanKey = resumedInvocationKey(prior.spanKey, childStreamId);
+    const resumeCount = prior.resumeCount + 1;
+    const spanKey = resumedInvocationKey(prior.baseSpanKey, childStreamId, resumeCount);
     const started = this.startSpan({
       name: `subagent.${prior.subagentType}`,
       kind: 'chain',
@@ -339,7 +354,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
       },
     });
     if (!started) return;
-    this.invocationsByChildRun.set(event.runId, { ...prior, spanKey });
+    this.invocationsByChildRun.set(event.runId, { ...prior, spanKey, resumeCount });
     this.pausedInvocationsByChildRun.delete(event.runId);
   }
 
@@ -354,6 +369,7 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
         this.registry.closeDescendants(invocation.spanKey, 'paused');
         this.registry.end(invocation.spanKey, { status: 'incomplete', terminalStatus: 'paused' });
         this.invocationsByChildRun.delete(childRunId);
+        this.registry.retireCurrentExecutionStream(childRunId);
         this.segments.delete(childRunId);
         this.clearAttemptKeys(childRunId);
         this.rememberPausedInvocation(invocation);
@@ -449,6 +465,21 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
     for (const key of this.modelKeys.keys()) if (key.startsWith(prefix)) this.modelKeys.delete(key);
   }
 
+  private findToolSpanKey(
+    runId: string,
+    streamId: string | undefined,
+    toolCallId: string,
+    attemptId?: string,
+  ): string | undefined {
+    if (attemptId !== undefined) return this.toolKeys.get(toolLookupKey(runId, streamId, toolCallId, attemptId));
+    const prefix = toolLookupPrefix(runId, streamId, toolCallId);
+    let latest: string | undefined;
+    for (const [lookupKey, spanKey] of this.toolKeys) {
+      if (lookupKey.startsWith(prefix)) latest = spanKey;
+    }
+    return latest;
+  }
+
   private startSpan(input: SpanStart & { event?: AgentEventEnvelopeV2 }): boolean {
     this.registry.start({
       name: input.name,
@@ -498,16 +529,20 @@ function invocationKey(parentRunId: string, toolCallId: string, childRunId: stri
   return `source:${parentRunId}:${toolCallId}:${childRunId}`;
 }
 
-function resumedInvocationKey(spanKey: string, streamId: string): string {
-  return `${spanKey}:resume:${streamId}`;
+function resumedInvocationKey(baseSpanKey: string, streamId: string, resumeCount: number): string {
+  return `${baseSpanKey}:resume:${streamId}:${resumeCount}`;
 }
 
 function attemptLookupKey(runId: string, streamId: string | undefined, attemptId: string): string {
   return `${runId}\u0000${streamId ?? ''}\u0000${attemptId}`;
 }
 
-function toolLookupKey(runId: string, streamId: string | undefined, toolCallId: string): string {
-  return `${runId}\u0000${streamId ?? ''}\u0000${toolCallId}`;
+function toolLookupPrefix(runId: string, streamId: string | undefined, toolCallId: string): string {
+  return `${runId}\u0000${streamId ?? ''}\u0000${toolCallId}\u0000`;
+}
+
+function toolLookupKey(runId: string, streamId: string | undefined, toolCallId: string, attemptId: string): string {
+  return `${toolLookupPrefix(runId, streamId, toolCallId)}${attemptId}`;
 }
 
 function errorSummary(error: { code: string; retryable: boolean }): Record<string, unknown> {

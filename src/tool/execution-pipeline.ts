@@ -36,6 +36,7 @@ import {
   legacyToolStartedPayload,
 } from '../event/v1-payloads.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
+import { toolExecutionAttemptId } from '../event/v2/attempt-id.js';
 
 export interface ExecutionPipelineOptions {
   actionMode: 'dry_run' | 'execute';
@@ -86,10 +87,11 @@ export class ToolExecutionPipeline {
     signal: AbortSignal,
     governance?: ToolBatchGovernanceSnapshot,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
+    const attemptId = toolExecutionAttemptId(context.streamId, stepId, call.id);
     let outcome: ExecutionOutcome;
     try {
       if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
-      outcome = yield* this.executeValidatedStream(call, context, stepId, signal, governance);
+      outcome = yield* this.executeValidatedStream(call, context, stepId, signal, attemptId, governance);
     } catch (error) {
       const agentError = toAgentError(error);
       outcome = {
@@ -109,7 +111,7 @@ export class ToolExecutionPipeline {
         result: outcome.result,
         durationMs: durationOf(outcome.result),
         evidenceIds: outcome.result.response?.evidenceIds ?? [],
-      }, stepId, call.id);
+      }, stepId, call.id, attemptId);
     }
     yield* this.emitLegacy(context, 'TOOL_RESULT', outcome.result, stepId);
     return outcome;
@@ -133,6 +135,7 @@ export class ToolExecutionPipeline {
     context: AgentContext,
     stepId: string,
     signal: AbortSignal,
+    attemptId: string,
     governance?: ToolBatchGovernanceSnapshot,
   ): AsyncGenerator<AgentEvent, ExecutionOutcome> {
     const startedAt = this.clock.now().toISOString();
@@ -164,7 +167,7 @@ export class ToolExecutionPipeline {
       findings: risk.findings.map((finding) => ({ ruleId: finding.ruleId, severity: finding.severity, description: finding.description, toolName: finding.toolName })),
       mergedRisk: risk.severity,
       policyVersion: risk.policyVersion ?? 'guard-v1',
-    }, stepId, call.id);
+    }, stepId, call.id, attemptId);
     if (signal.aborted) throw Object.assign(new Error('Run cancelled.'), { code: 'ABORTED', retryable: false });
     if (risk.disposition === 'deny' && this.controlHooks === undefined) {
       return {
@@ -287,7 +290,7 @@ export class ToolExecutionPipeline {
       source: toolSource(tool),
       attempt: 1,
       deadline: new Date(toolContextDeadline(context)).toISOString(),
-    }, stepId, call.id);
+    }, stepId, call.id, attemptId);
     yield* this.emitLegacy(context, 'TOOL_STARTED', legacyToolStartedPayload({
       toolCallId: call.id,
       toolName: tool.name,
@@ -322,13 +325,13 @@ export class ToolExecutionPipeline {
           await this.publishV2('TOOL_OUTPUT_DELTA', context, {
             blockId: `tool-output:${call.id}`,
             textDelta: chunk.delta,
-          }, stepId, call.id);
+          }, stepId, call.id, attemptId);
         }
         if (chunk.type === 'progress') {
           await this.publishV2('TOOL_PROGRESS', context, {
             progress: chunk.percent === undefined ? 0 : Math.max(0, Math.min(1, chunk.percent / 100)),
             displaySummary: chunk.message,
-          }, stepId, call.id);
+          }, stepId, call.id, attemptId);
         }
         const legacyChunk = legacyToolProgressFromChunk(call.id, chunk);
         if (legacyChunk !== null) {
@@ -364,7 +367,7 @@ export class ToolExecutionPipeline {
         : toAgentError(error);
       const result = this.result(call, signal.aborted ? 'aborted' : 'failed', startedAt, undefined, agentError);
       span.fail(agentError);
-      await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id);
+      await this.publishV2('TOOL_FAILED', context, { error: { code: agentError.code, message: agentError.message, retryable: agentError.retryable }, attempt: 1, retryable: agentError.retryable }, stepId, call.id, attemptId);
       return { type: 'completed', result, risk, ...(execution === undefined ? {} : { execution }) };
     } finally {
       if (tool.source === 'subagent') {
@@ -523,7 +526,7 @@ export class ToolExecutionPipeline {
     });
   }
 
-  private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], stepId: string, toolCallId?: string): Promise<void> {
+  private publishV2<T extends keyof AgentEventPayloadMap>(type: T, context: AgentContext, payload: AgentEventPayloadMap[T], stepId: string, toolCallId?: string, attemptId?: string): Promise<void> {
     if (this.v2Events === undefined) return Promise.resolve();
     const pending = this.v2Events.factory.create(type, {
       runId: context.runId,
@@ -534,6 +537,7 @@ export class ToolExecutionPipeline {
       visibility: visibilityForV2Event(type),
       durability: type === 'TOOL_OUTPUT_DELTA' ? 'transient' : 'durable',
       stepId,
+      ...(attemptId === undefined ? {} : { attemptId }),
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
     return this.v2Events.publisher.publish(pending).then(() => undefined);

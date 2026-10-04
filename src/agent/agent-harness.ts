@@ -28,6 +28,7 @@ import type {
   RiskSeverity,
 } from '../contracts/index.js';
 import { visibilityForV2Event } from '../event/v2/visibility.js';
+import { toolExecutionAttemptId } from '../event/v2/attempt-id.js';
 import { CheckpointConflictError, checkpointChecksum, createInitialRunGovernanceState, toAgentError } from '../contracts/index.js';
 import type { CompressionResult, ContextCompressor } from '../context-compressor/types.js';
 import type { EventBus } from '../event/event-bus.js';
@@ -1274,9 +1275,12 @@ export class AgentHarness implements DiagnosisAgent {
   ): Promise<void> {
     const durable = this.dependencies.durableState;
     const v2 = this.dependencies.v2Events;
+    const attemptId = type === 'TOOL_RESULT' && stepId !== undefined && toolCallId !== undefined
+      ? toolExecutionAttemptId(frame.context.streamId, stepId, toolCallId)
+      : undefined;
     if (durable === undefined) {
       if (v2 !== undefined) {
-        await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId));
+        await v2.publisher.publish(this.createPendingV2(type, frame.context, payload, stepId, toolCallId, attemptId));
         for (const event of additionalEvents) await v2.publisher.publish(event);
       }
       return;
@@ -1284,7 +1288,7 @@ export class AgentHarness implements DiagnosisAgent {
 
     const pending = v2 === undefined
       ? undefined
-      : this.createPendingV2(type, frame.context, payload, stepId, toolCallId);
+      : this.createPendingV2(type, frame.context, payload, stepId, toolCallId, attemptId);
     const dispatcher = v2?.dispatcher;
     if (pending !== undefined && dispatcher === undefined) {
       throw new Error(`Durable V2 event dispatcher is not configured: ${type}`);
@@ -1327,6 +1331,7 @@ export class AgentHarness implements DiagnosisAgent {
     payload: AgentEventPayloadMap[T],
     stepId?: string,
     toolCallId?: string,
+    attemptId?: string,
   ): PendingAgentEventV2<T> {
     const v2 = this.dependencies.v2Events;
     if (v2 === undefined) throw new Error(`V2 event dependencies are not configured: ${type}`);
@@ -1339,6 +1344,7 @@ export class AgentHarness implements DiagnosisAgent {
       visibility: visibilityForV2Event(type),
       durability: 'durable',
       ...(stepId === undefined ? {} : { stepId }),
+      ...(attemptId === undefined ? {} : { attemptId }),
       ...(toolCallId === undefined ? {} : { toolCallId }),
     }, payload);
   }
