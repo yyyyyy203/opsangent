@@ -13,22 +13,39 @@ import { ScriptedModel } from '../src/model/scripted-model.js';
 import { ResilientExecutor, SourceCircuitBreaker } from '../src/mcp/resilience.js';
 import type { SourceChildAgentFactory } from '../src/application/source-subagent-runner.js';
 
-/** Opt-in: requires the repository's dedicated Compose service on loopback port 19090. */
+/**
+ * Opt-in: requires a dedicated loopback Prometheus lab scraping this test's exporter.
+ * Defaults: http://127.0.0.1:19090 and host.docker.internal:19108. Test-only overrides
+ * AGENTOPS_REAL_PROMETHEUS_URL and AGENTOPS_REAL_PROMETHEUS_EXPORTER_PORT must match
+ * that lab's dedicated scrape target (e.g. agentops-logs uses 19290 and 19208).
+ */
 describe.skipIf(process.env.AGENTOPS_REAL_PROMETHEUS !== '1')('real Prometheus acceptance', () => {
   it('runs all simulator cases through real Prometheus, MCP HTTP and Metrics Subagent', async () => {
+    const configuration = readRealPrometheusTestConfiguration();
     const simulator = new SettlementSimulator();
-    const server = await startSimulatorMetricsServer(simulator, { host: '0.0.0.0', port: 19108 });
-    const source = new PrometheusSettlementSource({ url: 'http://127.0.0.1:19090' });
+    const server = await startSimulatorMetricsServer(simulator, { host: '0.0.0.0', port: configuration.exporterPort });
+    const source = new PrometheusSettlementSource({ url: configuration.url });
     const cases: readonly {
       scenario: SettlementScenario;
       total: number;
       failed: number;
+      failureRate: number;
       status: 'healthy' | 'breached' | 'insufficient_data';
-      rate: string;
+      ratePhrase: string;
+      diagnosis: string;
     }[] = [
-      { scenario: 'settlement_failure', total: 100, failed: 15, status: 'breached', rate: '15.00%' },
-      { scenario: 'normal', total: 100, failed: 0, status: 'healthy', rate: '0.00%' },
-      { scenario: 'low_sample', total: 10, failed: 8, status: 'insufficient_data', rate: '80.00%' },
+      {
+        scenario: 'settlement_failure', total: 100, failed: 15, failureRate: 0.15, status: 'breached',
+        ratePhrase: '失败率 15.00%', diagnosis: '结算指标异常',
+      },
+      {
+        scenario: 'normal', total: 100, failed: 0, failureRate: 0, status: 'healthy',
+        ratePhrase: '失败率 0.00%', diagnosis: '结算指标正常',
+      },
+      {
+        scenario: 'low_sample', total: 10, failed: 8, failureRate: 0.8, status: 'insufficient_data',
+        ratePhrase: '观测失败率为 80.00%', diagnosis: '结算指标样本不足',
+      },
     ];
     const signal = AbortSignal.timeout(45000);
     let mcp: Awaited<ReturnType<typeof startSettlementMcpServer>> | undefined;
@@ -127,7 +144,9 @@ describe.skipIf(process.env.AGENTOPS_REAL_PROMETHEUS !== '1')('real Prometheus a
             missingEvidence: [],
             coverage: 1,
           });
-          expect(resultBlock.value.summary).toContain(`失败率 ${fixture.rate}`);
+          expect(resultBlock.value.summary).toContain(fixture.ratePhrase);
+          expect(resultBlock.value.summary).toContain(fixture.diagnosis);
+          expect(resultBlock.value.status).toBe('complete');
           expect(JSON.stringify(resultBlock.value)).not.toContain('99%');
           expect(JSON.stringify(resultBlock.value)).not.toContain('数据库是根因');
           expect(JSON.stringify(resultBlock.value)).not.toContain('raw-only-marker');
@@ -135,13 +154,22 @@ describe.skipIf(process.env.AGENTOPS_REAL_PROMETHEUS !== '1')('real Prometheus a
           const finding: unknown = Array.isArray(resultBlock.value.findings)
             ? (resultBlock.value.findings as unknown[])[0] : undefined;
           expect(finding).toMatchObject({ kind: 'observation', evidenceIds: [currentEvidenceId] });
-          expect(JSON.stringify(finding)).toContain(`失败率 ${fixture.rate}`);
+          if (finding === undefined || !isRecord(finding) || typeof finding.statement !== 'string') {
+            throw new Error('deterministic metric finding missing');
+          }
+          expect(finding.statement).toContain(fixture.ratePhrase);
+          expect(finding.statement).toContain(fixture.diagnosis);
           expect(JSON.stringify(finding)).not.toContain('raw-only-marker');
 
           const storedEvidence = await evidence.get(currentEvidenceId);
           if (storedEvidence === null) throw new Error('stored metric evidence missing');
           expect(storedEvidence.source).toBe('metric');
-          expect(storedEvidence.summary).toMatchObject({ status: fixture.status, total: fixture.total, failed: fixture.failed });
+          expect(storedEvidence.summary).toMatchObject({
+            status: fixture.status,
+            total: fixture.total,
+            failed: fixture.failed,
+            failureRate: fixture.failureRate,
+          });
           expect(storedEvidence.raw).toBeDefined();
           const rawSerialized = JSON.stringify(storedEvidence?.raw) ?? '';
           expect(rawSerialized).toContain('settlement_window_requests');
@@ -174,6 +202,27 @@ describe.skipIf(process.env.AGENTOPS_REAL_PROMETHEUS !== '1')('real Prometheus a
     }
   }, 50000);
 });
+
+function readRealPrometheusTestConfiguration(): { url: string; exporterPort: number } {
+  const configuredPort = process.env.AGENTOPS_REAL_PROMETHEUS_EXPORTER_PORT ?? '19108';
+  const exporterPort = Number(configuredPort);
+  if (!/^\d{1,5}$/u.test(configuredPort) || !Number.isSafeInteger(exporterPort) || exporterPort < 1 || exporterPort > 65535) {
+    throw new Error('Invalid test configuration: AGENTOPS_REAL_PROMETHEUS_EXPORTER_PORT must be an integer from 1 to 65535.');
+  }
+
+  const invalidUrl = 'Invalid test configuration: AGENTOPS_REAL_PROMETHEUS_URL must be an HTTP loopback origin without credentials, path, query or fragment.';
+  let url: URL;
+  try {
+    url = new URL(process.env.AGENTOPS_REAL_PROMETHEUS_URL ?? 'http://127.0.0.1:19090');
+  } catch {
+    throw new Error(invalidUrl);
+  }
+  if (url.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)
+    || url.username || url.password || url.pathname !== '/' || url.search || url.hash || url.port === '0') {
+    throw new Error(invalidUrl);
+  }
+  return { url: url.origin, exporterPort };
+}
 
 async function waitForRealSnapshot(
   source: PrometheusSettlementSource,

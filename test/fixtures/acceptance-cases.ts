@@ -237,9 +237,10 @@ function buildEvidence(
   metricsChildRunId: string,
   logsChildRunId: string,
 ): PublicEvidenceView[] {
+  const metricFact = buildMetricFact(caseId);
   const evidence: PublicEvidenceView[] = [{
     evidenceId: `metric-evidence-${caseId}`, runId: metricsChildRunId, source: 'metric', state: 'committed',
-    capturedAt: windowEnd, summary: { status: metricByCase[caseId].failed === 0 ? 'healthy' : 'breached' },
+    capturedAt: windowEnd, summary: { ...metricFact, missingEvidence: ['logs', 'traces'] },
     coverage: 1, timeRange: { start: windowStart, end: windowEnd }, rawSha256: 'f'.repeat(64),
     traceIdCount: 0, retrievable: false,
   }];
@@ -247,7 +248,9 @@ function buildEvidence(
     const mismatch = caseId === 'capture_window_mismatch';
     evidence.push({
       evidenceId: `log-evidence-${caseId}`, runId: logsChildRunId, source: 'log', state: mismatch ? 'partial' : 'committed',
-      capturedAt: windowEnd, summary: { recordCount: 30 }, coverage: 1,
+      capturedAt: windowEnd, summary: {
+        recordCount: 30, sourceBytes: 4096, storedBytes: 1024, coverage: 1, truncated: false, missingEvidence: [],
+      }, coverage: 1,
       timeRange: mismatch
         ? { start: '2026-10-04T11:50:00.000Z', end: '2026-10-04T11:55:00.000Z' }
         : { start: windowStart, end: windowEnd },

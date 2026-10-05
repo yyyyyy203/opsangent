@@ -3,7 +3,7 @@ import type { AgentEventEnvelopeV2, AgentEventPayloadMap, AgentEventTypeV2, Publ
 import type { TraceLink } from '../src/bootstrap/langsmith.js';
 import type { AcceptanceSnapshot } from '../src/acceptance/types.js';
 import { describe, expect, it } from 'vitest';
-import { verifyLangSmithTrace } from '../src/acceptance/langsmith-verifier.js';
+import { isSafeLangSmithRunPayload, verifyLangSmithTrace } from '../src/acceptance/langsmith-verifier.js';
 
 const PARENT_RUN_ID = 'acceptance-parent';
 const CHILD_RUN_ID = 'acceptance-metrics-child';
@@ -16,6 +16,19 @@ const MODEL_REMOTE_ID = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const EXPECTED_USAGE = { inputTokens: 12, outputTokens: 5 };
 const EVENT_TIME = '2026-10-04T12:00:00.000Z';
 
+describe('LangSmith remote payload privacy', () => {
+  it('rejects credential-shaped strings even inside allowlisted metadata fields', () => {
+    expect(isSafeLangSmithRunPayload({
+      id: 'remote-run',
+      name: 'agent.run',
+      run_type: 'chain',
+      inputs: { profile: 'simulation' },
+      outputs: { status: 'completed' },
+      extra: { metadata: { provider: 'sk-SYNTHETIC_ACCESS_KEY_CANARY_LONG' } },
+    })).toBe(false);
+  });
+});
+
 interface RemoteRun {
   readonly id: string;
   readonly trace_id: string;
@@ -25,8 +38,9 @@ interface RemoteRun {
   readonly end_time?: string | number;
   readonly status?: string;
   readonly error?: string | null;
+  readonly inputs?: Record<string, unknown>;
   readonly outputs?: Record<string, unknown>;
-  readonly extra?: { readonly metadata?: Record<string, unknown> };
+  readonly extra?: Record<string, unknown>;
 }
 
 interface QueryParams { readonly id?: readonly string[]; readonly limit?: number; readonly select?: readonly string[] }
@@ -241,6 +255,48 @@ describe('verifyLangSmithTrace', () => {
     const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
 
     expect(result).toEqual({ status: 'verified', checkedSpanCount: fixture.links.length });
+  });
+
+  it('fails closed when linked remote payloads contain fields outside the telemetry allowlist', async () => {
+    const attacks: readonly { label: string; mutate: (run: RemoteRun) => RemoteRun }[] = [
+      {
+        label: 'model inputs',
+        mutate: (run) => ({ ...run, inputs: { question: 'PRIVATE_PROMPT_CANARY' } }),
+      },
+      {
+        label: 'run outputs',
+        mutate: (run) => ({ ...run, outputs: { ...run.outputs, rawLog: 'PRIVATE_RAW_LOG_CANARY' } }),
+      },
+      {
+        label: 'run metadata',
+        mutate: (run) => ({ ...run, extra: { metadata: { rawLog: 'PRIVATE_METADATA_CANARY' } } }),
+      },
+      {
+        label: 'unreviewed runtime fields',
+        mutate: (run) => ({
+          ...run,
+          extra: { metadata: run.extra?.metadata, runtime: { systemPrompt: 'PRIVATE_RUNTIME_CANARY', storagePath: 'D:\\agentops\\private\\db.sqlite' } },
+        }),
+      },
+      {
+        label: 'unknown top-level SDK fields',
+        mutate: (run) => ({ ...run, privateStorePath: 'D:\\agentops\\private\\db.sqlite' } as unknown as RemoteRun),
+      },
+    ];
+
+    for (const attack of attacks) {
+      const fixture = createFixture();
+      const targetRunId = attack.label === 'model inputs' ? MODEL_REMOTE_ID : PARENT_REMOTE_ID;
+      const remoteRuns = fixture.remoteRuns.map((run) => run.id === targetRunId ? attack.mutate(run) : run);
+      const client = createFakeClient([remoteRuns]);
+
+      const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
+
+      expect(result.status, attack.label).toBe('failed');
+      expect(JSON.stringify(result)).not.toMatch(/PRIVATE_.*_CANARY/u);
+      expect(client.requests[0]?.select).toContain('inputs');
+      expect(client.requests[0]?.select).toContain('extra');
+    }
   });
 
   it('returns unavailable rather than inventing usage when a canonical local attempt lacks tokens', async () => {

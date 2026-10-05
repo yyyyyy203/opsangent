@@ -8,7 +8,7 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: { allowDefaultProject: ['apps/metrics-lab/*.mjs', 'apps/agent-server/*.mjs', 'apps/acceptance/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts', 'playwright.logs.config.ts', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'] },
+        projectService: { allowDefaultProject: ['apps/agent-server/*.mjs', 'apps/acceptance/*.mjs', 'apps/agent-web/vite.config.ts', 'playwright.config.ts', 'playwright.logs.config.ts', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'] },
         tsconfigRootDir: import.meta.dirname,
       },
     },
@@ -19,9 +19,9 @@ export default tseslint.config(
     },
   },
   {
-    // The Node fixture is JavaScript (like the existing E2E fixture scripts),
-    // so check its syntax/basic rules without treating unannotated JS as `any` TS.
-    files: ['apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
+    // These are JavaScript entry points; check basic rules without treating
+    // unannotated JavaScript as typed TypeScript that requires generated `dist`.
+    files: ['apps/metrics-lab/*.mjs', 'apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,
       globals: { process: 'readonly', fetch: 'readonly', Buffer: 'readonly', AbortSignal: 'readonly', Request: 'readonly', URL: 'readonly' },

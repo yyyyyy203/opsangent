@@ -28,6 +28,8 @@
 
 最新已实现能力与检查结果见 [实现进度](./implementation-status.md)。
 
+2026-10-05 本机 Prometheus、Elasticsearch 测试后端和浏览器验收的范围、结果与生产边界见[本轮验收记录](./verification/2026-10-05-local-acceptance-closeout.md)。
+
 个人开发环境的一次性真实模型/LangSmith 验收入口及人工复核操作见 [真实模型与 LangSmith 联合验收指南](./guides/real-model-langsmith-acceptance.md)。指南只描述受限烟测机制，不代表已经执行线上验收。
 
 V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./documentation-audit-v2.md)。
@@ -35,7 +37,7 @@ V2 分支文档与代码的一致性审计见 [V2 文档审计记录](./document
 ## 文档状态
 
 - 决策状态：已由项目负责人确认，可用于拆分实施计划。
-- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地。Task 7 的一次性真实模型 CLI 与本地人工复核 CLI 已提供；具体在线模型、实验后端和 LangSmith 远端验收仍须按指南由用户显式运行并人工确认。真实数据源的完整 Subagent、生产 Registry、前端和完整运行时生命周期仍按实现进度推进。
+- 当前代码状态：Event/Message V2 协议、AsyncGenerator 模型/工具事件链、OpenAI-compatible 本地流式适配器、内存/SQLite 存储、公共/V1/Audit/LangSmith 投影、暂停恢复和 Node HTTP/SSE 入口已落地。本机 Prometheus → MCP → Metrics Subagent（1/1）及 Elasticsearch/Prometheus Logs Web 测试后端浏览器验收（3/3）已通过，但使用的是模拟/验收数据，不等于目标业务或生产观测栈验收。Task 7 的一次性真实模型 CLI 与本地人工复核 CLI 已提供；在线模型、LangSmith 远端查询、生产数据源、托管 CI 和真实动作仍未闭环，详见[实现进度](./implementation-status.md)及[本轮验收记录](./verification/2026-10-05-local-acceptance-closeout.md)。
 - 代码来源：本项目独立实现。Newton 仅用于机制参考；不得把未获授权的公司源码复制到本仓库。
 - 第一阶段：只读诊断和模拟验证，不接入真实写动作，也不读取业务仓库代码。
 

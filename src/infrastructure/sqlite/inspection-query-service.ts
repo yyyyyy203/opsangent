@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type {
   EvidenceManifestQueryStore,
   EventStore,
@@ -18,6 +19,7 @@ import type { SqliteDatabase } from './database.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
+const evidenceTimestamp = z.string().datetime({ offset: true });
 
 interface RunRow {
   run_id: string;
@@ -101,6 +103,29 @@ export class SqliteInspectionQueryService implements InspectionQueryService {
     const limit = pageLimit(options.limit);
     const cursor = options.cursor === undefined ? undefined : decodeEvidenceCursor(options.cursor);
     if (cursor !== undefined && cursor.runId !== runId) throw new Error('evidence cursor does not belong to this Run');
+    const sourceRunIds = [runId, ...this.findRelation(runId).childRunIds];
+    const pages = await Promise.all(sourceRunIds.map((sourceRunId) => this.listEvidenceForRun(sourceRunId, {
+      limit,
+      ...(cursor === undefined ? {} : {
+        cursor: encodeEvidenceCursor(sourceRunId, cursor.capturedAt, cursor.evidenceId),
+      }),
+    })));
+    const merged = pages.flatMap((page) => page.items).sort(compareEvidence);
+    const items = merged.slice(0, limit);
+    const last = items.at(-1);
+    const hasMore = merged.length > limit || pages.some((page) => page.nextCursor !== undefined);
+    return { items, ...(hasMore && last !== undefined
+      ? { nextCursor: encodeEvidenceCursor(runId, last.capturedAt, last.evidenceId) }
+      : {}) };
+  }
+
+  private async listEvidenceForRun(
+    runId: string,
+    options: { cursor?: string; limit: number },
+  ): Promise<PublicEvidencePage> {
+    const limit = options.limit;
+    const cursor = options.cursor === undefined ? undefined : decodeEvidenceCursor(options.cursor);
+    if (cursor !== undefined && cursor.runId !== runId) throw new Error('evidence cursor does not belong to this Run');
     const rows = cursor === undefined
       ? this.database.raw.prepare(`
         SELECT evidence_id, run_id, source, captured_at, summary_json, raw_sha256, business_trace_ids_json, schema_version
@@ -121,7 +146,9 @@ export class SqliteInspectionQueryService implements InspectionQueryService {
     const items = merged.slice(0, limit);
     const last = items.at(-1);
     const hasMore = merged.length > limit || rows.length > limit || manifestPage.nextCursor !== undefined;
-    return { items, ...(hasMore && last !== undefined ? { nextCursor: encodeEvidenceCursor(last) } : {}) };
+    return { items, ...(hasMore && last !== undefined
+      ? { nextCursor: encodeEvidenceCursor(runId, last.capturedAt, last.evidenceId) }
+      : {}) };
   }
 
   public async getEvidence(runId: string, evidenceId: string): Promise<PublicEvidenceView | null> {
@@ -129,9 +156,13 @@ export class SqliteInspectionQueryService implements InspectionQueryService {
       SELECT evidence_id, run_id, source, captured_at, summary_json, raw_sha256, business_trace_ids_json, schema_version
       FROM evidence_records WHERE evidence_id = ?
     `).get(evidenceId) as InlineEvidenceRow | undefined;
-    if (row !== undefined) return row.run_id === runId ? toPublicInlineEvidence(row) : null;
+    if (row !== undefined) return this.isEvidenceRunInTree(runId, row.run_id) ? toPublicInlineEvidence(row) : null;
     const manifest = await this.manifests.getVisible(evidenceId);
-    return manifest === null || manifest.runId !== runId ? null : publicEvidenceFromManifest(manifest);
+    return manifest === null || !this.isEvidenceRunInTree(runId, manifest.runId) ? null : publicEvidenceFromManifest(manifest);
+  }
+
+  private isEvidenceRunInTree(runId: string, evidenceRunId: string): boolean {
+    return runId === evidenceRunId || this.findRelation(runId).childRunIds.includes(evidenceRunId);
   }
 
   private findRelation(runId: string): { parentRunId?: string; childRunIds: string[] } {
@@ -194,7 +225,9 @@ function toPublicInlineEvidence(row: InlineEvidenceRow): PublicEvidenceView {
 }
 
 function compareEvidence(left: PublicEvidenceView, right: PublicEvidenceView): number {
-  return left.capturedAt.localeCompare(right.capturedAt) || left.evidenceId.localeCompare(right.evidenceId);
+  // Match SQLite BINARY seek ordering, including non-ASCII evidence IDs.
+  return Buffer.compare(Buffer.from(left.capturedAt, 'utf8'), Buffer.from(right.capturedAt, 'utf8'))
+    || Buffer.compare(Buffer.from(left.evidenceId, 'utf8'), Buffer.from(right.evidenceId, 'utf8'));
 }
 
 function pageLimit(value: number | undefined): number {
@@ -216,13 +249,15 @@ function decodeRunCursor(value: string): RunCursor {
   return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}) };
 }
 
-function encodeEvidenceCursor(item: PublicEvidenceView): string {
-  return Buffer.from(JSON.stringify({ runId: item.runId, capturedAt: item.capturedAt, evidenceId: item.evidenceId }), 'utf8').toString('base64url');
+function encodeEvidenceCursor(runId: string, capturedAt: string, evidenceId: string): string {
+  return Buffer.from(JSON.stringify({ runId, capturedAt, evidenceId }), 'utf8').toString('base64url');
 }
 
 function decodeEvidenceCursor(value: string): EvidenceCursor {
   const parsed = decode(value);
-  if (!isRecord(parsed) || typeof parsed.runId !== 'string' || typeof parsed.capturedAt !== 'string' || typeof parsed.evidenceId !== 'string') throw new Error('evidence cursor is invalid');
+  if (!isRecord(parsed) || typeof parsed.runId !== 'string' || parsed.runId.length === 0
+    || typeof parsed.capturedAt !== 'string' || !evidenceTimestamp.safeParse(parsed.capturedAt).success
+    || typeof parsed.evidenceId !== 'string' || parsed.evidenceId.length === 0) throw new Error('evidence cursor is invalid');
   return parsed as unknown as EvidenceCursor;
 }
 

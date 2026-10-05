@@ -283,6 +283,143 @@ describe('durable Harness recovery', () => {
       await runtime.close();
     }
   });
+
+  it('does not merge evidence from a callback whose tool identity does not match', async () => {
+    const call: ToolCall = { id: 'identity-call', name: 'metrics.identity', input: { service: 'settlement' } };
+    const context = checkpointContext('run-identity', [call]);
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      clock,
+      tools: [evidenceTool(call.name, 'replay_safe', () => undefined)],
+    });
+
+    try {
+      const forged = {
+        ...resultFor(call, 'success'),
+        toolName: 'metrics.other',
+        response: { blocks: [], evidenceIds: ['unaccepted-evidence'] },
+      };
+      const frame = { context, finalText: '', naturalExit: false, lifecycleEffects: new Map() };
+      const persister = runtime.agent as unknown as {
+        persistCompletedOutcome(frame: unknown, toolCall: ToolCall, result: ToolExecutionResult): Promise<boolean>;
+      };
+
+      await expect(persister.persistCompletedOutcome(frame, call, forged)).rejects.toThrow(
+        'Batch callback result does not match call: identity-call',
+      );
+      expect(context.evidenceIds).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('keeps parent and child execution budget ledgers shared after a durable result commit', async () => {
+    const call: ToolCall = { id: 'shared-budget-call', name: 'metrics.shared-budget', input: { service: 'settlement' } };
+    const context = checkpointContext('run-shared-budget', [call]);
+    const toolCallBudget = { remaining: 3 };
+    const networkAttemptBudget = { remaining: 7 };
+    context.toolCallBudget = toolCallBudget;
+    context.networkAttemptBudget = networkAttemptBudget;
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      clock,
+      tools: [evidenceTool(call.name, 'replay_safe', () => undefined)],
+    });
+
+    try {
+      const durable = runtime.durableState;
+      if (durable === undefined) throw new Error('Expected durable state for shared budget test.');
+      const saved = await durable.checkpoints.save(context, null);
+      const originalCommit = durable.transitions.commit.bind(durable.transitions);
+      durable.transitions.commit = async (input) => {
+        const committed = await originalCommit(input);
+        // Model sibling/child work consuming the shared budgets while this
+        // result transition is already committing its earlier snapshot.
+        toolCallBudget.remaining = 0;
+        networkAttemptBudget.remaining = 0;
+        return committed;
+      };
+      const frame = { context, checkpointRevision: saved.revision, finalText: '', naturalExit: false, lifecycleEffects: new Map() };
+      const persister = runtime.agent as unknown as {
+        persistCompletedOutcome(frame: unknown, toolCall: ToolCall, result: ToolExecutionResult): Promise<boolean>;
+      };
+
+      await persister.persistCompletedOutcome(frame, call, resultFor(call, 'success'));
+
+      expect(frame.context.toolCallBudget).toBe(toolCallBudget);
+      expect(frame.context.networkAttemptBudget).toBe(networkAttemptBudget);
+      expect(frame.context.toolCallBudget?.remaining).toBe(0);
+      expect(frame.context.networkAttemptBudget?.remaining).toBe(0);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not merge evidence from an unjournaled callback whose tool name does not match its pending call', async () => {
+    const call: ToolCall = { id: 'unjournaled-identity-call', name: 'metrics.identity', input: { service: 'settlement' } };
+    const context = checkpointContext('run-unjournaled-identity', [call]);
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      clock,
+      tools: [evidenceTool(call.name, 'replay_safe', () => undefined)],
+    });
+
+    try {
+      const forged = {
+        ...resultFor(call, 'success'),
+        toolName: 'metrics.other',
+        response: { blocks: [], evidenceIds: ['unaccepted-evidence'] },
+      };
+      const frame = { context, finalText: '', naturalExit: false, lifecycleEffects: new Map() };
+      const persister = runtime.agent as unknown as {
+        persistUnjournaledResult(frame: unknown, result: ToolExecutionResult): Promise<void>;
+      };
+
+      await expect(persister.persistUnjournaledResult(frame, forged)).rejects.toThrow(
+        'Batch callback result does not match call: unjournaled-identity-call',
+      );
+      expect(context.evidenceIds).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  it('does not merge evidence from a conflicting duplicate result', async () => {
+    const call: ToolCall = { id: 'conflict-call', name: 'metrics.conflict', input: { service: 'settlement' } };
+    const context = checkpointContext('run-conflict', [call]);
+    context.pendingToolBatch!.completedResults.push(resultFor(call, 'success'));
+    const runtime = createAgentRuntime({
+      model: new ScriptedModel([{ text: 'unused', toolCalls: [] }]),
+      workspaceRoots: [],
+      includeExternalBash: false,
+      clock,
+      tools: [evidenceTool(call.name, 'replay_safe', () => undefined)],
+    });
+
+    try {
+      const conflicting = {
+        ...resultFor(call, 'success'),
+        response: { blocks: [{ type: 'text' as const, text: 'different result' }], evidenceIds: ['unaccepted-evidence'] },
+      };
+      const frame = { context, finalText: '', naturalExit: false, lifecycleEffects: new Map() };
+      const persister = runtime.agent as unknown as {
+        persistCompletedOutcome(frame: unknown, toolCall: ToolCall, result: ToolExecutionResult): Promise<boolean>;
+      };
+
+      await expect(persister.persistCompletedOutcome(frame, call, conflicting)).rejects.toThrow(
+        'Tool result conflicts with pending batch: conflict-call',
+      );
+      expect(context.evidenceIds).toEqual([]);
+    } finally {
+      await runtime.close();
+    }
+  });
 });
 
 function checkpointContext(runId: string, calls: ToolCall[]): AgentContext {

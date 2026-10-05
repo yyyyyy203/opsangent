@@ -1,5 +1,13 @@
 # 实现进度与验证记录
 
+## 最新增量：本机真实后端验收与审查缺口收口
+
+2026-10-05：完成本轮实现审查和验收修复。Run/Evidence keyset 分页在 SQLite 与内存实现中统一使用 UTF-8/BINARY 顺序并严格校验游标；公共消息分页按实际 `{ message, version, truncated }` 包络及目标 `runId` 校验；Evidence 列表/详情和分页包络按 `PublicEvidenceView` 白名单校验，metric/log 摘要分别使用来源专属 Schema，未知字段（包括嵌套 `content`、`samples`）均 fail-closed。Evidence 列表项与本地接受快照、详情响应与列表项/本地快照均做完整字段结构化比较，保证 `state`、时间窗、哈希和计数等完整性元数据一致；尚未实现的 trace/change 摘要形状拒绝通过。SSE 中所有事件 payload 均执行对应严格 Schema 校验。LangSmith 远端 Run payload、公共事件/消息边界统一检查敏感值、字段名、凭据、私有路径、内部地址和 `file://` URI；`run_type` 必须是明确字符串类型，符合边界规则的 Unicode session name 可被接受。Durable Harness 结果切换保留共享 Tool/网络尝试预算账本，避免并行子执行中的消耗被旧快照回滚。
+
+最终质量门在与正式工作树逐文件一致的隔离快照中通过：`pnpm lint`、`pnpm typecheck`、`pnpm test`（145 个测试文件通过、3 个 opt-in 文件跳过；942 项通过、7 项跳过）、`pnpm build`、`pnpm web:typecheck`、`pnpm web:build`。默认浏览器 E2E 为 4/4 通过。独立本机后端验收：真实 Prometheus 抓取 → MCP HTTP → Metrics Subagent 为 1/1 通过，并对三个场景分别断言失败率及正常/异常/样本不足结论；本机 Elasticsearch + Prometheus 测试栈上的 Logs Web Playwright 验收为 3/3 通过，覆盖有界取证、重连/重启不重放、日志源离线时保留 Metrics 降级结果以及取消/Checkpoint。最终全量测试计数见[本轮验收记录](./verification/2026-10-05-local-acceptance-closeout.md)。
+
+上述后端使用本机模拟/验收数据，不是 `D:\xfg\group-buy-market` 业务数据或生产 ELK/Prometheus。Evidence 页面继续只展示摘要和引用，不开放原始数据正文。由于模型和 LangSmith 凭据当前未配置，本轮没有发起付费模型请求或 LangSmith 远端查询；托管 CI 和生产数据接入也未验收。因此这次闭环证明的是本机测试后端及端到端软件链路，不代表真实生产数据或在线模型质量验收。可复现范围见[本轮验收记录](./verification/2026-10-05-local-acceptance-closeout.md)。
+
 ## 最新增量：Task 7 本地验收 CLI 与人工复核入口
 
 2026-10-05：新增 opt-in `acceptance:real-model` 命令。必须显式设置 `AGENTOPS_REAL_MODEL_SMOKE=1`；未授权时在加载运行器前返回固定 `PRECHECK_SMOKE_NOT_ENABLED`，并声明模型请求数为 0、未创建父 Run。命令只从本地服务端环境读取凭证，使用有界模型预算和本地模拟 Logs Lab，安全报告只保留确定性检查、预算/usage、LangSmith 状态与关联 ID。

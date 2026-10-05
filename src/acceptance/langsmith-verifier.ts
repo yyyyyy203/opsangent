@@ -1,6 +1,7 @@
 import type { Client } from 'langsmith';
 import type { TraceLink } from '../bootstrap/langsmith.js';
 import type { AcceptanceSnapshot, TraceVerification } from './types.js';
+import { containsSensitivePublicContent } from './privacy-audit.js';
 
 const MAX_QUERIES = 3;
 const MAX_DURATION_MS = 10_000;
@@ -11,9 +12,26 @@ const TERMINAL_SPAN_STATUSES = new Set([
   'success', 'error', 'completed', 'failed', 'cancelled', 'timed_out', 'paused', 'incomplete',
   'aborted', 'partial', 'unavailable',
 ]);
+const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const SELECTED_RUN_FIELDS = [
-  'id', 'trace_id', 'parent_run_id', 'name', 'run_type', 'end_time', 'status', 'error', 'outputs',
+  'id', 'trace_id', 'parent_run_id', 'name', 'run_type', 'end_time', 'status', 'error', 'inputs', 'outputs', 'extra',
 ];
+const SAFE_REMOTE_RUN_FIELDS = new Set(SELECTED_RUN_FIELDS);
+const SAFE_REMOTE_INPUT_KEYS = new Set(['profile', 'purpose', 'stage']);
+const SAFE_REMOTE_OUTPUT_KEYS = new Set([
+  'status', 'outcome', 'stage', 'code', 'category', 'reasonCode', 'terminalStatus', 'finishReason',
+  'usageCompleteness', 'durationMs', 'ttftMs', 'retryCount', 'cacheHit', 'evidenceIds',
+  'missingEvidenceCodes', 'coverage', 'usage_metadata',
+]);
+const SAFE_REMOTE_METADATA_KEYS = new Set([
+  'agentRunId', 'sessionId', 'replyId', 'streamId', 'spanKey', 'parentSpanKey', 'correlationId',
+  'causationId', 'attemptId', 'toolCallId', 'stepId', 'profile', 'purpose', 'provider', 'model',
+  'eventType', 'source', 'status', 'outcome', 'stage', 'subagentType', 'toolName', 'finishReason',
+  'code', 'category', 'reasonCode', 'terminalStatus', 'usageCompleteness', 'attempt', 'durationMs',
+  'ttftMs', 'retryCount', 'inputTokens', 'outputTokens', 'cacheHit', 'retryable', 'orphan',
+  'continuedAfterPause', 'evidenceIds', 'missingEvidenceCodes', 'coverage', 'budget',
+  'ls_provider', 'ls_model_name',
+]);
 const UUID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/iu;
 
 type RemoteRun = Awaited<ReturnType<Client['readRun']>>;
@@ -370,7 +388,7 @@ function assessRemoteRuns(
     checkedSpanCount += 1;
     if (run.id !== link.remoteRunId || run.trace_id !== link.traceId || link.traceId !== rootTraceId
       || run.name !== span.name || run.run_type !== expectedRunType(span.kind)
-      || remoteParentId(run) !== link.parentRemoteRunId) {
+      || remoteParentId(run) !== link.parentRemoteRunId || !isSafeLangSmithRunPayload(run)) {
       return { status: 'failed', checkedSpanCount };
     }
     if (!isRemoteTerminal(run)) {
@@ -416,6 +434,88 @@ function compareModelUsage(span: ExpectedSpan, run: RemoteRun): 'verified' | 'fa
   return 'verified';
 }
 
+export function isSafeLangSmithRunPayload(value: unknown): boolean {
+  if (!isRecord(value) || Object.keys(value).some((key) => !SAFE_REMOTE_RUN_FIELDS.has(key))) return false;
+  const extra = value['extra'];
+  if (extra !== undefined && extra !== null && !isRecord(extra)) return false;
+  if (isRecord(extra) && Object.keys(extra).some((key) => key !== 'metadata')) return false;
+  const metadata = isRecord(extra) ? extra['metadata'] : undefined;
+  return isSafeIdentifierMap(value['inputs'], SAFE_REMOTE_INPUT_KEYS)
+    && isSafeOutputMap(value['outputs'])
+    && isSafeMetadataMap(metadata)
+    && (value['error'] === undefined || value['error'] === null || value['error'] === '' || value['error'] === 'TRACE_ERROR');
+}
+
+function isSafeIdentifierMap(value: unknown, allowedKeys: ReadonlySet<string>): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, item]) => allowedKeys.has(key) && isSafeIdentifier(item));
+}
+
+function isSafeOutputMap(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, item]) => {
+    if (!SAFE_REMOTE_OUTPUT_KEYS.has(key)) return false;
+    if (['status', 'outcome', 'stage', 'code', 'category', 'reasonCode', 'terminalStatus', 'finishReason', 'usageCompleteness'].includes(key)) {
+      return isSafeIdentifier(item);
+    }
+    if (['durationMs', 'ttftMs', 'retryCount'].includes(key)) return isSafeToken(item);
+    if (key === 'cacheHit') return typeof item === 'boolean';
+    if (key === 'evidenceIds' || key === 'missingEvidenceCodes') {
+      return Array.isArray(item) && item.length <= 100 && item.every(isSafeIdentifier);
+    }
+    if (key === 'coverage') return isSafeNumericBooleanMap(item);
+    return key === 'usage_metadata' && isSafeUsageMetadata(item);
+  });
+}
+
+function isSafeMetadataMap(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return Object.entries(value).every(([key, item]) => {
+    if (!SAFE_REMOTE_METADATA_KEYS.has(key)) return false;
+    if (key === 'eventType') return typeof item === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(item);
+    if (['agentRunId', 'sessionId', 'replyId', 'streamId', 'spanKey', 'parentSpanKey', 'correlationId',
+      'causationId', 'attemptId', 'toolCallId', 'stepId', 'profile', 'purpose', 'provider', 'model',
+      'source', 'status', 'outcome', 'stage', 'subagentType', 'toolName', 'finishReason', 'code',
+      'category', 'reasonCode', 'terminalStatus', 'usageCompleteness', 'ls_provider', 'ls_model_name'].includes(key)) {
+      return isSafeIdentifier(item);
+    }
+    if (['attempt', 'durationMs', 'ttftMs', 'retryCount', 'inputTokens', 'outputTokens'].includes(key)) return isSafeToken(item);
+    if (['cacheHit', 'retryable', 'orphan', 'continuedAfterPause'].includes(key)) return typeof item === 'boolean';
+    if (key === 'evidenceIds' || key === 'missingEvidenceCodes') {
+      return Array.isArray(item) && item.length <= 100 && item.every(isSafeIdentifier);
+    }
+    if (key === 'coverage') return isSafeNumericBooleanMap(item);
+    if (key === 'budget') {
+      return isRecord(item) && Object.keys(item).every((field) => ['type', 'limit', 'used'].includes(field))
+        && isSafeIdentifier(item['type']) && isSafeToken(item['limit']) && isSafeToken(item['used']);
+    }
+    return false;
+  });
+}
+
+function isSafeNumericBooleanMap(value: unknown): boolean {
+  return isRecord(value) && Object.entries(value).length <= 32
+    && Object.entries(value).every(([key, item]) => isSafeIdentifier(key)
+      && (typeof item === 'boolean' || isSafeToken(item)));
+}
+
+function isSafeUsageMetadata(value: unknown): boolean {
+  if (!isRecord(value) || !Object.keys(value).every((key) =>
+    ['input_tokens', 'output_tokens', 'total_tokens', 'input_token_details'].includes(key))) return false;
+  for (const key of ['input_tokens', 'output_tokens', 'total_tokens']) {
+    if (value[key] !== undefined && !isSafeToken(value[key])) return false;
+  }
+  if (value['input_token_details'] !== undefined) {
+    const details = value['input_token_details'];
+    if (!isRecord(details) || !Object.keys(details).every((key) => key === 'cache_read')
+      || (details['cache_read'] !== undefined && !isSafeToken(details['cache_read']))) return false;
+  }
+  return true;
+}
+
 function isRemoteTerminal(run: RemoteRun): boolean {
   const endTime = run.end_time;
   if (endTime === undefined || endTime === null) return false;
@@ -446,6 +546,10 @@ function sameValues(left: readonly string[], right: readonly string[]): boolean 
   return left.length === right.length && left.every((value) => right.includes(value));
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
@@ -454,6 +558,11 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function isSafeToken(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isSafeIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && SAFE_IDENTIFIER_PATTERN.test(value)
+    && !containsSensitivePublicContent(value);
 }
 
 function verification(status: TraceVerification['status'], checkedSpanCount: number): TraceVerification {

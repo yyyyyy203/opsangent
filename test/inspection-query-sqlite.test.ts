@@ -89,6 +89,175 @@ async function commitManifest(
 }
 
 describe('SQLite inspection query read model', () => {
+  it.each([
+    { label: 'inline mixed-case IDs', parentKind: 'inline', childKind: 'inline', parentId: 'ev-a', childId: 'ev-Z', expected: ['ev-Z', 'ev-a'] },
+    { label: 'manifest mixed-case IDs', parentKind: 'manifest', childKind: 'manifest', parentId: 'ev-a', childId: 'ev-Z', expected: ['ev-Z', 'ev-a'] },
+    { label: 'inline and manifest mixed-case IDs', parentKind: 'inline', childKind: 'manifest', parentId: 'ev-a', childId: 'ev-Z', expected: ['ev-Z', 'ev-a'] },
+    { label: 'supplementary Unicode IDs', parentKind: 'inline', childKind: 'inline', parentId: 'ev-\u{10000}', childId: 'ev-\uE000', expected: ['ev-\uE000', 'ev-\u{10000}'] },
+  ])('paginates equal-timestamp parent/child evidence in SQLite BINARY order: $label', async ({ parentKind, childKind, parentId, childId, expected }) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-binary-order-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      const factory = new EventFactoryV2(clock, ids());
+      await persistence.eventMessages.append('parent-run', 0, [factory.create('SUBAGENT_STARTED', {
+        runId: 'parent-run', correlationId: 'corr-parent', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      })]);
+      for (const [runId, evidenceId, kind] of [
+        ['parent-run', parentId, parentKind], ['child-run', childId, childKind],
+      ] as const) {
+        if (kind === 'manifest') {
+          await commitManifest(persistence, { runId, evidenceId, manifestId: `manifest-${evidenceId}`, capturedAt: now });
+        } else {
+          await persistence.evidence.save({ ...evidence(), runId, evidenceId, capturedAt: now });
+        }
+      }
+
+      const first = await persistence.queries.listEvidence('parent-run', { limit: 1 });
+      expect(first.items.map((item) => item.evidenceId)).toEqual([expected[0]]);
+      if (first.nextCursor === undefined) throw new Error('parent evidence page should have a cursor');
+      expect(JSON.parse(Buffer.from(first.nextCursor, 'base64url').toString('utf8'))).toEqual({
+        runId: 'parent-run', capturedAt: now, evidenceId: expected[0],
+      });
+      const second = await persistence.queries.listEvidence('parent-run', { limit: 1, cursor: first.nextCursor });
+      expect(second.items.map((item) => item.evidenceId)).toEqual([expected[1]]);
+      expect(second.nextCursor).toBeUndefined();
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('keeps inline/manifest source pages and the parent merge in the same seek order', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-source-order-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      const factory = new EventFactoryV2(clock, ids());
+      await persistence.eventMessages.append('parent-run', 0, [factory.create('SUBAGENT_STARTED', {
+        runId: 'parent-run', correlationId: 'corr-parent', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      })]);
+      for (const runId of ['parent-run', 'child-run']) {
+        const evidenceId = runId === 'parent-run' ? 'ev-a' : 'ev-b';
+        const manifestId = runId === 'parent-run' ? 'ev-Z' : 'ev-Y';
+        await persistence.evidence.save({ ...evidence(), runId, evidenceId, capturedAt: now });
+        await commitManifest(persistence, { runId, evidenceId: manifestId, manifestId: `manifest-${manifestId}`, capturedAt: now });
+      }
+
+      let cursor: string | undefined;
+      for (const [index, expectedId] of ['ev-Y', 'ev-Z', 'ev-a', 'ev-b'].entries()) {
+        const page = await persistence.queries.listEvidence('parent-run', { limit: 1, ...(cursor === undefined ? {} : { cursor }) });
+        expect(page.items.map((item) => item.evidenceId)).toEqual([expectedId]);
+        if (index < 3) expect(page.nextCursor).toBeTypeOf('string');
+        else expect(page.nextCursor).toBeUndefined();
+        cursor = page.nextCursor;
+      }
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it.each([
+    { label: 'invalid timestamp', runId: 'parent-run', capturedAt: 'not-a-time', evidenceId: 'ev-1' },
+    { label: 'empty timestamp', runId: 'parent-run', capturedAt: '', evidenceId: 'ev-1' },
+    { label: 'invalid calendar date', runId: 'parent-run', capturedAt: '2026-02-30T00:00:00.000Z', evidenceId: 'ev-1' },
+    { label: 'empty evidence ID', runId: 'parent-run', capturedAt: now, evidenceId: '' },
+    { label: 'empty Run ID', runId: '', capturedAt: now, evidenceId: 'ev-1' },
+  ])('rejects a parent evidence cursor before child reencoding: $label', async ({ runId, capturedAt, evidenceId }) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-invalid-cursor-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      const cursor = Buffer.from(JSON.stringify({ runId, capturedAt, evidenceId }), 'utf8').toString('base64url');
+      const factory = new EventFactoryV2(clock, ids());
+      await persistence.eventMessages.append('parent-run', 0, [factory.create('SUBAGENT_STARTED', {
+        runId: 'parent-run', correlationId: 'corr-parent', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      })]);
+
+      await expect(persistence.queries.listEvidence(runId, { limit: 1, cursor })).rejects.toThrow('evidence cursor is invalid');
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it.each([
+    now, '2026-09-30T18:00:00+08:00', '2026-09-30T10:00:00.000123Z',
+  ])('preserves valid existing parent evidence cursors with timestamp %s', async (capturedAt) => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-valid-cursor-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      const factory = new EventFactoryV2(clock, ids());
+      await persistence.eventMessages.append('parent-run', 0, [factory.create('SUBAGENT_STARTED', {
+        runId: 'parent-run', correlationId: 'corr-parent', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      })]);
+      for (const evidenceId of ['ev-1', 'ev-2']) {
+        await persistence.evidence.save({ ...evidence(), runId: 'child-run', evidenceId, capturedAt });
+      }
+      const cursor = Buffer.from(JSON.stringify({ runId: 'parent-run', capturedAt, evidenceId: 'ev-1' }), 'utf8').toString('base64url');
+
+      const page = await persistence.queries.listEvidence('parent-run', { limit: 1, cursor });
+
+      expect(page.items.map((item) => ({ evidenceId: item.evidenceId, capturedAt: item.capturedAt }))).toEqual([{ evidenceId: 'ev-2', capturedAt }]);
+      expect(page.nextCursor).toBeUndefined();
+    } finally {
+      persistence.close();
+    }
+  });
+
+  it('lists child evidence through the parent Run and paginates the whole Run tree', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-tree-evidence-'));
+    roots.push(root);
+    const persistence = createSqlitePersistence({ path: join(root, 'runtime.sqlite'), clock });
+    try {
+      await persistence.checkpoints.save(context('parent-run', 'profile-a'), null);
+      await persistence.checkpoints.save(context('child-run', 'profile-a'), null);
+      const factory = new EventFactoryV2(clock, ids());
+      const relation = factory.create('SUBAGENT_STARTED', {
+        runId: 'parent-run', correlationId: 'corr-parent', visibility: 'public', durability: 'durable',
+      }, {
+        subagentType: 'metrics', childRunId: 'child-run', parentRunId: 'parent-run',
+        budget: { type: 'tool_calls', limit: 4, used: 0 },
+      });
+      await persistence.eventMessages.append('parent-run', 0, [relation]);
+      await persistence.evidence.save({
+        evidenceId: 'child-evidence-1', runId: 'child-run', source: 'metric',
+        summary: { failureRate: 0.15 }, raw: { private: 'never-public' }, businessTraceIds: [],
+        capturedAt: '2026-09-30T10:00:01.000Z',
+      });
+      await persistence.evidence.save({
+        evidenceId: 'child-evidence-2', runId: 'child-run', source: 'metric',
+        summary: { failureRate: 0.2 }, raw: { private: 'never-public' }, businessTraceIds: [],
+        capturedAt: '2026-09-30T10:00:02.000Z',
+      });
+
+      const first = await persistence.queries.listEvidence('parent-run', { limit: 1 });
+      if (first.nextCursor === undefined) throw new Error('parent evidence page should have a cursor');
+      const second = await persistence.queries.listEvidence('parent-run', { limit: 1, cursor: first.nextCursor });
+
+      expect(first.items.map((item) => item.evidenceId)).toEqual(['child-evidence-1']);
+      expect(second.items.map((item) => item.evidenceId)).toEqual(['child-evidence-2']);
+      expect(first.items[0]?.runId).toBe('child-run');
+      expect(await persistence.queries.getEvidence('parent-run', 'child-evidence-1')).toMatchObject({
+        evidenceId: 'child-evidence-1', runId: 'child-run', retrievable: false,
+      });
+      expect(JSON.stringify([first, second])).not.toContain('never-public');
+    } finally {
+      persistence.close();
+    }
+  });
+
   it('includes safe structured source missing-evidence codes in the parent Run detail', async () => {
     const root = await mkdtemp(join(tmpdir(), 'agentops-inspection-missing-evidence-'));
     roots.push(root);

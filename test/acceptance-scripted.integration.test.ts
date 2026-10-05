@@ -46,9 +46,18 @@ describe('scripted combined-source runtime acceptance', () => {
     const parent = await readJson<PublicRunPayload>(`${runtime.web.url}/runs/${runId}`);
     expect(parent.childRunIds).toHaveLength(2);
     expect(parent.evidenceIds).toHaveLength(2);
+    const parentEvidence = await readJson<EvidencePage>(`${runtime.web.url}/runs/${runId}/evidence`);
+    expect(new Set(parentEvidence.items.map((item) => item.evidenceId))).toEqual(new Set(parent.evidenceIds));
     const publicResponses = [
-      JSON.stringify(parent), await readCompletedEventStream(`${runtime.web.url}/runs/${runId}/events`),
+      JSON.stringify(parent), JSON.stringify(parentEvidence), await readCompletedEventStream(`${runtime.web.url}/runs/${runId}/events`),
     ];
+    for (const evidence of parentEvidence.items) {
+      expect(parent.childRunIds).toContain(evidence.runId);
+      expect(evidence.retrievable).toBe(false);
+      const detail = await readJson<EvidenceItem>(`${runtime.web.url}/runs/${runId}/evidence/${evidence.evidenceId}`);
+      expect(detail).toEqual(evidence);
+      publicResponses.push(JSON.stringify(detail));
+    }
     for (const childRunId of parent.childRunIds) {
       const child = await readJson<PublicRunPayload>(`${runtime.web.url}/runs/${childRunId}`);
       const childPage = await readJson<EvidencePage>(`${runtime.web.url}/runs/${childRunId}/evidence`);
@@ -185,7 +194,10 @@ interface PublicRunPayload {
 
 interface EvidenceItem {
   readonly evidenceId: string;
-  readonly retrievable?: boolean;
+  readonly runId: string;
+  readonly source: string;
+  readonly summary: Readonly<Record<string, unknown>>;
+  readonly retrievable: boolean;
   readonly timeRange?: { readonly start: string; readonly end: string };
 }
 

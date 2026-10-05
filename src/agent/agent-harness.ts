@@ -894,7 +894,10 @@ export class AgentHarness implements DiagnosisAgent {
   ): Promise<boolean> {
     const pending = frame.context.pendingToolBatch;
     if (pending === undefined || !pending.calls.some((candidate) => candidate.id === result.toolCallId)) return false;
-    if (call !== undefined && (call.id !== result.toolCallId || call.name !== result.toolName)) {
+    const expectedCall = pending.calls.find((candidate) => candidate.id === result.toolCallId);
+    if (expectedCall === undefined) return false;
+    if (expectedCall.name !== result.toolName
+      || (call !== undefined && (call.id !== expectedCall.id || call.name !== expectedCall.name))) {
       throw new Error(`Batch callback result does not match call: ${result.toolCallId}`);
     }
     const existing = pending.completedResults.find((candidate) => candidate.toolCallId === result.toolCallId);
@@ -906,27 +909,48 @@ export class AgentHarness implements DiagnosisAgent {
     }
     const durable = this.dependencies.durableState;
     if (durable === undefined) return false;
+
+    // Prepare all result-derived context changes on a private copy. If durable
+    // validation or commit fails, the live context must not retain evidence
+    // from a result that was never accepted. Keep the shared mutable ledgers
+    // attached so sibling/child executions cannot spend a detached budget.
+    const previousContext = frame.context;
+    const transitionContext = structuredClone(previousContext);
+    if (previousContext.toolCallBudget !== undefined) transitionContext.toolCallBudget = previousContext.toolCallBudget;
+    if (previousContext.networkAttemptBudget !== undefined) transitionContext.networkAttemptBudget = previousContext.networkAttemptBudget;
+    for (const evidenceId of result.response?.evidenceIds ?? []) {
+      if (!transitionContext.evidenceIds.includes(evidenceId)) transitionContext.evidenceIds.push(evidenceId);
+    }
+    if (execution === undefined) this.appendPendingResult(transitionContext, result);
+    const previousRevision = frame.checkpointRevision;
+    frame.context = transitionContext;
     const loopEvents = this.dependencies.v2Events === undefined || intervention === undefined
       ? []
       : [this.createPendingV2('LOOP_DETECTED', frame.context, loopEventPayload(intervention), pending.stepId, result.toolCallId)];
-    if (execution !== undefined) {
-      await this.publishTransitionV2(
-        frame,
-        'TOOL_RESULT',
-        toolResultPayload(result),
-        pending.stepId,
-        result.toolCallId,
-        { kind: 'completed', record: execution, result },
-        effects,
-        loopEvents,
-      );
+    try {
+      if (execution !== undefined) {
+        await this.publishTransitionV2(
+          frame,
+          'TOOL_RESULT',
+          toolResultPayload(result),
+          pending.stepId,
+          result.toolCallId,
+          { kind: 'completed', record: execution, result },
+          effects,
+          loopEvents,
+        );
+        frame.lifecycleEffects.delete(result.toolCallId);
+        return true;
+      }
+      await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), pending.stepId, result.toolCallId, undefined, effects, loopEvents);
       frame.lifecycleEffects.delete(result.toolCallId);
       return true;
+    } catch (error) {
+      // The durable store advances the revision inside its atomic commit. Keep
+      // its adopted context if only post-commit outbox dispatch failed.
+      if (frame.checkpointRevision === previousRevision) frame.context = previousContext;
+      throw error;
     }
-    this.appendPendingResult(frame.context, result);
-    await this.publishTransitionV2(frame, 'TOOL_RESULT', toolResultPayload(result), pending.stepId, result.toolCallId, undefined, effects, loopEvents);
-    frame.lifecycleEffects.delete(result.toolCallId);
-    return true;
   }
 
   private async publishPolicyRejections(
@@ -1312,13 +1336,13 @@ export class AgentHarness implements DiagnosisAgent {
   private adoptContext(frame: RunExecutionFrame, next: AgentContext): void {
     const sharedBudget = frame.context.toolCallBudget;
     if (sharedBudget !== undefined) {
-      if (next.toolCallBudget !== undefined) sharedBudget.remaining = next.toolCallBudget.remaining;
+      if (next.toolCallBudget !== undefined) sharedBudget.remaining = Math.min(sharedBudget.remaining, next.toolCallBudget.remaining);
       next.toolCallBudget = sharedBudget;
     }
     const sharedNetworkAttemptBudget = frame.context.networkAttemptBudget;
     if (sharedNetworkAttemptBudget !== undefined) {
       if (next.networkAttemptBudget !== undefined) {
-        sharedNetworkAttemptBudget.remaining = next.networkAttemptBudget.remaining;
+        sharedNetworkAttemptBudget.remaining = Math.min(sharedNetworkAttemptBudget.remaining, next.networkAttemptBudget.remaining);
       }
       next.networkAttemptBudget = sharedNetworkAttemptBudget;
     }

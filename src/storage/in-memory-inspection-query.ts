@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type {
   CheckpointStore,
   EvidenceManifestQueryStore,
@@ -21,6 +22,7 @@ import type { AgentContext } from '../contracts/context.js';
 
 const DEFAULT_PAGE_SIZE = 50;
 const MAX_PAGE_SIZE = 100;
+const evidenceTimestamp = z.string().datetime({ offset: true });
 
 type AnyCheckpointStore = CheckpointStore | VersionedCheckpointStore;
 /** Read-side adapter used by the default in-memory runtime and focused tests. */
@@ -67,6 +69,27 @@ export class InMemoryInspectionQueryService implements InspectionQueryService {
     const limit = pageLimit(options.limit);
     const cursor = options.cursor === undefined ? undefined : decodeEvidenceCursor(options.cursor);
     if (cursor !== undefined && cursor.runId !== runId) throw new Error('evidence cursor does not belong to this Run');
+    const sourceRunIds = [runId, ...(await this.findRelation(runId)).childRunIds];
+    const pages = await Promise.all(sourceRunIds.map((sourceRunId) => this.listEvidenceForRun(sourceRunId, {
+      limit,
+      ...(cursor === undefined ? {} : {
+        cursor: encodeEvidenceCursor(sourceRunId, cursor.capturedAt, cursor.evidenceId),
+      }),
+    })));
+    const merged = pages.flatMap((page) => page.items).sort(compareEvidence);
+    const items = merged.slice(0, limit);
+    const last = items.at(-1);
+    const hasMore = merged.length > limit || pages.some((page) => page.nextCursor !== undefined);
+    return { items, ...(hasMore && last !== undefined
+      ? { nextCursor: encodeEvidenceCursor(runId, last.capturedAt, last.evidenceId) }
+      : {}) };
+  }
+
+  private async listEvidenceForRun(
+    runId: string,
+    options: { cursor?: string; limit: number },
+  ): Promise<PublicEvidencePage> {
+    const limit = options.limit;
     const inlinePage = await this.evidence.listByRun(runId, { limit, ...(options.cursor === undefined ? {} : { cursor: options.cursor }) });
     const manifestPage = this.manifests?.listVisibleByRun === undefined
       ? { items: [] }
@@ -76,14 +99,23 @@ export class InMemoryInspectionQueryService implements InspectionQueryService {
     const page = items.slice(0, limit);
     const last = page.at(-1);
     const hasMore = items.length > page.length || inlinePage.nextCursor !== undefined || manifestPage.nextCursor !== undefined;
-    return { items: page, ...(hasMore && last !== undefined ? { nextCursor: encodeEvidenceCursor(last) } : {}) };
+    return { items: page, ...(hasMore && last !== undefined
+      ? { nextCursor: encodeEvidenceCursor(runId, last.capturedAt, last.evidenceId) }
+      : {}) };
   }
 
   public async getEvidence(runId: string, evidenceId: string): Promise<PublicEvidenceView | null> {
     const inline = await this.evidence.get(evidenceId);
-    if (inline !== null) return inline.runId === runId ? publicEvidenceFromRecord(inline) : null;
+    if (inline !== null) return await this.isEvidenceRunInTree(runId, inline.runId) ? publicEvidenceFromRecord(inline) : null;
     const manifest = await this.manifests?.getVisible(evidenceId);
-    return manifest === null || manifest === undefined || manifest.runId !== runId ? null : publicEvidenceFromManifest(manifest);
+    return manifest === null || manifest === undefined || !await this.isEvidenceRunInTree(runId, manifest.runId)
+      ? null
+      : publicEvidenceFromManifest(manifest);
+  }
+
+  private async isEvidenceRunInTree(runId: string, evidenceRunId: string): Promise<boolean> {
+    if (runId === evidenceRunId) return true;
+    return (await this.findRelation(runId)).childRunIds.includes(evidenceRunId);
   }
 
   private async loadCheckpoint(runId: string): Promise<LoadedCheckpoint | null> {
@@ -151,7 +183,9 @@ function compareRuns(left: PublicRunSummary, right: PublicRunSummary): number {
 }
 
 function compareEvidence(left: PublicEvidenceView, right: PublicEvidenceView): number {
-  return left.capturedAt.localeCompare(right.capturedAt) || left.evidenceId.localeCompare(right.evidenceId);
+  // Match SQLite BINARY seek ordering, including non-ASCII evidence IDs.
+  return Buffer.compare(Buffer.from(left.capturedAt, 'utf8'), Buffer.from(right.capturedAt, 'utf8'))
+    || Buffer.compare(Buffer.from(left.evidenceId, 'utf8'), Buffer.from(right.evidenceId, 'utf8'));
 }
 
 function isAfterRunCursor(item: PublicRunSummary, cursor: RunCursor): boolean {
@@ -177,13 +211,15 @@ function decodeRunCursor(value: string): RunCursor {
   return { updatedAt: parsed.updatedAt, runId: parsed.runId, ...(typeof parsed.profileId === 'string' ? { profileId: parsed.profileId } : {}), ...(typeof parsed.status === 'string' ? { status: parsed.status } : {}) };
 }
 
-function encodeEvidenceCursor(item: PublicEvidenceView): string {
-  return encode({ runId: item.runId, capturedAt: item.capturedAt, evidenceId: item.evidenceId });
+function encodeEvidenceCursor(runId: string, capturedAt: string, evidenceId: string): string {
+  return encode({ runId, capturedAt, evidenceId });
 }
 
 function decodeEvidenceCursor(value: string): EvidenceCursor {
   const parsed = decode(value);
-  if (!isRecord(parsed) || typeof parsed.runId !== 'string' || typeof parsed.capturedAt !== 'string' || typeof parsed.evidenceId !== 'string') throw new Error('evidence cursor is invalid');
+  if (!isRecord(parsed) || typeof parsed.runId !== 'string' || parsed.runId.length === 0
+    || typeof parsed.capturedAt !== 'string' || !evidenceTimestamp.safeParse(parsed.capturedAt).success
+    || typeof parsed.evidenceId !== 'string' || parsed.evidenceId.length === 0) throw new Error('evidence cursor is invalid');
   return parsed as unknown as EvidenceCursor;
 }
 

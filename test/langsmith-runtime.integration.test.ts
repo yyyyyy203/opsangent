@@ -7,6 +7,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 import { startAgentWebRuntime } from '../src/bootstrap/agent-web-runtime.js';
 import { createLangSmithEventObservability } from '../src/bootstrap/langsmith.js';
+import { createLangSmithAuditedFetch, isSafeLangSmithExportBody } from '../src/acceptance/real-model-runner.js';
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
 const roots: string[] = [];
@@ -25,12 +26,23 @@ describe('LangSmith Web runtime integration', () => {
       requests.push({ url: request.url, body: await request.text() });
       return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
     };
-    const tracing = createLangSmithEventObservability({
+    const langSmithConfig = {
       enabled: true,
       apiKey: 'integration-test-key',
       projectName: 'inspection-agent-test',
       endpoint: 'https://smith.invalid',
-    }, { fetch: exportFetch, now: () => Date.parse('2026-10-04T10:00:00.000Z') });
+    } as const;
+    let outboundAuditPassed = true;
+    const auditedFetch = createLangSmithAuditedFetch(
+      exportFetch,
+      langSmithConfig,
+      ['integration-test-key', '本地检查', '本地完成'],
+      () => { outboundAuditPassed = false; },
+    );
+    const tracing = createLangSmithEventObservability(langSmithConfig, {
+      fetch: auditedFetch,
+      now: () => Date.parse('2026-10-04T10:00:00.000Z'),
+    });
     const runtime = await startAgentWebRuntime({
       dataDirectory,
       workspaceRoots: [dataDirectory],
@@ -62,7 +74,17 @@ describe('LangSmith Web runtime integration', () => {
       expect(modelLink).toBeDefined();
       expect(modelLink?.traceId).toBe(rootLink?.traceId);
       expect(modelLink?.parentRemoteRunId).toBe(rootLink?.remoteRunId);
-      expect(requests.some(({ url }) => url.endsWith('/runs/batch'))).toBe(true);
+      const batchRequests = requests.filter(({ url }) => url.endsWith('/runs/batch'));
+      expect(batchRequests.length).toBeGreaterThan(0);
+      expect(batchRequests.every(({ body }) => isSafeLangSmithExportBody(body, [
+        'integration-test-key', '本地检查', '本地完成',
+      ]))).toBe(true);
+      expect(batchRequests.every(({ body }) => {
+        const batch = JSON.parse(body) as { post?: Array<{ extra?: Record<string, unknown> }>; patch?: Array<{ extra?: Record<string, unknown> }> };
+        return [...(batch.post ?? []), ...(batch.patch ?? [])]
+          .every((run) => run.extra === undefined || !Object.hasOwn(run.extra, 'runtime'));
+      })).toBe(true);
+      expect(outboundAuditPassed).toBe(true);
       expect(requests.map(({ body }) => body).join('\n')).not.toContain('本地检查');
       expect(tracing.getDiagnostics().pending).toBe(0);
     } finally {

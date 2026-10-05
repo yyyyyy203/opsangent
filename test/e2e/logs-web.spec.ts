@@ -61,6 +61,10 @@ test('shows bounded Metrics and Logs evidence, reconnects, and restores the Run 
   expect(parent.childRunIds).toHaveLength(2);
   expect(parent.evidenceIds).toHaveLength(2);
   expect(parent.usage).toEqual({ completeness: 'complete', inputTokens: 21, outputTokens: 9 });
+  const parentEvidence = await getEvidence(page, parentId);
+  expect(parentEvidence.map((item) => item.evidenceId).sort()).toEqual([...parent.evidenceIds].sort());
+  expect(parentEvidence.every((item) => item.retrievable === false)).toBe(true);
+  await expect(page.locator('.evidence-card')).toHaveCount(2);
 
   const children = await Promise.all(parent.childRunIds.map(async (id) => ({ detail: await getRun(page, id), evidence: await getEvidence(page, id) })));
   const metric = children.find((child) => child.evidence.some((item) => item.source === 'metric'));
@@ -92,7 +96,12 @@ test('shows bounded Metrics and Logs evidence, reconnects, and restores the Run 
   await expect(page.locator('.token-usage')).toContainText('输入 21 · 输出 9');
   await expect(page.locator('.token-usage')).toContainText('输入 39 · 输出 22');
   await expect(page.locator('.token-usage')).toContainText('输入 60 · 输出 31');
-  const publicBodies = [JSON.stringify({ parent, children }), ...await readPublicTree(page, parentId, children.map((child) => child.detail.runId))];
+  const publicBodies = [JSON.stringify({ parent, parentEvidence, children }), ...await readPublicTree(page, parentId, children.map((child) => child.detail.runId))];
+  const parentEvidenceDetails = await Promise.all(parentEvidence.map(async (evidence) => ({
+    evidenceId: evidence.evidenceId,
+    detail: await getPublicJson(page, `/runs/${parentId}/evidence/${evidence.evidenceId}`),
+  })));
+  for (const evidence of parentEvidenceDetails) expect(evidence.detail).toMatchObject({ evidenceId: evidence.evidenceId, retrievable: false });
   const evidenceDetails = await Promise.all(children.flatMap((child) => child.evidence.map(async (evidence) => ({
     runId: child.detail.runId,
     evidenceId: evidence.evidenceId,
@@ -359,8 +368,11 @@ async function readPublicTree(page: Page, parentId: string, childIds: string[]):
     const evidencePage = await getPublicJson(page, `/runs/${runId}/evidence?limit=50`) as { items: EvidenceView[] };
     bodies.push(JSON.stringify(evidencePage));
     for (const evidence of evidencePage.items) {
-      expect(evidence.runId).toBe(runId);
-      bodies.push(JSON.stringify(await getPublicJson(page, `/runs/${runId}/evidence/${evidence.evidenceId}`)));
+      if (runId === parentId) expect([parentId, ...childIds]).toContain(evidence.runId);
+      else expect(evidence.runId).toBe(runId);
+      const detail = await getPublicJson(page, `/runs/${runId}/evidence/${evidence.evidenceId}`) as EvidenceView;
+      expect(detail).toMatchObject({ evidenceId: evidence.evidenceId, runId: evidence.runId });
+      bodies.push(JSON.stringify(detail));
     }
   }
   return bodies;

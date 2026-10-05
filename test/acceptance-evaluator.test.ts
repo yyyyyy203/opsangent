@@ -34,6 +34,16 @@ describe('combined-source acceptance evaluator', () => {
     expect(report.verdict).toBe('failed');
   });
 
+  it('fails the full acceptance when a public-boundary audit is unsafe', () => {
+    const input = createAcceptanceFixture('settlement_failure');
+    const report = evaluateAcceptance({
+      ...input,
+      boundaryChecks: { ...input.boundaryChecks, publicDataSafe: false },
+    });
+    expect(report.checks.find((check) => check.code === 'PUBLIC_DATA_SAFE')?.passed).toBe(false);
+    expect(report.verdict).toBe('failed');
+  });
+
   it('fails evidence ownership, unexpected sources, duplicate calls, and over-budget requests', () => {
     const input = createAcceptanceFixture('settlement_failure');
     const movedEvidence = input.evidence.map((item, index) => index === 0 ? { ...item, runId: input.parent.runId } : item);

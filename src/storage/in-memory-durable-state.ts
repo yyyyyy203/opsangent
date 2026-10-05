@@ -264,7 +264,7 @@ export class InMemoryEvidenceRepository implements EvidenceStore, EvidenceQueryS
       if (cursor !== undefined && cursor.runId !== runId) throw new Error('evidence cursor does not belong to this Run');
       const matching = [...this.records.values()]
         .filter((record) => record.runId === runId)
-        .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt) || left.evidenceId.localeCompare(right.evidenceId));
+        .sort(compareEvidencePosition);
       const afterCursor = cursor === undefined
         ? matching
         : matching.filter((record) => compareEvidencePosition(record, cursor) > 0);
@@ -402,7 +402,9 @@ function isEvidenceCursor(value: unknown): value is EvidenceCursor {
 }
 
 function compareEvidencePosition(record: EvidenceRecord, cursor: EvidenceCursor): number {
-  return record.capturedAt.localeCompare(cursor.capturedAt) || record.evidenceId.localeCompare(cursor.evidenceId);
+  // The source page and aggregate cursor must use SQLite BINARY byte ordering.
+  return Buffer.compare(Buffer.from(record.capturedAt, 'utf8'), Buffer.from(cursor.capturedAt, 'utf8'))
+    || Buffer.compare(Buffer.from(record.evidenceId, 'utf8'), Buffer.from(cursor.evidenceId, 'utf8'));
 }
 
 function sameJson(left: unknown, right: unknown): boolean {
