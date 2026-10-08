@@ -17,9 +17,55 @@ import {
   isPublicBoundaryPayloadSafe,
   isSafeLangSmithExportBody,
   matchesPublicEvidenceView,
-  runRealModelAcceptance,
+  runRealModelAcceptance as runAcceptance,
   type RealModelAcceptanceOptions,
 } from '../src/acceptance/real-model-runner.js';
+
+// These existing tests target downstream phases. Admission itself is exercised
+// below without this test-only seam, using the actual probe and fake HTTP.
+const runRealModelAcceptance: typeof runAcceptance = (options, dependencies = {}) => runAcceptance(options, {
+  traceProbe: () => Promise.resolve({ status: 'verified', checkedSpanCount: 2, remoteQueriesSent: 1,
+    diagnostics: { modelDecisions: [], traceRequests: [] }, exportDiagnostics: { pending: 0, dropped: 0, counts: {} } }),
+  ...dependencies,
+});
+
+describe('Trace admission before paid smoke resources', () => {
+  it('fails with safe diagnostics before Lab, Web, parent Run or model HTTP when uploads are rejected', async () => {
+    const logged: string[] = [];
+    vi.spyOn(console, 'warn').mockImplementation((...values: unknown[]) => logged.push(values.join(' ')));
+    vi.spyOn(console, 'error').mockImplementation((...values: unknown[]) => logged.push(values.join(' ')));
+    const startLab = vi.fn(() => Promise.reject(new Error('MUST_NOT_START')));
+    const startWeb = vi.fn(() => Promise.reject(new Error('MUST_NOT_START')));
+    const modelFetch = vi.fn<typeof fetch>(() => Promise.reject(new Error('MUST_NOT_SEND')));
+    const traceFetch = vi.fn<typeof fetch>(() => Promise.resolve(new Response('PRIVATE_TRACE_BODY', { status: 422 })));
+    const rejection = await runAcceptance(makeOptions({ langSmithConfig: { enabled: true, apiKey: 'trace-canary',
+      projectName: 'admission-test', endpoint: 'https://smith.invalid' } }), {
+      startLab, startWeb, fetch: modelFetch, langSmithFetch: traceFetch, now: () => NOW,
+    }).catch((error: unknown) => error);
+    expect(rejection).toMatchObject({ code: 'PRECHECK_TRACE_PROBE_FAILED', diagnostics: { phase: 'trace_probe',
+      modelRequestsSent: 0, parentRunCreated: false, probeCode: 'TRACE_PROBE_UPLOAD_FAILED' } });
+    const rejectionRecord = recordOf(rejection);
+    const precheckDiagnostics = recordOf(rejectionRecord?.['diagnostics']);
+    const probeDiagnostics = recordOf(precheckDiagnostics?.['diagnostics']);
+    const traceRequests: readonly unknown[] = Array.isArray(probeDiagnostics?.['traceRequests'])
+      ? probeDiagnostics['traceRequests']
+      : [];
+    expect(traceRequests.some((request) => {
+      const diagnostic = recordOf(request);
+      return diagnostic?.['route'] === 'info' && diagnostic['httpStatus'] === 422
+        && diagnostic['outcome'] === 'http_error';
+    })).toBe(true);
+    expect(startLab).not.toHaveBeenCalled();
+    expect(startWeb).not.toHaveBeenCalled();
+    expect(modelFetch).not.toHaveBeenCalled();
+    expect(traceFetch).toHaveBeenCalledOnce();
+    expect(JSON.stringify(rejection)).not.toContain('PRIVATE_TRACE_BODY');
+    expect(JSON.stringify(rejection)).not.toContain('trace-canary');
+    expect(logged.join('\n')).not.toContain('PRIVATE_TRACE_BODY');
+    expect(logged.join('\n')).not.toContain('trace-canary');
+    vi.restoreAllMocks();
+  });
+});
 
 const NOW = Date.parse('2026-10-04T12:00:00.000Z');
 const PRECHECK_ROOT = resolve(tmpdir(), 'agentops-real-model-runner-test');
@@ -209,6 +255,7 @@ describe('runRealModelAcceptance preflight', () => {
       statusUrl: 'http://127.0.0.1:19209/status',
       scenario: 'settlement_failure' as const,
       snapshotId: 'snapshot-test',
+      sourceWindow: { start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z' },
       expiresAt: new Date(NOW + 99_999).toISOString(),
       close: closeLab,
     }));
@@ -234,6 +281,7 @@ describe('runRealModelAcceptance preflight', () => {
       statusUrl: 'http://127.0.0.1:19209/status',
       scenario: 'settlement_failure' as const,
       snapshotId: 'snapshot-test',
+      sourceWindow: { start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z' },
       expiresAt,
       close: closeLab,
     };
@@ -267,10 +315,180 @@ describe('runRealModelAcceptance preflight', () => {
       startLab, startWeb, httpFetch, now: () => NOW,
     })).rejects.toMatchObject({ code: 'PRECHECK_LAB_NOT_READY' });
 
+    expect(startWeb.mock.calls[0]?.[0].sourceWindow).toEqual(lab.sourceWindow);
     expect(statusReads).toBe(2);
     expect(parentPosts).toBe(0);
     expect(closeWeb).toHaveBeenCalledOnce();
     expect(closeLab).toHaveBeenCalledOnce();
+  });
+
+  it('persists sanitized diagnostics when the parent Run reaches a non-completed terminal status', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'agentops-real-runner-failure-'));
+    const expiresAt = new Date(NOW + 120_000).toISOString();
+    const labClose = vi.fn(() => Promise.resolve());
+    const webClose = vi.fn(() => Promise.resolve());
+    const privateFailureText = 'synthetic-private-provider-body-do-not-persist';
+    const fixture = createAcceptanceFixture('settlement_failure');
+    const failedSnapshot = {
+      ...fixture,
+      parent: { ...fixture.parent, status: 'failed' as const },
+      events: fixture.events.map((event) => event.type === 'MODEL_CALL_COMPLETED' && event.runId === fixture.parent.runId
+        ? { ...event, type: 'MODEL_CALL_FAILED' as const, payload: {
+          attempt: 1, retryable: false, durationMs: 1,
+          error: { code: 'MODEL_ERROR' as const, message: privateFailureText, retryable: false,
+            details: { category: 'output_truncated', unsafeDetail: privateFailureText } },
+          usage: { inputTokens: 100, outputTokens: 40 }, finishReason: 'length',
+        } }
+        : event),
+    };
+    const lab = {
+      metricsMcpUrl: 'http://127.0.0.1:19210/mcp',
+      logsMcpUrl: 'http://127.0.0.1:19211/mcp',
+      statusUrl: 'http://127.0.0.1:19209/status',
+      scenario: 'settlement_failure' as const,
+      snapshotId: 'snapshot-test',
+      sourceWindow: { start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z' },
+      expiresAt,
+      close: labClose,
+    };
+    const webUrl = 'http://127.0.0.1:42001';
+    const fakeWeb: AgentWebRuntime = {
+      url: webUrl,
+      server: { host: '127.0.0.1', port: 42001, url: webUrl, server: createServer(), close: () => Promise.resolve() },
+      flushEventObservability: () => Promise.resolve(),
+      close: webClose,
+    };
+    const httpFetch: typeof globalThis.fetch = (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+      if (url.pathname === '/status') {
+        return Promise.resolve(Response.json({ readiness: 'ready', scenario: 'settlement_failure', snapshotId: 'snapshot-test', expiresAt }));
+      }
+      if (url.pathname === '/runs' && method === 'POST') {
+        return Promise.resolve(Response.json({ runId: fixture.parent.runId, status: 'started' }, { status: 202 }));
+      }
+      if (url.pathname === `/runs/${fixture.parent.runId}`) {
+        return Promise.resolve(Response.json({ runId: fixture.parent.runId, status: 'failed', error: privateFailureText }));
+      }
+      return Promise.reject(new Error('UNEXPECTED_LOCAL_HTTP_REQUEST'));
+    };
+    const failureId = 'failure-test-id';
+    const options = makeOptions({
+      dataDirectory: resolve(root, 'data'),
+      workspaceRoot: root,
+      artifactDirectory: resolve(root, 'artifacts'),
+    });
+
+    try {
+      const rejection = await runRealModelAcceptance(options, {
+        startLab: () => Promise.resolve(lab),
+        startWeb: () => Promise.resolve(fakeWeb),
+        httpFetch,
+        fetch: () => Promise.reject(new Error('MODEL_MUST_NOT_BE_CALLED')),
+        now: () => NOW,
+        createFailureId: () => failureId,
+        readSnapshot: () => {
+          expect(webClose).toHaveBeenCalledOnce();
+          return Promise.resolve(failedSnapshot);
+        },
+      }).then(() => undefined, (error: unknown) => error);
+
+      expect(rejection).toMatchObject({
+        code: 'RUN_NOT_COMPLETE',
+        diagnostics: {
+          phase: 'run_terminal_status',
+          runStatus: 'failed',
+          modelRequestsSent: 0,
+          parentRunCreated: true,
+          persisted: true,
+        },
+      });
+      const dataDiagnostic = await readFile(resolve(root, 'data', 'acceptance', 'failures', `${failureId}.json`), 'utf8');
+      const artifactDiagnostic = await readFile(resolve(root, 'artifacts', 'failures', `${failureId}.json`), 'utf8');
+      expect(dataDiagnostic).toBe(artifactDiagnostic);
+      expect(JSON.parse(dataDiagnostic)).toMatchObject({
+        schemaVersion: 1,
+        phase: 'run_terminal_status',
+        runStatus: 'failed',
+        modelRequestsSent: 0,
+        parentRunCreated: true,
+      });
+      expect(dataDiagnostic).not.toContain('test-only-api-key');
+      expect(dataDiagnostic).not.toContain('MODEL_MUST_NOT_BE_CALLED');
+      expect(dataDiagnostic).not.toContain(privateFailureText);
+      const savedReport = await readFile(resolve(root, 'artifacts', `${fixture.parent.runId}.json`), 'utf8');
+      expect(JSON.parse(savedReport)).toMatchObject({
+        childRunIds: fixture.parent.childRunIds,
+        usage: { completeness: 'partial', inputTokens: 200, outputTokens: 80 },
+        failures: [{ runId: fixture.parent.runId, code: 'MODEL_ERROR', category: 'output_truncated' }],
+        verdict: 'failed',
+      });
+      const checks = (JSON.parse(savedReport) as { checks: { code: string; status: string; passed: boolean }[] }).checks;
+      expect(checks.find((check) => check.code === 'TERMINAL_COMPLETE')).toMatchObject({ passed: false, status: 'failed' });
+      expect(checks.find((check) => check.code === 'PUBLIC_DATA_SAFE')).toMatchObject({ passed: false, status: 'not_run' });
+      expect(savedReport).not.toContain(privateFailureText);
+      expect(webClose).toHaveBeenCalledOnce();
+      expect(labClose).toHaveBeenCalledOnce();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an allowlisted Web startup error code without persisting its message', async () => {
+    const root = await mkdtemp(resolve(tmpdir(), 'agentops-real-runner-web-start-failure-'));
+    const expiresAt = new Date(NOW + 120_000).toISOString();
+    const labClose = vi.fn(() => Promise.resolve());
+    const lab = {
+      metricsMcpUrl: 'http://127.0.0.1:19210/mcp',
+      logsMcpUrl: 'http://127.0.0.1:19211/mcp',
+      statusUrl: 'http://127.0.0.1:19209/status',
+      scenario: 'settlement_failure' as const,
+      snapshotId: 'snapshot-test',
+      sourceWindow: { start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z' },
+      expiresAt,
+      close: labClose,
+    };
+    const privateErrorMessage = 'synthetic-private-runtime-detail-do-not-persist';
+    const startupError = Object.assign(new Error(privateErrorMessage), { code: 'EADDRINUSE' });
+    const options = makeOptions({
+      dataDirectory: resolve(root, 'data'),
+      workspaceRoot: root,
+      artifactDirectory: resolve(root, 'artifacts'),
+    });
+
+    try {
+      const rejection = await runRealModelAcceptance(options, {
+        startLab: () => Promise.resolve(lab),
+        startWeb: () => Promise.reject(startupError),
+        httpFetch: () => Promise.resolve(Response.json({
+          readiness: 'ready', scenario: 'settlement_failure', snapshotId: 'snapshot-test', expiresAt,
+        })),
+        fetch: () => Promise.reject(new Error('MODEL_MUST_NOT_BE_CALLED')),
+        now: () => NOW,
+        createFailureId: () => 'web-start-failure-test',
+      }).then(() => undefined, (error: unknown) => error);
+
+      expect(rejection).toMatchObject({
+        code: 'RUN_NOT_COMPLETE',
+        diagnostics: {
+          phase: 'web_start',
+          causeCode: 'EADDRINUSE',
+          modelRequestsSent: 0,
+          parentRunCreated: false,
+          persisted: true,
+        },
+      });
+      const diagnostic = await readFile(
+        resolve(root, 'data', 'acceptance', 'failures', 'web-start-failure-test.json'),
+        'utf8',
+      );
+      expect(JSON.parse(diagnostic)).toMatchObject({ phase: 'web_start', causeCode: 'EADDRINUSE' });
+      expect(diagnostic).not.toContain(privateErrorMessage);
+      expect(diagnostic).not.toContain('MODEL_MUST_NOT_BE_CALLED');
+      expect(labClose).toHaveBeenCalledOnce();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it('starts one parent Run, closes only owned resources, and writes a review-required report', async () => {
@@ -285,6 +503,7 @@ describe('runRealModelAcceptance preflight', () => {
       statusUrl: 'http://127.0.0.1:19209/status',
       scenario: 'settlement_failure' as const,
       snapshotId: 'snapshot-test',
+      sourceWindow: { start: '2026-10-04T11:55:00.000Z', end: '2026-10-04T12:00:00.000Z' },
       expiresAt,
       close: labClose,
     };
@@ -416,6 +635,12 @@ type RunnerOverrides = Omit<Partial<RealModelAcceptanceOptions>, 'modelConfig'> 
   modelConfig?: Partial<CreateOpenAICompatibleModelOptions>;
 };
 
+function recordOf(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function makeOptions(overrides: RunnerOverrides = {}): RealModelAcceptanceOptions {
   const root = PRECHECK_ROOT;
   const { modelConfig, ...otherOverrides } = overrides;
@@ -433,6 +658,7 @@ function makeOptions(overrides: RunnerOverrides = {}): RealModelAcceptanceOption
       evidenceCursorSecret: 'test-only-evidence-secret-0123456789012345',
     },
     codeRevision: 'test-revision',
+    sourceFingerprint: 'a'.repeat(64),
     profileRevision: 'simulation-v1',
     ...otherOverrides,
     modelConfig: { baseUrl: 'https://model.example/v1', apiKey: 'test-only-api-key', model: 'test-model', ...modelConfig },

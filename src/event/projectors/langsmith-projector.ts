@@ -1,5 +1,6 @@
 import type { AgentEventEnvelopeV2, Observability, SpanStart, ToolResultPayload } from '../../contracts/index.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
+import { isModelFailureCategory } from '../../model/model-failure.js';
 import type { EventProjectorV2 } from '../v2/event-publisher.js';
 import {
   TraceSpanRegistry,
@@ -110,8 +111,14 @@ export class LangSmithEventProjectorV2 implements EventProjectorV2 {
         case 'MODEL_CALL_FAILED': {
           const attempt = event.attemptId ?? String(event.payload.attempt);
           const lookupKey = attemptLookupKey(event.runId, event.streamId, attempt);
+          const category = event.payload.error.details?.['category'];
           this.registry.fail(this.modelKeys.get(lookupKey)
-            ?? modelKey(event.runId, event.streamId, attempt), errorSummary(event.payload.error));
+            ?? modelKey(event.runId, event.streamId, attempt), {
+            ...errorSummary(event.payload.error), status: 'failed',
+            ...(isModelFailureCategory(category) ? { category } : {}),
+            ...(event.payload.usage === undefined ? {} : { usage: event.payload.usage }),
+            ...(event.payload.finishReason === undefined ? {} : { finishReason: event.payload.finishReason }),
+          });
           this.modelKeys.delete(lookupKey);
           break;
         }

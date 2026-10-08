@@ -46,13 +46,13 @@ export interface ModelCallStartedPayloadV2 { provider: string; model: string; pu
 export interface ModelRetryScheduledPayloadV2 { attempt: number; reasonCode: string; delayMs: number; correctionChainId?: string }
 export interface ModelFallbackActivatedPayloadV2 { fromProvider: string; fromModel: string; toProvider: string; toModel: string; reasonCode: string }
 export interface ModelCallCompletedPayloadV2 { provider: string; model: string; attempt: number; usage?: UsagePayloadV2; cacheHit?: boolean; ttftMs?: number; durationMs: number; finishReason?: string }
-export interface ModelCallFailedPayloadV2 { error: EventErrorPayloadV2; attempt: number; retryable: boolean; durationMs: number }
+export interface ModelCallFailedPayloadV2 { error: EventErrorPayloadV2; attempt: number; retryable: boolean; durationMs: number; usage?: UsagePayloadV2; finishReason?: string }
 export const modelEventPayloadSchemas = {
   MODEL_CALL_STARTED: strict({ provider: identifierV2Schema, model: identifierV2Schema, purpose: z.string().min(1), attempt: positiveInteger, inputSummary: z.string().min(1) }),
   MODEL_RETRY_SCHEDULED: strict({ attempt: positiveInteger, reasonCode: identifierV2Schema, delayMs: nonnegative, correctionChainId: identifierV2Schema.optional() }),
   MODEL_FALLBACK_ACTIVATED: strict({ fromProvider: identifierV2Schema, fromModel: identifierV2Schema, toProvider: identifierV2Schema, toModel: identifierV2Schema, reasonCode: identifierV2Schema }),
   MODEL_CALL_COMPLETED: strict({ provider: identifierV2Schema, model: identifierV2Schema, attempt: positiveInteger, usage: usageSchema.optional(), cacheHit: z.boolean().optional(), ttftMs: nonnegative.optional(), durationMs: nonnegative, finishReason: z.string().min(1).optional() }),
-  MODEL_CALL_FAILED: strict({ error: eventErrorPayloadV2Schema, attempt: positiveInteger, retryable: z.boolean(), durationMs: nonnegative }),
+  MODEL_CALL_FAILED: strict({ error: eventErrorPayloadV2Schema, attempt: positiveInteger, retryable: z.boolean(), durationMs: nonnegative, usage: usageSchema.optional(), finishReason: z.string().min(1).optional() }),
 } as const;
 export interface MessageStartedPayloadV2 { messageId: string; role: MessageRoleV2; status: MessageStatusV2 }
 export type ContentBlockTypeV2 = MessageBlockV2['type'];

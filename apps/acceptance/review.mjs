@@ -2,18 +2,30 @@
 import { lstat, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { parseArgs } from 'node:util';
+import { parseAcceptanceDiagnostics } from '../../dist/acceptance/diagnostics.js';
 
 const MAX_REPORT_BYTES = 256_000;
 const RUN_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const CASE_IDS = new Set(['normal', 'settlement_failure', 'low_sample', 'logs_offline', 'capture_window_mismatch']);
-const CHECK_CODES = new Set([
+const CHECK_CODES_V1 = new Set([
   'SOURCE_ALLOWLIST', 'SOURCE_CALL_LIMIT', 'METRIC_FACT_VALID', 'SOURCE_WINDOW_VALID',
   'MISSING_EVIDENCE_VISIBLE', 'EVIDENCE_OWNERSHIP', 'TERMINAL_COMPLETE', 'MODEL_HTTP_BUDGET',
   'USAGE_CONSISTENT', 'PUBLIC_DATA_SAFE', 'TRACE_EXPORT_SAFE',
 ]);
+const CHECK_CODES_V2 = new Set([...CHECK_CODES_V1, 'SCENARIO_OUTCOME_VALID', 'SOURCE_FINGERPRINT_VALID']);
 const DIAGNOSTIC_CODES = new Set([
   'TRACE_QUEUE_FULL', 'TRACE_NETWORK_ERROR', 'TRACE_REQUEST_TIMEOUT', 'TRACE_FLUSH_TIMEOUT',
+  'TRACE_HTTP_ERROR', 'TRACE_LOCAL_AUDIT_REJECTED',
   'TRACE_PARENT_MISSING', 'TRACE_PAYLOAD_DROPPED',
+]);
+const MODEL_FAILURE_CATEGORIES = new Set([
+  'auth', 'rate_limit', 'server', 'network', 'timeout', 'protocol', 'aborted', 'context_length', 'output_truncated',
+]);
+const FAILURE_CODES = new Set([
+  'ABORTED', 'BUDGET_EXCEEDED', 'CONFIRMATION_EXPIRED', 'INVALID_INPUT', 'LOOP_DETECTED', 'MODEL_ERROR',
+  'STORAGE_ERROR', 'TOOL_ERROR', 'TOOL_NOT_FOUND', 'TOOL_ARGUMENTS_PARSE_FAILED', 'TOOL_ARGUMENTS_SCHEMA_INVALID',
+  'TOOL_ARGUMENTS_SEMANTIC_INVALID', 'POLICY_DENIED', 'MCP_NETWORK_ERROR', 'MCP_TIMEOUT', 'MCP_RATE_LIMITED',
+  'MCP_SERVER_ERROR', 'MCP_AUTH_ERROR', 'MCP_PROTOCOL_ERROR', 'CIRCUIT_OPEN', 'TIMEOUT', 'UNAVAILABLE', 'USER_REJECTED',
 ]);
 
 class ReviewCliError extends Error {
@@ -122,24 +134,55 @@ async function readSafeReport(reportPath) {
 }
 
 function isAcceptanceReport(value) {
-  if (!isRecord(value) || value.schemaVersion !== 1 || !CASE_IDS.has(value.caseId)
+  if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2) || !CASE_IDS.has(value.caseId)
     || !isReportText(value.codeRevision) || !isReportText(value.profileRevision)
     || !isReportText(value.snapshotId) || typeof value.runId !== 'string' || !RUN_ID_PATTERN.test(value.runId)
     || !Array.isArray(value.childRunIds) || !value.childRunIds.every((id) => typeof id === 'string' && RUN_ID_PATTERN.test(id))) {
     return false;
   }
-  if (!Array.isArray(value.checks) || value.checks.length !== CHECK_CODES.size) return false;
+  const checkCodes = value.schemaVersion === 1 ? CHECK_CODES_V1 : CHECK_CODES_V2;
+  if (!Array.isArray(value.checks) || value.checks.length !== checkCodes.size) return false;
   const seenCheckCodes = new Set();
   for (const check of value.checks) {
-    if (!isRecord(check) || !CHECK_CODES.has(check.code) || typeof check.passed !== 'boolean'
+    if (!isRecord(check) || !checkCodes.has(check.code) || typeof check.passed !== 'boolean'
       || seenCheckCodes.has(check.code)) return false;
+    if (check.status !== undefined && (!['passed', 'failed', 'not_run'].includes(check.status)
+      || (check.status === 'passed') !== check.passed)) return false;
     seenCheckCodes.add(check.code);
   }
-  if (seenCheckCodes.size !== CHECK_CODES.size || !isBudget(value.budget) || !isUsage(value.usage)
+  if (seenCheckCodes.size !== checkCodes.size || !isBudget(value.budget) || !isUsage(value.usage)
     || !isExportDiagnostics(value.exportDiagnostics) || !isTraceVerification(value.traceVerification)
     || !isManualReview(value.manualReview)
     || !['passed', 'failed', 'review_required'].includes(value.verdict)) return false;
+  if (value.failures !== undefined) {
+    const runIds = new Set([value.runId, ...value.childRunIds]);
+    if (!Array.isArray(value.failures) || value.failures.length > 100 || !value.failures.every((failure) =>
+      isRecord(failure) && Object.keys(failure).every((key) => ['runId', 'code', 'category'].includes(key))
+      && runIds.has(failure.runId) && FAILURE_CODES.has(failure.code)
+      && (failure.category === undefined || MODEL_FAILURE_CATEGORIES.has(failure.category)))) return false;
+  }
+  if (value.outputBudget !== undefined && !isOutputBudget(value.outputBudget)) return false;
+  if (value.diagnostics !== undefined) {
+    try { parseAcceptanceDiagnostics(value.diagnostics); }
+    catch { return false; }
+  }
+  if (value.schemaVersion === 2 && !isFingerprint(value.sourceFingerprint)) {
+    const outcome = value.checks.find((check) => check.code === 'SCENARIO_OUTCOME_VALID');
+    const fingerprintCheck = value.checks.find((check) => check.code === 'SOURCE_FINGERPRINT_VALID');
+    if (value.verdict !== 'failed' || outcome?.passed !== false || fingerprintCheck?.passed !== false) return false;
+  }
   return true;
+}
+
+function isFingerprint(value) {
+  return typeof value === 'string' && /^[a-f\d]{64}$/u.test(value);
+}
+
+function isOutputBudget(value) {
+  const keys = ['limit', 'reserved', 'settled', 'available', 'reservations', 'settlements', 'rejected'];
+  return isRecord(value) && Object.keys(value).length === keys.length && keys.every((key) => isCount(value[key]))
+    && value.limit >= 1 && value.limit <= 5120 && value.reserved + value.settled + value.available === value.limit
+    && value.settlements <= value.reservations;
 }
 
 function isBudget(value) {

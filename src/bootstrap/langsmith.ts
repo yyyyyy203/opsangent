@@ -6,10 +6,10 @@ import {
 } from '../observability/export-diagnostics.js';
 import { LangSmithObservability } from '../observability/langsmith-observability.js';
 import type { Observability } from '../contracts/index.js';
+import { resolveLangSmithExportLimits, type LangSmithExportLimits } from '../observability/langsmith-export-policy.js';
+import { LangSmithTerminalTransportError, readLangSmithBytes, sanitizeLangSmithInfo, withLangSmithAbort } from '../observability/langsmith-http.js';
 
 const DEFAULT_ENDPOINT = 'https://api.smith.langchain.com';
-const REQUEST_TIMEOUT_MS = 1_000;
-const FLUSH_TIMEOUT_MS = 2_000;
 const MAX_PENDING = 256;
 const MAX_TRACE_LINKS = 256;
 const MAX_INGEST_MEMORY_BYTES = 1_048_576;
@@ -38,6 +38,7 @@ export interface LangSmithEventExporter {
 }
 
 export interface LangSmithEventDependencies {
+  readonly limits?: LangSmithExportLimits;
   readonly fetch?: typeof globalThis.fetch;
   readonly now?: () => number;
 }
@@ -90,16 +91,18 @@ export function createLangSmithEventObservability(
   }
 
   const endpoint = validateDirectConfig(config);
+  const limits = resolveLangSmithExportLimits(dependencies.limits);
   const exporterAbort = new AbortController();
   const timedFetch = createTimedFetch(
     dependencies.fetch ?? globalThis.fetch,
     exporterAbort.signal,
     diagnostics,
+    limits.requestTimeoutMs,
   );
   const client = new Client({
     apiUrl: endpoint,
     apiKey: config.apiKey.trim(),
-    timeout_ms: REQUEST_TIMEOUT_MS,
+    timeout_ms: limits.requestTimeoutMs,
     callerOptions: { maxRetries: 0 },
     autoBatchTracing: true,
     blockOnRootRunFinalization: false,
@@ -125,7 +128,7 @@ export function createLangSmithEventObservability(
       }
       traceLinks.set(link.spanKey, link);
     },
-    flushDeadlineMs: FLUSH_TIMEOUT_MS,
+    flushDeadlineMs: limits.flushTimeoutMs,
     abortController: exporterAbort,
   });
 
@@ -165,9 +168,10 @@ function createTimedFetch(
   fetchImplementation: typeof globalThis.fetch,
   exporterSignal: AbortSignal,
   diagnostics: ExportDiagnosticsRecorder,
+  requestTimeoutMs: number,
 ): typeof globalThis.fetch {
   return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-    if (exporterSignal.aborted) throw new Error('TRACE_EXPORT_ABORTED');
+    if (exporterSignal.aborted) throw new LangSmithTerminalTransportError('TRACE_EXPORT_ABORTED');
     const requestController = new AbortController();
     const requestSignal = init?.signal ?? (input instanceof Request ? input.signal : undefined);
     let requestTimedOut = false;
@@ -176,12 +180,12 @@ function createTimedFetch(
 
     const abortFromExporter = (): void => {
       exportAborted = true;
-      requestController.abort();
+      requestController.abort(new DOMException('Trace flush interrupted', 'AbortError'));
     };
     const abortFromRequest = (): void => {
       callerTimedOut = requestSignal?.reason instanceof Error
         && requestSignal.reason.name === 'TimeoutError';
-      requestController.abort();
+      requestController.abort(requestSignal?.reason);
     };
     exporterSignal.addEventListener('abort', abortFromExporter, { once: true });
     requestSignal?.addEventListener('abort', abortFromRequest, { once: true });
@@ -190,25 +194,38 @@ function createTimedFetch(
     const timeout = setTimeout(() => {
       requestTimedOut = true;
       diagnostics.record('TRACE_REQUEST_TIMEOUT');
-      requestController.abort();
-    }, REQUEST_TIMEOUT_MS);
+      requestController.abort(new DOMException('Trace request timed out', 'TimeoutError'));
+    }, requestTimeoutMs);
 
     try {
       diagnostics.beginRequest();
-      const response = await fetchImplementation(input, { ...init, signal: requestController.signal });
-      if (response.ok) return response;
-      diagnostics.record('TRACE_NETWORK_ERROR');
-      return new Response(JSON.stringify({ error: `TRACE_HTTP_${response.status}` }), {
-        status: response.status,
-        statusText: 'Trace export failed',
-        headers: { 'content-type': 'application/json' },
-      });
-    } catch {
+      const response = await withLangSmithAbort(fetchImplementation(input, { ...init, signal: requestController.signal }), requestController.signal);
+      if (response.ok) {
+        let bytes = await readLangSmithBytes(response.body, requestController.signal);
+        const requestUrl = input instanceof Request ? input.url : String(input);
+        if (new URL(requestUrl).pathname.endsWith('/info')) bytes = sanitizeLangSmithInfo(bytes);
+        const headers = new Headers(response.headers);
+        headers.delete('content-encoding');
+        headers.delete('content-length');
+        return new Response(response.body === null ? null : bytes, { status: response.status, statusText: response.statusText, headers });
+      }
+      const locallyRejected = response.headers.get('x-agentops-trace-error') === 'TRACE_LOCAL_AUDIT_REJECTED';
+      diagnostics.record(locallyRejected ? 'TRACE_LOCAL_AUDIT_REJECTED' : 'TRACE_HTTP_ERROR');
+      // Keep the historical aggregate for real remote HTTP errors, never for a
+      // local pre-network rejection. Do not read or log the upstream error body.
+      if (!locallyRejected) diagnostics.record('TRACE_NETWORK_ERROR');
+      if (response.body !== null) void response.body.cancel().catch(() => undefined);
+      throw new LangSmithTerminalTransportError(locallyRejected ? 'TRACE_LOCAL_AUDIT_REJECTED' : `TRACE_HTTP_${response.status}`);
+    } catch (error) {
+      if (error instanceof LangSmithTerminalTransportError) {
+        if (error.message === 'TRACE_INFO_INVALID') diagnostics.record('TRACE_NETWORK_ERROR');
+        throw error;
+      }
       if (callerTimedOut) diagnostics.record('TRACE_REQUEST_TIMEOUT');
       else if (!requestTimedOut && !exportAborted && !requestSignal?.aborted) {
         diagnostics.record('TRACE_NETWORK_ERROR');
       }
-      throw new Error(requestTimedOut || callerTimedOut
+      throw new LangSmithTerminalTransportError(requestTimedOut || callerTimedOut
         ? 'TRACE_REQUEST_TIMEOUT'
         : exportAborted || requestSignal?.aborted ? 'TRACE_EXPORT_ABORTED' : 'TRACE_NETWORK_ERROR');
     } finally {

@@ -238,6 +238,50 @@ describe('local Agent web runtime', () => {
     }
   });
 
+  it('uses the supplied immutable snapshot window for parent context without recalculating it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'opsangent-web-fixed-window-'));
+    roots.push(root);
+    const sourceWindow = { start: '2026-10-02T12:29:50.000Z', end: '2026-10-02T12:34:50.000Z' };
+    const seenMessages: AgentMessage[][] = [];
+    const model: ChatModel = {
+      async *stream(messages): AsyncGenerator<ModelStreamEvent, ModelResponse> {
+        await Promise.resolve();
+        seenMessages.push(messages);
+        yield { type: 'text_delta', delta: '完成' };
+        return { text: '完成', toolCalls: [] };
+      },
+    };
+    const runtime = await startAgentWebRuntime({
+      dataDirectory: root,
+      workspaceRoots: [root],
+      model,
+      clock: { now: () => new Date('2026-10-02T12:34:56.789Z') },
+      metrics: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19210/mcp' },
+      logs: { profileId: 'simulation', mcpUrl: 'http://127.0.0.1:19211/mcp', cursorSecret: '0123456789abcdef0123456789abcdef' },
+      sourceWindow,
+      port: 0,
+    });
+    try {
+      const response = await fetch(`${runtime.url}/runs`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ runId: 'fixed-window-run', message: '检查结算', profileId: 'simulation' }),
+      });
+      expect(response.status).toBe(202);
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const detail = await fetch(`${runtime.url}/runs/fixed-window-run`);
+        if (detail.status === 200 && (await detail.clone().json() as { status: string }).status === 'completed') break;
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      const system = seenMessages[0]?.find((item) => item.role === 'system');
+      const text = system?.blocks.find((item) => item.type === 'text');
+      expect(text?.type === 'text' ? text.text : '').toContain('start=2026-10-02T12:29:50.000Z');
+      expect(text?.type === 'text' ? text.text : '').toContain('end=2026-10-02T12:34:50.000Z');
+      expect(text?.type === 'text' ? text.text : '').not.toContain('不保证完全一致');
+    } finally {
+      await runtime.close();
+    }
+  });
+
   it('requires Metrics for Logs and rejects credential URLs or short cursor secrets without echoing them', async () => {
     const root = await mkdtemp(join(tmpdir(), 'opsangent-web-logs-invalid-'));
     roots.push(root);

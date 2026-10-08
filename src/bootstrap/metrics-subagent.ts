@@ -38,6 +38,7 @@ export interface MetricsSubagentOptions {
   childAgentFactory: SourceChildAgentFactory;
   checkpoints?: CheckpointStore;
   clock?: Clock;
+  sourceWindow?: { start: string; end: string };
   lifecycle?: SubagentLifecyclePorts;
   maxAttempts?: number;
 }
@@ -67,7 +68,7 @@ export function createMetricsSubagentTool(options: MetricsSubagentOptions): Tool
     inputSchema: metricsSubagentInputSchema,
     runner,
     childRunId: (execution) => stableSourceChildRunId('metrics', execution.parentRunId, execution.parentToolCallId),
-    validateRequest: (request, execution) => validateMetricsRequest(request, execution, options.profile, clock),
+    validateRequest: (request, execution) => validateMetricsRequest(request, execution, options.profile, clock, options.sourceWindow),
     ...(options.lifecycle === undefined ? {} : { lifecycle: options.lifecycle }),
     ...(options.maxAttempts === undefined ? {} : { maxAttempts: options.maxAttempts }),
   };
@@ -96,6 +97,7 @@ function validateMetricsRequest(
   execution: Omit<SourceSubagentExecution, 'childRunId'>,
   profile: SettlementMetricsProfile,
   clock: Clock,
+  sourceWindow?: { start: string; end: string },
 ): void {
   if (request.profileId !== profile.profileId || request.service !== profile.service) {
     throw new SourceSubagentFailure('POLICY_DENIED', 'Metrics request is outside the configured Profile.', false);
@@ -113,6 +115,13 @@ function validateMetricsRequest(
   }
   const start = Date.parse(request.start);
   const end = Date.parse(request.end);
+  if (sourceWindow !== undefined) {
+    if (request.start !== sourceWindow.start || request.end !== sourceWindow.end
+      || end - start !== profile.windowSeconds * 1_000) {
+      throw new SourceSubagentFailure('INVALID_INPUT', 'Metrics request must match the immutable source snapshot window.', false);
+    }
+    return;
+  }
   const now = clock.now().getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || !Number.isFinite(now)
     || end - start !== profile.windowSeconds * 1_000

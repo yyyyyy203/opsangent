@@ -1,6 +1,7 @@
 import type { Client } from 'langsmith';
 import type { TraceLink } from '../bootstrap/langsmith.js';
 import type { AcceptanceSnapshot, TraceVerification } from './types.js';
+import type { TraceVerificationDiagnostic } from './diagnostics.js';
 import { containsSensitivePublicContent } from './privacy-audit.js';
 
 const MAX_QUERIES = 3;
@@ -51,6 +52,13 @@ interface ExpectedSpan {
 interface ModelAttempt {
   readonly state: 'completed' | 'failed';
   readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly cachedInputTokens?: number };
+  readonly finishReason?: string;
+}
+
+class LocalSnapshotError extends Error {
+  constructor(readonly diagnosticReason: 'invalid_local_tree' | 'invalid_source_invocation') {
+    super(diagnosticReason);
+  }
 }
 
 interface SourceInvocation {
@@ -58,6 +66,8 @@ interface SourceInvocation {
   readonly childRunId: string;
   readonly toolCallId: string;
   readonly subagentType: string;
+  readonly lifecycleOwner: 'parent' | 'child';
+  readonly streamId?: string;
   readonly baseSpanKey: string;
   readonly toolSpanKey: string;
 }
@@ -68,6 +78,7 @@ export interface LangSmithVerifierDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
   /** Test seam; production uses a timer-backed race against the remaining deadline. */
   readonly withDeadline?: <T>(operation: Promise<T>, timeoutMs: number) => Promise<T>;
+  readonly onDiagnostic?: (diagnostic: TraceVerificationDiagnostic) => void;
 }
 
 /**
@@ -81,27 +92,42 @@ export async function verifyLangSmithTrace(
 ): Promise<TraceVerification> {
   const startedAt = safeNow(dependencies.now);
   const deadlineAt = startedAt + MAX_DURATION_MS;
+  const report = (
+    status: TraceVerification['status'],
+    checkedSpanCount: number,
+    phase: TraceVerificationDiagnostic['phase'],
+    reason: TraceVerificationDiagnostic['reason'],
+    remoteQueriesSent: number,
+  ): TraceVerification => {
+    try {
+      dependencies.onDiagnostic?.({ phase, reason, remoteQueriesSent });
+    } catch { /* local diagnostics must not change the verification result */ }
+    return verification(status, checkedSpanCount);
+  };
   let expectedSpans: readonly ExpectedSpan[];
 
   try {
     expectedSpans = deriveExpectedSpans(input.snapshot);
-  } catch {
-    return verification('failed', 0);
+  } catch (error) {
+    const reason = error instanceof LocalSnapshotError ? error.diagnosticReason : 'invalid_local_tree';
+    return report('failed', 0, 'local_snapshot', reason, 0);
   }
 
-  if (expectedSpans.length === 0 || expectedSpans.length > MAX_SPANS) return verification('unavailable', 0);
+  if (expectedSpans.length === 0 || expectedSpans.length > MAX_SPANS) {
+    return report('unavailable', 0, 'local_snapshot', 'invalid_local_tree', 0);
+  }
 
   const spanLinks = new Map<string, TraceLink>();
   const remoteIds = new Set<string>();
   for (const span of expectedSpans) {
     const matches = input.links.filter((link) => link.spanKey === span.spanKey);
-    if (matches.length > 1) return verification('failed', 0);
+    if (matches.length > 1) return report('failed', 0, 'local_links', 'invalid_link', 0);
     const link = matches[0];
-    if (link === undefined) return verification('unavailable', 0);
+    if (link === undefined) return report('unavailable', 0, 'local_links', 'missing_link', 0);
     if (link.agentRunId !== span.agentRunId || !UUID_PATTERN.test(link.remoteRunId) || !UUID_PATTERN.test(link.traceId)) {
-      return verification('failed', 0);
+      return report('failed', 0, 'local_links', 'invalid_link', 0);
     }
-    if (remoteIds.has(link.remoteRunId)) return verification('failed', 0);
+    if (remoteIds.has(link.remoteRunId)) return report('failed', 0, 'local_links', 'invalid_link', 0);
     remoteIds.add(link.remoteRunId);
     spanLinks.set(span.spanKey, link);
   }
@@ -109,18 +135,18 @@ export async function verifyLangSmithTrace(
   const rootExecution = expectedSpans.find((span) => span.kind === 'execution'
     && span.agentRunId === input.snapshot.parent.runId && span.parentSpanKey === undefined);
   const rootLink = rootExecution === undefined ? undefined : spanLinks.get(rootExecution.spanKey);
-  if (rootLink === undefined) return verification('failed', 0);
+  if (rootLink === undefined) return report('failed', 0, 'local_links', 'invalid_link', 0);
 
   for (const span of expectedSpans) {
     const link = spanLinks.get(span.spanKey);
-    if (link === undefined) return verification('unavailable', 0);
+    if (link === undefined) return report('unavailable', 0, 'local_links', 'missing_link', 0);
     if (span.parentSpanKey === undefined) {
-      if (link.parentRemoteRunId !== undefined) return verification('failed', 0);
+      if (link.parentRemoteRunId !== undefined) return report('failed', 0, 'local_links', 'invalid_link', 0);
     } else {
       const parent = spanLinks.get(span.parentSpanKey);
-      if (parent === undefined) return verification('unavailable', 0);
+      if (parent === undefined) return report('unavailable', 0, 'local_links', 'missing_link', 0);
       if (link.parentRemoteRunId !== parent.remoteRunId || link.traceId !== parent.traceId) {
-        return verification('failed', 0);
+        return report('failed', 0, 'local_links', 'invalid_link', 0);
       }
     }
   }
@@ -130,46 +156,63 @@ export async function verifyLangSmithTrace(
   const now = dependencies.now ?? defaultNow;
   const sleep = dependencies.sleep ?? defaultSleep;
   const withDeadline = dependencies.withDeadline ?? defaultWithDeadline;
+  let remoteQueriesSent = 0;
 
   for (let queryNumber = 1; queryNumber <= MAX_QUERIES; queryNumber += 1) {
     const remainingMs = deadlineAt - now();
-    if (remainingMs <= 0) return verification('unavailable', observedRuns.size);
+    if (remainingMs <= 0) {
+      return report('unavailable', observedRuns.size, 'remote_query', 'remote_unavailable', remoteQueriesSent);
+    }
 
     try {
+      remoteQueriesSent += 1;
       const pendingQuery = collectRuns(input.client, ids);
       const runs = await withDeadline(pendingQuery, remainingMs);
       const querySeen = new Set<string>();
       for (const run of runs) {
-        if (!remoteIds.has(run.id)) return verification('failed', observedRuns.size);
-        if (querySeen.has(run.id)) return verification('failed', observedRuns.size);
+        if (!remoteIds.has(run.id)) {
+          return report('failed', observedRuns.size, 'remote_compare', 'remote_mismatch', remoteQueriesSent);
+        }
+        if (querySeen.has(run.id)) {
+          return report('failed', observedRuns.size, 'remote_compare', 'remote_mismatch', remoteQueriesSent);
+        }
         querySeen.add(run.id);
         observedRuns.set(run.id, run);
       }
     } catch (error) {
       const status = httpStatus(error);
-      if (error instanceof TraceQueryIntegrityError) return verification('failed', observedRuns.size);
+      if (error instanceof TraceQueryIntegrityError) {
+        return report('failed', observedRuns.size, 'remote_compare', 'remote_mismatch', remoteQueriesSent);
+      }
       if (status === 403 || status === 404 || isTimeoutError(error)
         || queryNumber === MAX_QUERIES || isDeadlineExpired(deadlineAt, now)) {
-        return verification('unavailable', observedRuns.size);
+        return report('unavailable', observedRuns.size, 'remote_query', 'remote_unavailable', remoteQueriesSent);
       }
     }
 
     const assessment = assessRemoteRuns(expectedSpans, spanLinks, observedRuns, rootLink.traceId);
-    if (assessment.status === 'verified' || assessment.status === 'failed') {
-      return verification(assessment.status, assessment.checkedSpanCount);
+    if (assessment.status === 'verified') {
+      return report('verified', assessment.checkedSpanCount, 'complete', 'verified', remoteQueriesSent);
     }
-    if (queryNumber === MAX_QUERIES) return verification('unavailable', assessment.checkedSpanCount);
+    if (assessment.status === 'failed') {
+      return report('failed', assessment.checkedSpanCount, 'remote_compare', assessment.reason, remoteQueriesSent);
+    }
+    if (queryNumber === MAX_QUERIES) {
+      return report('unavailable', assessment.checkedSpanCount, 'remote_query', assessment.reason, remoteQueriesSent);
+    }
 
     const remainingBeforeSleep = deadlineAt - now();
-    if (remainingBeforeSleep <= 0) return verification('unavailable', assessment.checkedSpanCount);
+    if (remainingBeforeSleep <= 0) {
+      return report('unavailable', assessment.checkedSpanCount, 'remote_query', 'remote_unavailable', remoteQueriesSent);
+    }
     try {
       await withDeadline(sleep(Math.min(RETRY_DELAY_MS, remainingBeforeSleep)), remainingBeforeSleep);
     } catch {
-      return verification('unavailable', assessment.checkedSpanCount);
+      return report('unavailable', assessment.checkedSpanCount, 'remote_query', 'remote_unavailable', remoteQueriesSent);
     }
   }
 
-  return verification('unavailable', observedRuns.size);
+  return report('unavailable', observedRuns.size, 'remote_query', 'remote_unavailable', remoteQueriesSent);
 }
 
 function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
@@ -208,20 +251,29 @@ function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
   const invocationByChild = new Map<string, SourceInvocation>();
   const invocationByResume = new Map<string, string>();
   const subagentStarts = events.filter((event) => event.type === 'SUBAGENT_STARTED');
+  const subagentTerminals = events.filter((event) => event.type === 'SUBAGENT_COMPLETED' || event.type === 'SUBAGENT_FAILED');
 
   for (const start of subagentStarts) {
-    if (start.type !== 'SUBAGENT_STARTED' || start.runId !== parentId || start.payload.parentRunId !== parentId
-      || !childIds.includes(start.payload.childRunId) || start.toolCallId === undefined) {
-      throw new Error('INVALID_SOURCE_INVOCATION');
+    if (start.type !== 'SUBAGENT_STARTED' || start.payload.parentRunId !== parentId
+      || !childIds.includes(start.payload.childRunId) || typeof start.toolCallId !== 'string'
+      || start.toolCallId.length === 0) {
+      throw new LocalSnapshotError('invalid_source_invocation');
     }
-    if (invocationByChild.has(start.payload.childRunId)) throw new Error('DUPLICATE_SOURCE_INVOCATION');
+    const lifecycleOwner = sourceLifecycleOwner(start, parentId, start.payload.childRunId);
+    if (lifecycleOwner === undefined || invocationByChild.has(start.payload.childRunId)) {
+      throw new LocalSnapshotError('invalid_source_invocation');
+    }
 
+    const sourceStreamId = start.streamId ?? 'initial';
     const toolStarts = events.filter((event) => event.type === 'TOOL_STARTED' && event.runId === parentId
-      && event.toolCallId === start.toolCallId && event.payload.source === 'subagent'
-      && event.payload.toolName === `${start.payload.subagentType}_subagent`);
-    if (toolStarts.length !== 1) throw new Error('SOURCE_TOOL_START_MISMATCH');
+      && (event.streamId ?? 'initial') === sourceStreamId && event.toolCallId === start.toolCallId);
+    if (toolStarts.length !== 1 || toolStarts[0]?.type !== 'TOOL_STARTED'
+      || toolStarts[0].payload.source !== 'subagent'
+      || toolStarts[0].payload.toolName !== `${start.payload.subagentType}_subagent`) {
+      throw new LocalSnapshotError('invalid_source_invocation');
+    }
     const toolStart = toolStarts[0];
-    if (toolStart?.type !== 'TOOL_STARTED') throw new Error('SOURCE_TOOL_START_MISMATCH');
+    if (toolStart.type !== 'TOOL_STARTED') throw new LocalSnapshotError('invalid_source_invocation');
 
     const toolAttempt = toolStart.attemptId ?? String(toolStart.payload.attempt);
     const toolSpanKey = `tool:${parentId}:${toolStart.streamId ?? 'initial'}:${start.toolCallId}:${toolAttempt}`;
@@ -234,8 +286,9 @@ function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
       parentSpanKey: toolParentKey,
     });
     const toolTerminals = events.filter((event) => (event.type === 'TOOL_RESULT' || event.type === 'TOOL_FAILED')
-      && event.runId === parentId && event.toolCallId === start.toolCallId);
-    if (toolTerminals.length !== 1) throw new Error('SOURCE_TOOL_NOT_TERMINAL');
+      && event.runId === parentId && (event.streamId ?? 'initial') === sourceStreamId
+      && event.toolCallId === start.toolCallId);
+    if (toolTerminals.length !== 1) throw new LocalSnapshotError('invalid_source_invocation');
 
     const baseSpanKey = `source:${parentId}:${start.toolCallId}:${start.payload.childRunId}`;
     const invocation: SourceInvocation = {
@@ -243,6 +296,8 @@ function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
       childRunId: start.payload.childRunId,
       toolCallId: start.toolCallId,
       subagentType: start.payload.subagentType,
+      lifecycleOwner,
+      ...(start.streamId === undefined ? {} : { streamId: start.streamId }),
       baseSpanKey,
       toolSpanKey,
     };
@@ -254,12 +309,20 @@ function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
       name: `subagent.${start.payload.subagentType}`,
       parentSpanKey: toolSpanKey,
     });
-    const invocationTerminals = events.filter((event) => (event.type === 'SUBAGENT_COMPLETED' || event.type === 'SUBAGENT_FAILED')
-      && event.runId === parentId && event.payload.childRunId === start.payload.childRunId);
-    if (invocationTerminals.length !== 1) throw new Error('SOURCE_INVOCATION_NOT_TERMINAL');
+    const invocationTerminals = subagentTerminals.filter((event) => event.payload.childRunId === start.payload.childRunId);
+    if (invocationTerminals.length !== 1) throw new LocalSnapshotError('invalid_source_invocation');
+    const terminal = invocationTerminals[0];
+    if (terminal === undefined || terminal.toolCallId !== start.toolCallId
+      || terminal.streamId !== start.streamId
+      || sourceLifecycleOwner(terminal, parentId, start.payload.childRunId) !== lifecycleOwner) {
+      throw new LocalSnapshotError('invalid_source_invocation');
+    }
   }
 
-  if (invocationByChild.size !== childIds.length) throw new Error('SOURCE_INVOCATION_MISSING');
+  if (invocationByChild.size !== childIds.length || subagentTerminals.length !== childIds.length
+    || subagentTerminals.some((event) => !invocationByChild.has(event.payload.childRunId))) {
+    throw new LocalSnapshotError('invalid_source_invocation');
+  }
 
   for (const childId of childIds) {
     const invocation = invocationByChild.get(childId);
@@ -329,9 +392,24 @@ function deriveExpectedSpans(snapshot: AcceptanceSnapshot): ExpectedSpan[] {
       && (candidate.attemptId ?? String(candidate.payload.attempt)) === attemptId);
     if (terminalEvents.length !== 1) throw new Error('MODEL_ATTEMPT_NOT_TERMINAL');
     const terminal = terminalEvents[0];
-    const attempt: ModelAttempt = terminal?.type === 'MODEL_CALL_COMPLETED'
-      ? { state: 'completed', ...(terminal.payload.usage === undefined ? {} : { usage: terminal.payload.usage }) }
-      : { state: 'failed' };
+    if (terminal === undefined || (terminal.type !== 'MODEL_CALL_COMPLETED' && terminal.type !== 'MODEL_CALL_FAILED')) {
+      throw new Error('MODEL_ATTEMPT_NOT_TERMINAL');
+    }
+    const usage = safeModelUsage(terminal.payload.usage);
+    const finishReason = isSafeIdentifier(terminal.payload.finishReason)
+      ? terminal.payload.finishReason
+      : undefined;
+    const attempt: ModelAttempt = terminal.type === 'MODEL_CALL_COMPLETED'
+      ? {
+        state: 'completed',
+        ...(usage === undefined ? {} : { usage }),
+        ...(finishReason === undefined ? {} : { finishReason }),
+      }
+      : {
+        state: 'failed',
+        ...(usage === undefined ? {} : { usage }),
+        ...(finishReason === undefined ? {} : { finishReason }),
+      };
     addSpan({
       spanKey,
       agentRunId: event.runId,
@@ -374,12 +452,13 @@ function assessRemoteRuns(
   links: ReadonlyMap<string, TraceLink>,
   runsById: ReadonlyMap<string, RemoteRun>,
   rootTraceId: string,
-): { status: TraceVerification['status']; checkedSpanCount: number } {
+): { status: TraceVerification['status']; checkedSpanCount: number; reason: TraceVerificationDiagnostic['reason'] } {
   let needsAnotherQuery = false;
+  let unavailableReason: 'remote_unavailable' | 'usage_unavailable' = 'remote_unavailable';
   let checkedSpanCount = 0;
   for (const span of spans) {
     const link = links.get(span.spanKey);
-    if (link === undefined) return { status: 'unavailable', checkedSpanCount };
+    if (link === undefined) return { status: 'unavailable', checkedSpanCount, reason: 'missing_link' };
     const run = runsById.get(link.remoteRunId);
     if (run === undefined) {
       needsAnotherQuery = true;
@@ -389,49 +468,92 @@ function assessRemoteRuns(
     if (run.id !== link.remoteRunId || run.trace_id !== link.traceId || link.traceId !== rootTraceId
       || run.name !== span.name || run.run_type !== expectedRunType(span.kind)
       || remoteParentId(run) !== link.parentRemoteRunId || !isSafeLangSmithRunPayload(run)) {
-      return { status: 'failed', checkedSpanCount };
+      return { status: 'failed', checkedSpanCount, reason: 'remote_mismatch' };
     }
     if (!isRemoteTerminal(run)) {
       needsAnotherQuery = true;
       continue;
     }
     if (span.kind === 'model') {
-      const usageStatus = compareModelUsage(span, run);
-      if (usageStatus === 'failed') return { status: 'failed', checkedSpanCount };
-      if (usageStatus === 'unavailable') needsAnotherQuery = true;
+      const comparison = compareModelAttempt(span, run);
+      if (comparison.status === 'failed') {
+        return { status: 'failed', checkedSpanCount, reason: comparison.reason };
+      }
+      if (comparison.status === 'unavailable') {
+        needsAnotherQuery = true;
+        unavailableReason = comparison.reason;
+      }
     }
   }
   return needsAnotherQuery
-    ? { status: 'unavailable', checkedSpanCount }
-    : { status: 'verified', checkedSpanCount };
+    ? { status: 'unavailable', checkedSpanCount, reason: unavailableReason }
+    : { status: 'verified', checkedSpanCount, reason: 'verified' };
 }
 
-function compareModelUsage(span: ExpectedSpan, run: RemoteRun): 'verified' | 'failed' | 'unavailable' {
+function compareModelAttempt(
+  span: ExpectedSpan,
+  run: RemoteRun,
+):
+  | { status: 'verified'; reason: 'verified' }
+  | { status: 'failed'; reason: 'remote_mismatch' | 'usage_mismatch' }
+  | { status: 'unavailable'; reason: 'remote_unavailable' | 'usage_unavailable' } {
   const attempt = span.attempt;
-  if (attempt === undefined || attempt.state === 'failed') return 'unavailable';
+  if (attempt === undefined) return { status: 'unavailable', reason: 'usage_unavailable' };
+  const remoteOutcome = remoteModelOutcome(run);
+  if (remoteOutcome === 'unknown') return { status: 'unavailable', reason: 'remote_unavailable' };
+  if (remoteOutcome !== attempt.state) return { status: 'failed', reason: 'remote_mismatch' };
+
   const localUsage = attempt.usage;
-  if (localUsage === undefined || !isSafeToken(localUsage.inputTokens) || !isSafeToken(localUsage.outputTokens)) {
-    return 'unavailable';
-  }
-  if (run.error !== undefined && run.error !== null && run.error.length > 0) return 'failed';
+  if (localUsage === undefined) return { status: 'unavailable', reason: 'usage_unavailable' };
 
   const outputs = asRecord(run.outputs);
   const remoteUsage = asRecord(outputs?.usage_metadata);
-  const inputTokens = remoteUsage?.input_tokens;
-  const outputTokens = remoteUsage?.output_tokens;
-  const totalTokens = remoteUsage?.total_tokens;
-  if (remoteUsage === undefined || !isSafeToken(inputTokens) || !isSafeToken(outputTokens) || !isSafeToken(totalTokens)) {
-    return 'unavailable';
+  if (remoteUsage === undefined) return { status: 'unavailable', reason: 'usage_unavailable' };
+  const tokenFields = [
+    ['inputTokens', 'input_tokens'],
+    ['outputTokens', 'output_tokens'],
+  ] as const;
+  for (const [localKey, remoteKey] of tokenFields) {
+    const localValue = localUsage[localKey];
+    if (localValue === undefined) continue;
+    const remoteValue = remoteUsage[remoteKey];
+    if (!isSafeToken(remoteValue)) return { status: 'unavailable', reason: 'usage_unavailable' };
+    if (remoteValue !== localValue) return { status: 'failed', reason: 'usage_mismatch' };
   }
-  if (inputTokens !== localUsage.inputTokens || outputTokens !== localUsage.outputTokens
-    || totalTokens !== localUsage.inputTokens + localUsage.outputTokens) return 'failed';
+  const hasInputAndOutput = localUsage.inputTokens !== undefined && localUsage.outputTokens !== undefined;
+  if (hasInputAndOutput) {
+    const totalTokens = remoteUsage['total_tokens'];
+    if (!isSafeToken(totalTokens)) return { status: 'unavailable', reason: 'usage_unavailable' };
+    if (totalTokens !== localUsage.inputTokens + localUsage.outputTokens) {
+      return { status: 'failed', reason: 'usage_mismatch' };
+    }
+  } else if (localUsage.inputTokens === undefined && localUsage.outputTokens === undefined) {
+    return { status: 'unavailable', reason: 'usage_unavailable' };
+  }
 
   if (localUsage.cachedInputTokens !== undefined) {
     const details = asRecord(remoteUsage.input_token_details);
-    if (!isSafeToken(localUsage.cachedInputTokens) || !isSafeToken(details?.cache_read)) return 'unavailable';
-    if (details.cache_read !== localUsage.cachedInputTokens) return 'failed';
+    if (!isSafeToken(localUsage.cachedInputTokens) || !isSafeToken(details?.cache_read)) {
+      return { status: 'unavailable', reason: 'usage_unavailable' };
+    }
+    if (details.cache_read !== localUsage.cachedInputTokens) return { status: 'failed', reason: 'usage_mismatch' };
   }
-  return 'verified';
+  if (attempt.finishReason !== undefined) {
+    const remoteFinishReason = outputs?.['finishReason'];
+    if (typeof remoteFinishReason !== 'string') return { status: 'unavailable', reason: 'usage_unavailable' };
+    if (remoteFinishReason !== attempt.finishReason) return { status: 'failed', reason: 'usage_mismatch' };
+  }
+  return { status: 'verified', reason: 'verified' };
+}
+
+function remoteModelOutcome(run: RemoteRun): ModelAttempt['state'] | 'unknown' {
+  if (typeof run.error === 'string' && run.error.length > 0) return 'failed';
+  const outputStatus = asRecord(run.outputs)?.['status'];
+  const status = typeof outputStatus === 'string' ? outputStatus : run.status;
+  if (status === 'failed' || status === 'error') return 'failed';
+  if (status === 'completed' || status === 'success') return 'completed';
+  if (status === undefined && run.end_time !== undefined && run.end_time !== null) return 'completed';
+  return 'unknown';
 }
 
 export function isSafeLangSmithRunPayload(value: unknown): boolean {
@@ -542,6 +664,20 @@ function remoteParentId(run: RemoteRun): string | undefined {
   return run.parent_run_id ?? undefined;
 }
 
+type SourceLifecycleEvent = Extract<AcceptanceSnapshot['events'][number], {
+  type: 'SUBAGENT_STARTED' | 'SUBAGENT_COMPLETED' | 'SUBAGENT_FAILED';
+}>;
+
+function sourceLifecycleOwner(
+  event: SourceLifecycleEvent,
+  parentRunId: string,
+  childRunId: string,
+): 'parent' | 'child' | undefined {
+  if (event.runId === childRunId && event.parentRunId === parentRunId) return 'child';
+  if (event.runId === parentRunId && (event.parentRunId === undefined || event.parentRunId === parentRunId)) return 'parent';
+  return undefined;
+}
+
 function sameValues(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value) => right.includes(value));
 }
@@ -554,6 +690,19 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function safeModelUsage(value: {
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedInputTokens?: number;
+} | undefined): ModelAttempt['usage'] | undefined {
+  if (value === undefined) return undefined;
+  const usage: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } = {};
+  if (isSafeToken(value.inputTokens)) usage.inputTokens = value.inputTokens;
+  if (isSafeToken(value.outputTokens)) usage.outputTokens = value.outputTokens;
+  if (isSafeToken(value.cachedInputTokens)) usage.cachedInputTokens = value.cachedInputTokens;
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 function isSafeToken(value: unknown): value is number {

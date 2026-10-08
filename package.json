@@ -11,6 +11,7 @@
     "build": "tsc -p tsconfig.build.json",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "acceptance:real-model": "pnpm build && node apps/acceptance/real-model.mjs",
+    "acceptance:trace-probe": "pnpm build && node apps/acceptance/trace-probe.mjs",
     "acceptance:review": "pnpm build && node apps/acceptance/review.mjs",
     "lint": "eslint . --ignore-pattern apps/logs-lab/index.mjs",
     "lab:backend:up": "docker compose -p agentops-metrics -f infrastructure/metrics-lab/compose.yaml up -d",

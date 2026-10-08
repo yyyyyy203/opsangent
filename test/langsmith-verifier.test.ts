@@ -169,6 +169,47 @@ function createRemoteRun(
   };
 }
 
+function withFailedModelAttempt(
+  fixture: ReturnType<typeof createFixture>,
+  options: {
+    readonly localUsage?: { readonly inputTokens?: number; readonly outputTokens?: number; readonly cachedInputTokens?: number } | undefined;
+    readonly remoteStatus: string;
+    readonly remoteError?: string | undefined;
+    readonly remoteUsage?: Record<string, unknown> | undefined;
+  },
+): ReturnType<typeof createFixture> {
+  const events = fixture.snapshot.events.map((item) => {
+    if (item.type !== 'MODEL_CALL_COMPLETED') return item;
+    const localUsage = Object.hasOwn(options, 'localUsage') ? options.localUsage : EXPECTED_USAGE;
+    const failed: Extract<AgentEventEnvelopeV2, { type: 'MODEL_CALL_FAILED' }> = {
+      ...item,
+      type: 'MODEL_CALL_FAILED',
+      payload: {
+        error: { code: 'MODEL_ERROR', message: 'safe model failure', retryable: false },
+        attempt: item.payload.attempt,
+        retryable: false,
+        durationMs: item.payload.durationMs,
+        ...(localUsage === undefined ? {} : { usage: localUsage }),
+        finishReason: 'length',
+      },
+    };
+    return failed;
+  });
+  const remoteRuns = fixture.remoteRuns.map((run) => run.id === MODEL_REMOTE_ID
+    ? {
+      ...run,
+      status: options.remoteStatus,
+      ...(options.remoteError === undefined ? {} : { error: options.remoteError }),
+      outputs: {
+        status: options.remoteStatus,
+        usage_metadata: options.remoteUsage ?? { input_tokens: 12, output_tokens: 5, total_tokens: 17 },
+        finishReason: 'length',
+      },
+    }
+    : run);
+  return { ...fixture, snapshot: { ...fixture.snapshot, events }, remoteRuns };
+}
+
 function createFakeClient(responses: readonly (readonly RemoteRun[] | Error)[]) {
   const requests: QueryParams[] = [];
   let queryIndex = 0;
@@ -255,6 +296,139 @@ describe('verifyLangSmithTrace', () => {
     const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
 
     expect(result).toEqual({ status: 'verified', checkedSpanCount: fixture.links.length });
+  });
+
+  it('verifies the current child-owned Source lifecycle with a matching parent/tool/child identity', async () => {
+    const fixture = createFixture();
+    const events = fixture.snapshot.events.map((item) => item.type === 'SUBAGENT_STARTED'
+      || item.type === 'SUBAGENT_COMPLETED'
+      ? { ...item, runId: CHILD_RUN_ID, parentRunId: PARENT_RUN_ID }
+      : item);
+    const client = createFakeClient([fixture.remoteRuns]);
+
+    const result = await verifyLangSmithTrace({ ...fixture, snapshot: { ...fixture.snapshot, events }, client: client.client });
+
+    expect(result.status).toBe('verified');
+    expect(client.requests).toHaveLength(1);
+  });
+
+  it('rejects a child-owned Source terminal tied to a different parent tool call before querying', async () => {
+    const fixture = createFixture();
+    const events = fixture.snapshot.events.map((item) => {
+      if (item.type === 'SUBAGENT_STARTED' || item.type === 'SUBAGENT_COMPLETED') {
+        return { ...item, runId: CHILD_RUN_ID, parentRunId: PARENT_RUN_ID,
+          ...(item.type === 'SUBAGENT_COMPLETED' ? { toolCallId: 'different-tool-call' } : {}) };
+      }
+      return item;
+    });
+    const client = createFakeClient([fixture.remoteRuns]);
+    let diagnostic: unknown;
+
+    const result = await verifyLangSmithTrace({ ...fixture, snapshot: { ...fixture.snapshot, events }, client: client.client }, {
+      onDiagnostic: (value) => { diagnostic = value; },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(client.requests).toHaveLength(0);
+    expect(diagnostic).toEqual({ phase: 'local_snapshot', reason: 'invalid_source_invocation', remoteQueriesSent: 0 });
+  });
+
+  it('verifies a failed model attempt only when remote failure state and known usage match', async () => {
+    const fixture = withFailedModelAttempt(createFixture(), { remoteStatus: 'failed', remoteError: 'TRACE_ERROR' });
+    const client = createFakeClient([fixture.remoteRuns]);
+
+    const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
+
+    expect(result.status).toBe('verified');
+  });
+
+  it('rejects a failed local attempt when remote model status or known usage disagrees', async () => {
+    for (const remoteStatus of ['completed', 'failed'] as const) {
+      const fixture = withFailedModelAttempt(createFixture(), {
+        remoteStatus,
+        remoteError: remoteStatus === 'failed' ? 'TRACE_ERROR' : undefined,
+        remoteUsage: remoteStatus === 'failed' ? { input_tokens: 12, output_tokens: 6, total_tokens: 18 } : undefined,
+      });
+      const client = createFakeClient([fixture.remoteRuns]);
+
+      const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
+
+      expect(result.status).toBe('failed');
+    }
+  });
+
+  it('rejects a remote finish reason that disagrees with the known failed model attempt', async () => {
+    const fixture = withFailedModelAttempt(createFixture(), { remoteStatus: 'failed', remoteError: 'TRACE_ERROR' });
+    const remoteRuns = fixture.remoteRuns.map((run) => run.id === MODEL_REMOTE_ID
+      ? { ...run, outputs: { ...run.outputs, finishReason: 'stop' } }
+      : run);
+    const client = createFakeClient([remoteRuns]);
+
+    const result = await verifyLangSmithTrace({ ...fixture, client: client.client });
+
+    expect(result.status).toBe('failed');
+  });
+
+  it('keeps failed-attempt verification unavailable when local usage is missing', async () => {
+    const fixture = withFailedModelAttempt(createFixture(), {
+      localUsage: undefined,
+      remoteStatus: 'failed',
+      remoteError: 'TRACE_ERROR',
+    });
+    const client = createFakeClient([fixture.remoteRuns, fixture.remoteRuns, fixture.remoteRuns]);
+    let now = 0;
+
+    const result = await verifyLangSmithTrace({ ...fixture, client: client.client }, {
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); },
+    });
+
+    expect(result.status).toBe('unavailable');
+    expect(client.requests).toHaveLength(3);
+  });
+
+  it('reports invalid source identity locally and never queries remote spans', async () => {
+    const fixture = createFixture();
+    const events = fixture.snapshot.events.map((item) => item.type === 'SUBAGENT_STARTED'
+      ? { ...item, runId: CHILD_RUN_ID, parentRunId: 'another-parent' }
+      : item);
+    const client = createFakeClient([fixture.remoteRuns]);
+    let diagnostic: unknown;
+
+    const result = await verifyLangSmithTrace({ ...fixture, snapshot: { ...fixture.snapshot, events }, client: client.client }, {
+      onDiagnostic: (value) => { diagnostic = value; },
+    });
+
+    expect(result.status).toBe('failed');
+    expect(client.requests).toHaveLength(0);
+    expect(diagnostic).toEqual({ phase: 'local_snapshot', reason: 'invalid_source_invocation', remoteQueriesSent: 0 });
+  });
+
+  it('reports remote missing spans and usage mismatches with bounded query counts', async () => {
+    const fixture = createFixture();
+    let now = 0;
+    const missing = createFakeClient([[], [], []]);
+    let missingDiagnostic: unknown;
+    const unavailable = await verifyLangSmithTrace({ ...fixture, client: missing.client }, {
+      now: () => now,
+      sleep: (milliseconds) => { now += milliseconds; return Promise.resolve(); },
+      onDiagnostic: (value) => { missingDiagnostic = value; },
+    });
+    expect(unavailable.status).toBe('unavailable');
+    expect(missing.requests).toHaveLength(3);
+    expect(missingDiagnostic).toEqual({ phase: 'remote_query', reason: 'remote_unavailable', remoteQueriesSent: 3 });
+
+    const wrongUsage = fixture.remoteRuns.map((run) => run.id === MODEL_REMOTE_ID
+      ? { ...run, outputs: { usage_metadata: { input_tokens: 100, output_tokens: 5, total_tokens: 105 } } }
+      : run);
+    const mismatch = createFakeClient([wrongUsage]);
+    let mismatchDiagnostic: unknown;
+    const failed = await verifyLangSmithTrace({ ...fixture, client: mismatch.client }, {
+      onDiagnostic: (value) => { mismatchDiagnostic = value; },
+    });
+    expect(failed.status).toBe('failed');
+    expect(mismatch.requests).toHaveLength(1);
+    expect(mismatchDiagnostic).toEqual({ phase: 'remote_compare', reason: 'usage_mismatch', remoteQueriesSent: 1 });
   });
 
   it('fails closed when linked remote payloads contain fields outside the telemetry allowlist', async () => {

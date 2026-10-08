@@ -43,9 +43,16 @@ describe('acceptance SQLite reader', () => {
       await append(persistence, factory, logsId, 'RUN_FINISHED', { outcome: 'partial', durationMs: 1 });
       await persistence.evidence.save({
         evidenceId: 'metric-evidence-1', runId: metricsId, source: 'metric',
-        summary: { status: 'breached', failureRate: 0.15 }, raw: { privateCanary: 'sqlite-reader-raw-canary' },
+        summary: { status: 'breached', failureRate: 0.15, start: 1791421875, end: 1791422175 },
+        raw: { privateCanary: 'sqlite-reader-raw-canary' },
         businessTraceIds: [], capturedAt: now,
       });
+      const page = await persistence.queries.listEvidence(parentId);
+      expect(page.items).toHaveLength(1);
+      expect(page.items[0]?.timeRange).toEqual({
+        start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z',
+      });
+      expect(await persistence.queries.getEvidence(parentId, 'metric-evidence-1')).toEqual(page.items[0]);
     } finally {
       persistence.close();
     }
@@ -56,6 +63,7 @@ describe('acceptance SQLite reader', () => {
     expect(snapshot.events).toHaveLength(5);
     expect(snapshot.evidence).toMatchObject([{
       evidenceId: 'metric-evidence-1', runId: 'acceptance-metrics-child', retrievable: false,
+      timeRange: { start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z' },
     }]);
     expect(JSON.stringify(snapshot)).not.toContain('sqlite-reader-raw-canary');
   });

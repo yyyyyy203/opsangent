@@ -1,4 +1,5 @@
 import type { AgentError } from '../contracts/errors.js';
+import type { ModelUsage } from '../contracts/model.js';
 
 export type ModelFailureCategory =
   | 'auth'
@@ -17,6 +18,8 @@ export type ModelFailureDisposition = 'retryable' | 'fallback_only' | 'terminal'
 
 export interface ModelFailureOptions {
   disposition?: ModelFailureDisposition;
+  usage?: ModelUsage;
+  finishReason?: string;
 }
 
 const MODEL_FAILURE_PHASES: ReadonlySet<string> = new Set<ModelFailurePhase>([
@@ -32,6 +35,8 @@ export class ModelFailure extends Error implements AgentError {
   public readonly details: Record<string, unknown>;
   public readonly disposition: ModelFailureDisposition;
   public readonly fallbackAllowed: boolean;
+  declare public readonly usage?: ModelUsage;
+  declare public readonly finishReason?: string;
 
   public constructor(
     category: ModelFailureCategory,
@@ -46,7 +51,31 @@ export class ModelFailure extends Error implements AgentError {
     this.disposition = options.disposition ?? defaultDisposition(category, retryable);
     this.fallbackAllowed = this.disposition === 'retryable' || this.disposition === 'fallback_only';
     this.details = sanitizeDetails(category, details, this.disposition, explicitDisposition);
+    const usage = safeModelUsage(options.usage);
+    if (usage !== undefined) this.usage = usage;
+    if (options.finishReason !== undefined && /^(stop|tool_calls|length|content_filter)$/u.test(options.finishReason)) {
+      this.finishReason = options.finishReason;
+    }
   }
+}
+
+export function safeModelUsage(value: unknown): ModelUsage | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  const usage: ModelUsage = {};
+  for (const key of ['inputTokens', 'outputTokens', 'cachedInputTokens'] as const) {
+    const count = record[key];
+    if (count !== undefined && (typeof count !== 'number' || !Number.isSafeInteger(count) || count < 0)) return undefined;
+    if (typeof count === 'number') usage[key] = count;
+  }
+  if (usage.inputTokens !== undefined && usage.cachedInputTokens !== undefined && usage.cachedInputTokens > usage.inputTokens) return undefined;
+  return Object.keys(usage).length === 0 ? undefined : usage;
+}
+
+export function isModelFailureCategory(value: unknown): value is ModelFailureCategory {
+  return typeof value === 'string' && [
+    'auth', 'rate_limit', 'server', 'network', 'timeout', 'protocol', 'aborted', 'context_length', 'output_truncated',
+  ].includes(value);
 }
 
 function sanitizeDetails(

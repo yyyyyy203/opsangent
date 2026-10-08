@@ -252,8 +252,9 @@ class LangSmithSpanHandle implements SpanHandle {
     this.ended = true;
     this.onEnd();
     const safeError = toSafeLangSmithError(error);
+    const safeOutput = toSafeLangSmithOutput(error);
     this.track(async () => {
-      await this.run.end(undefined, safeError, this.now());
+      await this.run.end(Object.keys(safeOutput).length === 0 ? undefined : safeOutput, safeError, this.now());
       await this.run.patchRun();
     });
   }

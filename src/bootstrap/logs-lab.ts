@@ -41,6 +41,7 @@ export async function startLogsLab(options: LogsLabOptions): Promise<{
   statusUrl: string;
   scenario: SettlementScenario;
   snapshotId: string;
+  sourceWindow: { start: string; end: string };
   expiresAt: string;
   close(): Promise<void>;
 }> {
@@ -123,7 +124,12 @@ export async function startLogsLab(options: LogsLabOptions): Promise<{
     assertFresh();
     return {
       metricsMcpUrl: metricsMcp.url, logsMcpUrl: logsMcp.url, statusUrl: status.url,
-      scenario, snapshotId, expiresAt: new Date(expiresAtMs).toISOString(), close,
+      scenario, snapshotId,
+      sourceWindow: {
+        start: new Date(snapshot.start * 1_000).toISOString(),
+        end: new Date(snapshot.end * 1_000).toISOString(),
+      },
+      expiresAt: new Date(expiresAtMs).toISOString(), close,
     };
   } catch (error) {
     try { await close(); } catch (cleanupError) { throw new AggregateError([error, cleanupError], 'LOGS_LAB_START_FAILED'); }

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import {
   createLogsSubagentTool,
@@ -171,6 +171,31 @@ describe('logs_subagent runtime composition', () => {
     expect(value.summary).not.toContain('数据库是根因');
     expect(value.findings.some((finding) => finding.kind === 'observation' && finding.statement.includes('数据库是根因'))).toBe(false);
     expect(value.findings.some((finding) => finding.kind === 'inference' && finding.statement.startsWith('未验证推断：'))).toBe(true);
+  });
+
+  it('blocks an internal Logs capture that diverges from the immutable smoke window before collection', async () => {
+    const base = evidenceOptions();
+    const capture = vi.fn(base.recorder.capture.bind(base.recorder));
+    const expectedWindow = { start: '2026-09-14T00:00:00.000Z', end: '2026-09-14T00:05:00.000Z' };
+    const tool = createLogsSubagentTool({
+      ...base,
+      sourceWindow: expectedWindow,
+      recorder: { ...base.recorder, capture },
+      childAgentFactory: { create: (input) => createAgentRuntime({
+        model: new ScriptedModel([
+          { toolCalls: [{ id: 'capture-diverged', name: 'logs.capture', input: {
+            service: 'checkout', start: '2026-09-14T00:01:00.000Z', end: '2026-09-14T00:06:00.000Z',
+          } }] },
+          { text: '窗口不一致，未完成采集。', toolCalls: [] },
+        ]),
+        workspaceRoots: [], includeExternalBash: false, tools: [...input.tools],
+      }).agent },
+      collector: ({ request: sourceRequest }) => new LogsSourceReportCollector({ request: sourceRequest }),
+    });
+    await drainTool(tool, {
+      profileId: 'group-buy-market', service: 'checkout', ...expectedWindow, question: '调查结算日志',
+    }, 'parent-run-1');
+    expect(capture).not.toHaveBeenCalled();
   });
 
   it('keeps the child Tool list, strict source_report schema, and stable source identities', () => {

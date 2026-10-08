@@ -40,6 +40,7 @@ export interface LogsSubagentOptions extends Omit<LogEvidenceToolOptions, 'maxMo
   childAgentFactory: SourceChildAgentFactory;
   checkpoints?: CheckpointStore;
   clock?: Clock;
+  sourceWindow?: { start: string; end: string };
   lifecycle?: SubagentLifecyclePorts;
   maxAttempts?: number;
   validateRequest?: SourceSubagentDescriptor['validateRequest'];
@@ -56,7 +57,7 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
   const childTools: SourceChildToolsFactory = {
     create: ({ request, collector }) => {
       const scopedTools = options.collector === undefined ? childOnlyTools : childOnlyTools.map((tool) =>
-        tool.name === 'logs.capture' ? bindCaptureObservation(tool, request) : tool);
+        tool.name === 'logs.capture' ? bindCaptureObservation(tool, request, options.sourceWindow) : tool);
       return Object.freeze([...scopedTools, createSourceReportTool(collector)]);
     },
   };
@@ -91,13 +92,21 @@ export function createLogsSubagentTool(options: LogsSubagentOptions): Tool {
   return createSourceSubagentTool(descriptor);
 }
 
-function bindCaptureObservation(tool: Tool, request: SourceSubagentRequest): Tool {
+function bindCaptureObservation(
+  tool: Tool,
+  request: SourceSubagentRequest,
+  sourceWindow?: { start: string; end: string },
+): Tool {
   if (tool.call === undefined) return tool;
   const invoke = tool.call;
   return Object.freeze({
     ...tool,
     call: (input: Record<string, unknown>, callOptions: ToolCallOptions) => {
       if (input.service !== request.service) throw new SourceScopeError('Log capture service is outside the parent request.');
+      if (sourceWindow !== undefined && (input.start !== sourceWindow.start || input.end !== sourceWindow.end
+        || request.start !== sourceWindow.start || request.end !== sourceWindow.end)) {
+        throw new SourceScopeError('Log capture window is outside the immutable source snapshot.');
+      }
       return mapToolResult(invoke(input, callOptions), (response) => attachCaptureObservation(response, input));
     },
   });

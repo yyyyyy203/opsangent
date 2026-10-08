@@ -144,6 +144,7 @@ export function publicRunMissingEvidence(context: AgentContext): string[] {
 
 /** Safe public projection for bounded evidence metadata; raw payloads are never returned. */
 export function publicEvidenceFromRecord(record: EvidenceRecord): PublicEvidenceView {
+  const timeRange = record.source === 'metric' ? metricTimeRange(record.summary) : undefined;
   return {
     evidenceId: record.evidenceId,
     runId: record.runId,
@@ -151,10 +152,23 @@ export function publicEvidenceFromRecord(record: EvidenceRecord): PublicEvidence
     state: 'available',
     capturedAt: record.capturedAt,
     summary: publicSummary(record.summary),
+    ...(timeRange === undefined ? {} : { timeRange }),
     ...(record.rawSha256 === undefined ? {} : { rawSha256: record.rawSha256 }),
     traceIdCount: record.businessTraceIds.length,
     retrievable: false,
   };
+}
+
+function metricTimeRange(summary: unknown): PublicEvidenceView['timeRange'] {
+  if (!isRecord(summary)) return undefined;
+  const { start, end } = summary;
+  if (typeof start !== 'number' || typeof end !== 'number'
+    || !Number.isSafeInteger(start) || !Number.isSafeInteger(end)
+    || start < 0 || end < 0 || start >= end) return undefined;
+  const startDate = new Date(start * 1_000);
+  const endDate = new Date(end * 1_000);
+  if (!Number.isFinite(startDate.getTime()) || !Number.isFinite(endDate.getTime())) return undefined;
+  return { start: startDate.toISOString(), end: endDate.toISOString() };
 }
 
 /** Safe public projection for committed/partial large evidence manifests. */

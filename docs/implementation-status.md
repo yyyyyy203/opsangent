@@ -1,5 +1,27 @@
 # 实现进度与验证记录
 
+## 2026-10-08：真实烟测跨层契约修复离线收口
+
+完成已批准的真实烟测跨层修复：指标摘要中的有效 Unix 秒被确定性投影为公开 metric evidence `timeRange`（不改 SQLite Schema、不猜测旧记录）；Logs 在同一 capture evidence ID 上完成成功 search/read-slice 后可进入 report token cap，证据充分性仍由 Collector/硬门禁决定；Trace verifier 按实际 child-owned Source lifecycle 校验父/子 Run、toolCallId 和来源类型，并核验失败模型尝试的已知 usage/finishReason，缺失用量继续标 unavailable。
+
+修复了独立复审发现的 LangSmith `/info` 隐私/准入问题：HTTP 200 响应在 SDK 接触前必须通过严格 UTF-8 JSON 对象解析及 SDK 消费字段白名单；malformed/错误类型响应转为固定终止错误，不触发 SDK fallback 重试，不把响应片段写入 warning、诊断或报告。回归断言覆盖 200 非法 JSON/错误字段类型：只请求一次、无上传/查询、canary 不进入日志或结果。Task 3/4 的独立只读复审结论为无阻塞问题。
+
+新增真实 runtime → SQLite → public projection → acceptance → fake LangSmith 的离线联合契约测试；覆盖正确/错误窗口、证据归属、子 Run 截断失败、父子事件身份、远端 span 缺失和 usage 不匹配。最终质量门：全仓 lint、typecheck、build 和 Web typecheck/build 均通过；Vitest 在 2 个 worker 下 156 个文件通过、3 个 opt-in 文件跳过，1,286 项通过、7 项跳过。两项先前并发负载超时单独复跑通过，低并发全量复跑中未重现。
+
+本次由 bundled pnpm shim 启动时尝试从 registry 安装/解析包管理器并遇到网络/EPERM，因此等价调用仓库已安装的 Node 24 ESLint、TypeScript、Vitest 和 Vite 二进制完成质量门；Web typecheck/build 均通过。没有调用真实 LangSmith、真实模型或生产 Prometheus/Elasticsearch，也未做人工报告复核；故历史远端 multipart HTTP 422 仍需真实 Trace probe 独立验证，不能据离线结果宣称已修复。无 commit/push。
+
+## 2026-10-08：真实烟测修复的第二轮补强
+
+针对先前真实运行返回的 LangSmith multipart HTTP 422，进一步加固受审计后的 multipart wire 编码：JSON part 以独立 `Content-Length` 头声明 UTF-8 字节长度，`Content-Type` 为 `application/json`，且不带 `filename`。离线 fake 服务逐段校验实际 wire body；真实远端是否接受仍未确认。固定同一模拟快照的来源时间窗贯穿父提示、Metrics、Logs 与 capture；报告阶段 token cap 只由有匹配 evidence ID 的成功结果触发。验收报告升级为 schema v2，增加父子 Run/截断结果门禁及源码/构建输入 SHA-256 指纹；旧 v1 可读，复核时新门禁标为 `not_run`。
+
+本轮聚焦回归 289 项通过；全量测试 1153 项通过、7 项真实数据源 opt-in 测试跳过；lint、类型检查、构建以及 Web 类型检查/构建均通过。没有调用真实模型、LangSmith 或生产数据源，因此不能宣称既有远端 422 已通过真实端到端复验。详情见[2026-10-07 烟测修复验证记录](./verification/2026-10-07-real-model-smoke-repair.md)中的 2026-10-08 补强轮记录。
+
+## 最新增量：真实模型烟测失败诊断、上传审计与输出预算修复
+
+2026-10-07：按批准方案完成模型截断 usage/finishReason 保留、父子失败安全报告、LangSmith JSON/multipart/gzip 审计及响应正文超时治理；烟测接入查询 512、报告/汇总 1024 的阶段限额和父子/重试共享 5120 输出预留，仍保持 10 次 HTTP 上限。缺失可信 usage 不退还预留，截断工具 JSON 不执行、不重试/fallback；父 Run 完成也不会掩盖子 Run 的失败原因。公共 V2 失败事件只增加可选字段，旧事件/报告兼容，不改变 Harness/HITL/Checkpoint、生产工具 Schema 或证据仅摘要/引用的页面约定。
+
+本轮 ESLint、类型检查、构建和 114 项聚焦回归已通过；最终全量测试为 150 个文件、1144 项通过，3 个真实后端 opt-in 文件的 7 项按设计跳过。命令、回归证据及边界见[本轮修复验证](./verification/2026-10-07-real-model-smoke-repair.md)。当前执行进程未继承模型/LangSmith 凭据，没有发起真实模型或 LangSmith 远端请求，未消耗模型余额；真实烟测、人工复核及生产目标数据验收仍待独立执行。已有未提交改动保留，本轮未自动提交/push。
+
 ## 最新增量：本机真实后端验收与审查缺口收口
 
 2026-10-05：完成本轮实现审查和验收修复。Run/Evidence keyset 分页在 SQLite 与内存实现中统一使用 UTF-8/BINARY 顺序并严格校验游标；公共消息分页按实际 `{ message, version, truncated }` 包络及目标 `runId` 校验；Evidence 列表/详情和分页包络按 `PublicEvidenceView` 白名单校验，metric/log 摘要分别使用来源专属 Schema，未知字段（包括嵌套 `content`、`samples`）均 fail-closed。Evidence 列表项与本地接受快照、详情响应与列表项/本地快照均做完整字段结构化比较，保证 `state`、时间窗、哈希和计数等完整性元数据一致；尚未实现的 trace/change 摘要形状拒绝通过。SSE 中所有事件 payload 均执行对应严格 Schema 校验。LangSmith 远端 Run payload、公共事件/消息边界统一检查敏感值、字段名、凭据、私有路径、内部地址和 `file://` URI；`run_type` 必须是明确字符串类型，符合边界规则的 Unicode session name 可被接受。Durable Harness 结果切换保留共享 Tool/网络尝试预算账本，避免并行子执行中的消耗被旧快照回滚。

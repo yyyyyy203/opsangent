@@ -164,6 +164,24 @@ describe('LangSmithEventProjectorV2', () => {
     await expect(broken.flush()).resolves.toBeUndefined();
   });
 
+  it('projects failed model usage without the provider error message', async () => {
+    const observability = new RecordingObservability();
+    const projector = new LangSmithEventProjectorV2(observability);
+    await projector.project(event('MODEL_CALL_STARTED', {
+      provider: 'fixture', model: 'test-model', purpose: 'diagnosis', attempt: 1, inputSummary: 'safe',
+    }, { attemptId: 'attempt-1' }));
+    await projector.project(event('MODEL_CALL_FAILED', {
+      attempt: 1, retryable: false, durationMs: 1,
+      error: { code: 'MODEL_ERROR', message: 'PRIVATE_ERROR_CANARY', retryable: false, details: { category: 'output_truncated' } },
+      usage: { inputTokens: 120, outputTokens: 512 }, finishReason: 'length',
+    }, { attemptId: 'attempt-1' }));
+    const index = observability.starts.findIndex((span) => span.kind === 'llm');
+    expect(observability.handles[index]?.error).toMatchObject({
+      usage: { inputTokens: 120, outputTokens: 512 }, finishReason: 'length', category: 'output_truncated',
+    });
+    expect(JSON.stringify(observability.handles[index]?.error)).not.toContain('PRIVATE_ERROR_CANARY');
+  });
+
   it('does not export raw tool result evidence to LangSmith', async () => {
     const observability = new RecordingObservability();
     const projector = new LangSmithEventProjectorV2(observability);

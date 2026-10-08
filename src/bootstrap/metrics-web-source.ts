@@ -10,6 +10,7 @@ import type { ModelIdentity } from './model-identity.js';
 export interface MetricsWebSourceOptions {
   mcpUrl: string;
   model: ChatModel;
+  sourceWindow?: { start: string; end: string };
   modelIdentity?: ModelIdentity;
 }
 
@@ -53,6 +54,7 @@ export function createMetricsWebSource(
     childAgentFactory,
     checkpoints: ports.checkpoints,
     clock: ports.clock,
+    ...(options.sourceWindow === undefined ? {} : { sourceWindow: options.sourceWindow }),
     lifecycle: { ...ports.events, ids: ports.ids },
   });
   return Object.freeze([metricsSubagent]);

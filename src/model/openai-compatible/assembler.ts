@@ -39,7 +39,11 @@ export class OpenAIStreamAssembler {
 
   public finish(): ModelResponse {
     if (this.finishReason === undefined) throw protocolFailure('Model stream ended without a finish reason.');
-    if (this.finishReason === 'length') throw new ModelFailure('output_truncated', 'Model output was truncated.', false);
+    if (this.finishReason === 'length') throw new ModelFailure('output_truncated', 'Model output was truncated.', false, {}, {
+      disposition: 'terminal',
+      ...(this.usage === undefined ? {} : { usage: this.usage }),
+      finishReason: 'length',
+    });
     if (!SUCCESS_FINISH_REASONS.has(this.finishReason)) throw protocolFailure('Model stream returned an unsupported finish reason.');
     if (!this.sawText && !this.sawToolCall) throw protocolFailure('Model returned an empty response.');
     if (this.finishReason === 'tool_calls' && !this.sawToolCall) throw protocolFailure('Tool-call finish reason had no tool calls.');

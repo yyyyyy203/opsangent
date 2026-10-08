@@ -26,6 +26,7 @@ export interface LogsWebSourceOptions {
   model: ChatModel;
   /** Stable across Web restarts so previously issued evidence cursors remain valid. */
   cursorSecret: string;
+  sourceWindow?: { start: string; end: string };
   modelIdentity?: ModelIdentity;
 }
 
@@ -79,7 +80,8 @@ export function createLogsWebSource(
     childAgentFactory,
     checkpoints: ports.checkpoints,
     lifecycle: { ...ports.events, ids: ports.ids },
-    validateRequest: (request, execution) => validateLogsRequest(request, execution, ports),
+    validateRequest: (request, execution) => validateLogsRequest(request, execution, ports, options.sourceWindow),
+    ...(options.sourceWindow === undefined ? {} : { sourceWindow: options.sourceWindow }),
     collector: ({ request }) => new LogsSourceReportCollector({ request }),
   });
   return Object.freeze([logsSubagent]);
@@ -89,6 +91,7 @@ function validateLogsRequest(
   request: SourceSubagentRequest,
   execution: Omit<SourceSubagentExecution, 'childRunId'>,
   ports: RuntimeToolPorts,
+  sourceWindow?: { start: string; end: string },
 ): void {
   if (request.profileId !== 'simulation' || request.service !== 'checkout') {
     throw new SourceSubagentFailure('POLICY_DENIED', 'Logs request is outside the configured Profile.', false);
@@ -102,6 +105,9 @@ function validateLogsRequest(
   if (execution.remainingToolCalls === undefined || execution.remainingToolCalls < 2
     || (execution.toolCallBudget !== undefined && execution.toolCallBudget.remaining < 2)) {
     throw new SourceSubagentFailure('BUDGET_EXCEEDED', 'Logs child requires two remaining Tool calls.', false);
+  }
+  if (sourceWindow !== undefined && (request.start !== sourceWindow.start || request.end !== sourceWindow.end)) {
+    throw new SourceSubagentFailure('INVALID_INPUT', 'Logs request must match the immutable source snapshot window.', false);
   }
   try {
     validateLogsScope(request, logsLabQueryPolicy, ports.clock.now().getTime());

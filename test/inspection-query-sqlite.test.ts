@@ -233,12 +233,14 @@ describe('SQLite inspection query read model', () => {
       await persistence.eventMessages.append('parent-run', 0, [relation]);
       await persistence.evidence.save({
         evidenceId: 'child-evidence-1', runId: 'child-run', source: 'metric',
-        summary: { failureRate: 0.15 }, raw: { private: 'never-public' }, businessTraceIds: [],
+        summary: { failureRate: 0.15, start: 1791421875, end: 1791422175 },
+        raw: { private: 'never-public' }, businessTraceIds: [],
         capturedAt: '2026-09-30T10:00:01.000Z',
       });
       await persistence.evidence.save({
         evidenceId: 'child-evidence-2', runId: 'child-run', source: 'metric',
-        summary: { failureRate: 0.2 }, raw: { private: 'never-public' }, businessTraceIds: [],
+        summary: { failureRate: 0.2, start: 1791421875, end: 1791422175 },
+        raw: { private: 'never-public' }, businessTraceIds: [],
         capturedAt: '2026-09-30T10:00:02.000Z',
       });
 
@@ -249,8 +251,14 @@ describe('SQLite inspection query read model', () => {
       expect(first.items.map((item) => item.evidenceId)).toEqual(['child-evidence-1']);
       expect(second.items.map((item) => item.evidenceId)).toEqual(['child-evidence-2']);
       expect(first.items[0]?.runId).toBe('child-run');
+      for (const item of [...first.items, ...second.items]) {
+        expect(item.timeRange).toEqual({
+          start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z',
+        });
+      }
       expect(await persistence.queries.getEvidence('parent-run', 'child-evidence-1')).toMatchObject({
         evidenceId: 'child-evidence-1', runId: 'child-run', retrievable: false,
+        timeRange: { start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z' },
       });
       expect(JSON.stringify([first, second])).not.toContain('never-public');
     } finally {

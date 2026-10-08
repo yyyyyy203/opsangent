@@ -64,7 +64,7 @@ Windows 若 `pnpm` 不在 PATH，定向测试可运行 `& .\node_modules\.bin\vi
 - Produces: `logsSearchPageInput`/`logsCloseSnapshotInput` Zod strict Schema，`LogsSearchPageInput = z.infer<typeof logsSearchPageInput>`、`LogsPageWireResult`。
 - Produces: `LogsPageBackend`，方法 `searchPage(input:LogsSearchPageInput, signal:AbortSignal):Promise<LogsPageWireResult>`、`closeSnapshot(input:{sourceSnapshotId:string}, signal:AbortSignal):Promise<void>`、`close():Promise<void>`。
 
-- [ ] **Step 1: 写严格 Schema 和越权测试。**
+- [x] **Step 1: 写严格 Schema 和越权测试。**
 
 ```ts
 it('rejects model supplied indices and query DSL', () => {
@@ -82,9 +82,9 @@ it('rejects stale scopes instead of accepting fake healthy data', () => {
 
 加边界：无时区/非法日历日期、start≥end、窗口非 300 秒、未来超过 30 秒、非 checkout、cursor/snapshot 仅一项、空 requestId、超长 contains/traceId、未知结果字段。
 
-- [ ] **Step 2: 跑红。** `pnpm exec vitest run test/logs-protocol.test.ts test/logs-profile.test.ts`；预期因新导出不存在失败。
+- [x] **Step 2: 跑红。** `pnpm exec vitest run test/logs-protocol.test.ts test/logs-profile.test.ts`；预期因新导出不存在失败。
 
-- [ ] **Step 3: 定义最小接口和校验。**
+- [x] **Step 3: 定义最小接口和校验。**
 
 ```ts
 export interface LogsQueryPolicy {
@@ -101,8 +101,8 @@ export const logsLabQueryPolicy: Readonly<LogsQueryPolicy> = Object.freeze({
 
 结果判别联合：`{status:'available',records,sourceSnapshotId,nextCursor?}` 或 `{status:'source_error',code,reason?}`。code 限现有 INVALID_INPUT/POLICY_DENIED/UNAVAILABLE/MCP_AUTH_ERROR/MCP_NETWORK_ERROR/MCP_TIMEOUT/MCP_RATE_LIMITED/MCP_SERVER_ERROR/MCP_PROTOCOL_ERROR/ABORTED/BUDGET_EXCEEDED；reason 限 `snapshot_expired|cursor_invalid|scope_denied|response_too_large|source_unavailable`。不返回异常原文。首次新服务器查询要求 requestId；游标请求必须有 sourceSnapshotId。
 
-- [ ] **Step 4: 跑绿并 typecheck。** 同 Step 2，加 `pnpm typecheck`。期望所有新 Scope 边界通过，既有协议导出保持不变。
-- [ ] **Step 5: 审查后小提交。** 只 add 本任务 6 个文件；`git commit -m "feat(logs): define bounded readonly page protocol and scope"`。
+- [x] **Step 4: 跑绿并 typecheck。** 同 Step 2，加 `pnpm typecheck`。期望所有新 Scope 边界通过，既有协议导出保持不变。
+- [x] **Step 5: 审查后小提交。** 只 add 本任务 6 个文件；`git commit -m "feat(logs): define bounded readonly page protocol and scope"`。
 
 ### Task 2: 有界 ES HTTP 与 PIT 分页
 
@@ -124,7 +124,7 @@ export const logsLabQueryPolicy: Readonly<LogsQueryPolicy> = Object.freeze({
 - Produces: `redactLogRecord(record:NormalizedLogRecord):NormalizedLogRecord`，无基础设施依赖的纯函数；从 Recorder 原 defaultRedactor/redactFields/redactValue/redactText 提取，行为与 redaction/v1 相同，新导出是相容增量。
 - Registry 为适配器私有；不得从 contracts 或 agent 引用具体类。
 
-- [ ] **Step 1: 写 HTTP 边界、轮换 PIT 和过期测试。** 假 fetch 由 Vitest `vi.fn<typeof fetch>()` 构造 Response 队列；不启动 Docker。
+- [x] **Step 1: 写 HTTP 边界、轮换 PIT 和过期测试。** 假 fetch 由 Vitest `vi.fn<typeof fetch>()` 构造 Response 队列；不启动 Docker。
 
 ```ts
 it('keeps logical snapshot stable when Elasticsearch rotates PIT', async () => {
@@ -152,9 +152,9 @@ it('keeps logical snapshot stable when Elasticsearch rotates PIT', async () => {
 
 矩阵：交错会话、相同游标重试、首次查询重试、cursor 跨查询/篡改、PIT 404、16 会话上限、过期清理、HTTP 重定向、无 body、分片累计超 1 MiB、单条超 8 KiB、无 sort、非法 _source、敏感字段脱敏、Abort、5xx 与鉴权的结构化映射。
 
-- [ ] **Step 2: 跑红。** `pnpm exec vitest run test/elasticsearch-http.test.ts test/elasticsearch-log-source.test.ts test/log-snapshot-registry.test.ts test/log-redaction.test.ts`；预期新模块不存在。
+- [x] **Step 2: 跑红。** `pnpm exec vitest run test/elasticsearch-http.test.ts test/elasticsearch-log-source.test.ts test/log-snapshot-registry.test.ts test/log-redaction.test.ts`；预期新模块不存在。
 
-- [ ] **Step 3: 最小实现传输和分页状态机。**
+- [x] **Step 3: 最小实现传输和分页状态机。**
 
 ```ts
 const body = {
@@ -174,8 +174,9 @@ optional filters 只翻译为固定 term/match_phrase，不接收 DSL。HTTP 用
 
 Registry 由实例拥有，注入时钟/ID；串行化同一 session 页查询，维护固定查询摘要、初始请求 ID、最新 PIT、第一页/最近页有界缓存。游标 HMAC 比较使用 timingSafeEqual；若重试返回同页则不能前移 cursor。超期返回 UNAVAILABLE，不开新 PIT 拼接。首次查无记录仍返回 available 空页，由上层解释为无证据而不是健康。
 
-- [ ] **Step 4: 定向跑绿，审查缓存和释放。** Step 2 命令，加 `pnpm exec vitest run test/streaming-evidence-recorder.test.ts`；确认任何单次错误都不会暴露 ES body、索引、PIT ID 或凭据。
-- [ ] **Step 5: 小提交。** 只 add 本任务明确路径；`git commit -m "feat(elk): implement bounded PIT log pagination"`。
+- [x] **Step 4: 定向跑绿，审查缓存和释放。** Step 2 命令，加 `pnpm exec vitest run test/streaming-evidence-recorder.test.ts`；确认任何单次错误都不会暴露 ES body、索引、PIT ID 或凭据。
+- [x] **Step 5: 小提交。** 只 add 本任务明确路径；`git commit -m "feat(elk): implement bounded PIT log pagination"`。
+- [x] **Fix round 1: PIT 幂等性与生命周期复审。** 提前预留并发会话额度、保留 requestId tombstone 至查询重试有效期结束、串行化关闭与 PIT 轮换、固定 HTTP 响应上限；提交 `5ffe559`。专项 43 项与全量 703 项通过；独立复审确认 5 项发现均已修复且无新增严重问题。复审记录见 `.superpowers/sdd/2026-10-03-logs-web-elasticsearch-integration/review-7dabd71..5ffe559-result.md`。
 
 ### Task 3: 只读 MCP、lazy 接入与预算贯穿
 
@@ -183,20 +184,20 @@ Registry 由实例拥有，注入时钟/ID；串行化同一 session 页查询�
 
 - Create: `src/infrastructure/mcp/logs-server.ts`
 - Create: `src/bootstrap/lazy-elk-evidence-source.ts`
-- Modify: `src/infrastructure/mcp/index.ts`、`src/infrastructure/elk/paged-evidence-source.ts`、`src/bootstrap/log-evidence-tools.ts`
+- Modify: `src/mcp/logs-protocol.ts`、`src/infrastructure/mcp/index.ts`、`src/infrastructure/mcp/http-connection.ts`、`src/tool/adapters/mcp-tool-adapter.ts`、`src/infrastructure/elk/paged-evidence-source.ts`、`src/bootstrap/log-evidence-tools.ts`、`src/bootstrap/index.ts`
 - Test: `test/logs-mcp-server.test.ts`、`test/lazy-elk-evidence-source.test.ts`
-- Extend: `test/paged-evidence-source.test.ts`、`test/log-evidence-tools.test.ts`
+- Extend: `test/paged-evidence-source.test.ts`、`test/log-evidence-tools.test.ts`、`test/mcp-http.test.ts`
 
 **Interfaces:**
 
 - Consumes: Task 1 `LogsPageBackend`；既有 `McpConnection`、`ResilientExecutor`、`SourceCircuitBreaker`、`RuntimeToolPorts`。
 - Produces: `startLogsMcpServer(source:LogsPageBackend, options:{host?:string;port?:number;maxBodyBytes?:number}):Promise<{url:string;close():Promise<void>}>`。
-- Produces: `createLazyElkEvidenceSource(options:{mcpUrl:string;executor:ResilientExecutor;now:()=>number;registerShutdownHook:(callback:()=>Promise<void>)=>void}):LogEvidencePageSource`。
+- Produces: `createLazyElkEvidenceSource(options:{mcpUrl:string;executor:ResilientExecutor;now:()=>number;registerShutdownHook:(callback:()=>Promise<void>)=>void;connectionFactory?:(url:string)=>McpConnection}):LogEvidencePageSource`。`connectionFactory` 仅为测试与传输注入 seam，默认使用 `HttpMcpConnection`。
 - Additive `ElkPageRequestOptions`：`{signal?:AbortSignal;deadline?:number;networkAttemptBudget?:{remaining:number};requestId?:string}`；扩展既有 `pages` 参数，`ElkPageClient.fetchPage` 增加同名可选字段。
 - Additive `LogEvidenceToolOptions.clock?:Clock`，缺省 systemClock；Web 注入已有 ports.clock，采集的绝对期限为 min(父期限，开始时刻+budget.maxDurationMs)。
 - Additive `ElkPageClient.closeSnapshot?(input:{sourceSnapshotId:string;signal:AbortSignal}):Promise<void>`；旧注入式 Client 不实现也能工作。
 
-- [ ] **Step 1: 写预算、协议错误与 finally 释放测试。**
+- [x] **Step 1: 写预算、协议错误与 finally 释放测试。**
 
 ```ts
 it('forwards the same deadline and ledger through every page', async () => {
@@ -219,9 +220,9 @@ it('forwards the same deadline and ledger through every page', async () => {
 
 再测 closeSnapshot 在 EOF、break、Abort 各一次；清理失败不覆盖原错误；过期 UNAVAILABLE 不重试；5xx 最多 3 次实际页调用；ledger 为 0 无网络请求；仅固定两个工具，Origin/Host/GET/未知工具/超体积被拒绝。
 
-- [ ] **Step 2: 跑红。** `pnpm exec vitest run test/logs-mcp-server.test.ts test/lazy-elk-evidence-source.test.ts test/paged-evidence-source.test.ts test/log-evidence-tools.test.ts`；预期新方法与预算断言失败。
+- [x] **Step 2: 跑红。** `pnpm exec vitest run test/logs-mcp-server.test.ts test/lazy-elk-evidence-source.test.ts test/paged-evidence-source.test.ts test/log-evidence-tools.test.ts`；预期新方法与预算断言失败。
 
-- [ ] **Step 3: 组装与最小兼容改动。** MCP Server 复用 settlement-server 的 stateless transport/loopback/Host/Origin/Abort 模式，返回一个 structuredContent，不接收远端任意工具。同步验证固定 schema 和 readonly 标记后才绑定。
+- [x] **Step 3: 组装与最小兼容改动。** MCP Server 复用 settlement-server 的 stateless transport/loopback/Host/Origin/Abort 模式，返回一个 structuredContent，不接收远端任意工具。同步验证固定 schema 和 readonly 标记后才绑定；`HttpMcpConnection.listTools` 必须保留受限的 annotations 元数据供 lazy source 校验，不能把远端任意能力传给 Harness。
 
 ```ts
 const captureKey = `log:${callOptions.runId}:${callOptions.toolCallId}:${queryDigest}`;
@@ -244,8 +245,8 @@ lazy source 分别为 connect、listTools、每次页调用使用同一 executor
 
 iterate 的 try/finally 调 closeSnapshot：独立 1 秒 AbortSignal、无 retry，不使用已中断 parent signal，注册 shutdown 关闭 connection。保留原 snapshot mismatch/repeated cursor 校验。
 
-- [ ] **Step 4: 跑绿及既有 MCP 回归。** Step 2，加 `pnpm exec vitest run test/mcp-http.test.ts test/mcp-resilience.test.ts test/lazy-settlement-tool.test.ts`。
-- [ ] **Step 5: 小提交。** 只 add 本任务明确路径；`git commit -m "feat(mcp): connect readonly logs with shared paging budgets"`。
+- [x] **Step 4: 跑绿及既有 MCP 回归。** Step 2，加 `pnpm exec vitest run test/mcp-http.test.ts test/mcp-resilience.test.ts test/lazy-settlement-tool.test.ts`。
+- [x] **Step 5: 小提交。** 只 add 本任务明确路径；`git commit -m "feat(mcp): connect readonly logs with shared paging budgets"`。
 
 ### Task 4: 隔离 Logs Lab 与流式种数
 
@@ -265,7 +266,7 @@ iterate 的 try/finally 调 closeSnapshot：独立 1 秒 AbortSignal、无 retry
 - Produces: `writeLogFixture(options:{url:string;index:string;records:AsyncIterable<NormalizedLogRecord>;signal:AbortSignal;fetch?:typeof globalThis.fetch}):Promise<{recordCount:number}>`。
 - Produces: `startLogsLab(options:{elasticsearchUrl:string;prometheusUrl:string;initialScenario?:SettlementScenario;cursorSecret:string;now?:()=>number;id?:()=>string;metricsPort?:number;statusPort?:number;metricsMcpPort?:number;logsMcpPort?:number}):Promise<{metricsMcpUrl:string;logsMcpUrl:string;statusUrl:string;close():Promise<void>}>`。
 
-- [ ] **Step 1: 写场景一致性和部分启动清理测试。**
+- [x] **Step 1: 写场景一致性和部分启动清理测试。**
 
 ```ts
 it('uses one snapshot for counters and SQL timeout logs', async () => {
@@ -282,9 +283,9 @@ it('uses one snapshot for counters and SQL timeout logs', async () => {
 
 补 normal/low_sample，Bulk HTTP 200 含 item error 必须失败，512 KiB 包限、最后换行、refresh/count 不匹配、只写本次 index；启动失败只关闭已创建服务，状态接口不准切换，过期状态不显示 ready。
 
-- [ ] **Step 2: 跑红。** `pnpm exec vitest run test/log-fixtures.test.ts test/log-fixture-writer.test.ts test/logs-lab.test.ts`；新模块/方法不存在。
+- [x] **Step 2: 跑红。** `pnpm exec vitest run test/log-fixtures.test.ts test/log-fixture-writer.test.ts test/logs-lab.test.ts`；新模块/方法不存在。
 
-- [ ] **Step 3: 最小实现。** 创建唯一 `agentops-lab-logs-<snapshotId>`，keyword service/level/exception/traceId、date timestamp、text message；不创建任意模板或修改已有索引。
+- [x] **Step 3: 最小实现。** 创建唯一 `agentops-lab-logs-<snapshotId>`，keyword service/level/exception/traceId、date timestamp、text message；不创建任意模板或修改已有索引。
 
 ```ts
 const threshold = 512 * 1024;
@@ -310,8 +311,9 @@ Compose 固定 ES 8.19.12、512 MiB heap，专用 Prometheus 复用已有 v3.5.0
 
 CLI 读取 AGENTOPS_LOGS_LAB_SCENARIO/ELASTICSEARCH_URL/LOGS_LAB_PROMETHEUS_URL/LOGS_LAB_CURSOR_SECRET，secret 至少 32 字节；只打印安全 URL、scenario、有效期，不打印 secret/index。SIGINT 关闭自己服务，不删除 Docker 卷或任何业务索引。脚本名 `logs:backend:up`、`logs:backend:stop`、`logs:lab`。
 
-- [ ] **Step 4: 跑绿与配置检查。** Step 2，加 `docker compose -p agentops-logs -f infrastructure/logs-lab/compose.yaml config --quiet`；只校验，不在本任务擅自启动用户 Docker。
-- [ ] **Step 5: 小提交。** 只 add 本任务文件；`git commit -m "feat(lab): add immutable Elasticsearch log scenarios"`。
+- [x] **Step 4: 跑绿与配置检查。** Step 2，加 `docker compose -p agentops-logs -f infrastructure/logs-lab/compose.yaml config --quiet`；只校验，不在本任务擅自启动用户 Docker。
+- [x] **Step 5: 小提交。** 只 add 本任务文件；`git commit -m "feat(lab): add immutable Elasticsearch log scenarios"`。
+- [x] **Fix round 1: readiness 与启动超时复审修复。** 以 `9519d37` 为 base，提交 `63ab103`；ready 等待精确 Prometheus 快照，fixture 写入和轮询受共享启动 deadline 约束并在失败时逆序清理，补充 `errors=false` 下单项失败覆盖。当前提交定向测试 21/21 通过；完整门禁见隐藏实施报告。复核代理未及时返回，主控按原三项逐一核对实现/测试并复跑定向测试，未发现未解决项。真实 Docker/Prometheus/Elasticsearch 仍留到 Task 7 opt-in 验收。
 
 ### Task 5: 确定性的 Logs 来源报告
 
@@ -328,7 +330,7 @@ CLI 读取 AGENTOPS_LOGS_LAB_SCENARIO/ELASTICSEARCH_URL/LOGS_LAB_PROMETHEUS_URL/
 - Produces: `LogsSourceReportCollector(options:{request:SourceSubagentRequest}) implements SourceReportCollector`。
 - Additive `LogsSubagentOptions.validateRequest?:SourceSubagentDescriptor['validateRequest']` 和 `collector?:(input:{request:SourceSubagentRequest})=>SourceReportCollector`；未注入时保持现有 generic collector 行为。
 
-- [ ] **Step 1: 写模型伪造事实与错误引用测试。**
+- [x] **Step 1: 写模型伪造事实与错误引用测试。**
 
 ```ts
 it('does not accept model text as authoritative log counts', () => {
@@ -356,9 +358,9 @@ it('does not accept model text as authoritative log counts', () => {
 
 加 source_report 未提交→partial、无 capture→unavailable、partial 不被报告覆盖、伪造引用/traceId 拒绝、多个快照不能合并成完整、聚合结果仅能引用观察过的证据。
 
-- [ ] **Step 2: 跑红。** `pnpm exec vitest run test/logs-source-report-collector.test.ts test/logs-subagent-runtime.test.ts`。
+- [x] **Step 2: 跑红。** `pnpm exec vitest run test/logs-source-report-collector.test.ts test/logs-subagent-runtime.test.ts`。
 
-- [ ] **Step 3: 最小报告实现。** 使用 DefaultSourceReportCollector 处理引用/coverage/partial；额外观察实际 capture 与 aggregate facts，以受限解析器核对安全整数、分布、引用关系。finalize summary/observation 由事实渲染，不复制候选 summary 或候选数值。
+- [x] **Step 3: 最小报告实现。** 使用 DefaultSourceReportCollector 处理引用/coverage/partial；额外观察实际 capture 与 aggregate facts，以受限解析器核对安全整数、分布、引用关系。finalize summary/observation 由事实渲染，不复制候选 summary 或候选数值。
 
 ```ts
 const statement = `采集到 ${recordCount} 条日志；其中 SQLTimeoutException ${sqlTimeoutCount} 条。`;
@@ -373,8 +375,8 @@ const candidate: SourceFinding = {
 
 只有实际观察到 SQLTimeoutException 才生成该候选，不解释成结算失败率；其他异常返回实际有界排名。缺失 Trace 用固定 missingEvidence 项明示，不将缺 Trace 等同日志采集失败。Report 不能晋级长期经验。
 
-- [ ] **Step 4: 跑绿和 generic Source 回归。** Step 2，加 `pnpm exec vitest run test/source-subagent-runner.test.ts test/source-report-collector.test.ts test/metrics-source-report-collector.test.ts`。
-- [ ] **Step 5: 小提交。** add 本任务 4 文件；`git commit -m "feat(logs): derive source facts from observed evidence"`。
+- [x] **Step 4: 跑绿和 generic Source 回归。** Step 2，加 `pnpm exec vitest run test/source-subagent-runner.test.ts test/source-report-collector.test.ts test/metrics-source-report-collector.test.ts`。
+- [x] **Step 5: 小提交。** add 本任务 4 文件；`git commit -m "feat(logs): derive source facts from observed evidence"`。
 
 ### Task 6: Web 的共享 Blob/Logs 组装
 

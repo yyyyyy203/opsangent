@@ -140,6 +140,7 @@ export function createAcceptanceFixture(caseId: AcceptanceCaseId): AcceptanceInp
     evidence,
     events,
     codeRevision: 'fixture-revision-1',
+    sourceFingerprint: 'a'.repeat(64),
     profileRevision: 'simulation-v1',
     snapshotId: `snapshot-${caseId}`,
     reports,

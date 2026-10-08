@@ -1,6 +1,7 @@
 import type { AgentEventPayloadMap, AgentEventTypeV2, AgentMessage, ChatModel, Clock, IdGenerator, ModelCallOptions, ModelResponse, ModelStreamEvent, Tool } from '../contracts/index.js';
 import { toAgentError } from '../contracts/errors.js';
 import type { EventCreationContextV2, EventFactoryV2Like, EventPublisherV2Like } from '../contracts/event-publisher.js';
+import { isModelFailureCategory, ModelFailure } from './model-failure.js';
 
 export interface EventedChatModelOptions {
   provider: string;
@@ -79,11 +80,20 @@ export class EventedChatModel implements ChatModel {
       }
     } catch (error) {
       const failure = toAgentError(error, 'MODEL_ERROR');
+      const category = failure.details?.category;
+      const safeError = {
+        code: failure.code, message: failure.message, retryable: failure.retryable,
+        ...(isModelFailureCategory(category) ? { details: { category } } : {}),
+      };
       if (textStarted) {
         await this.publish('CONTENT_BLOCK_COMPLETED', base, { messageId, blockId, blockSummary: 'partial text output' , index: 0, block: { type: 'text', blockId, text } });
-        await this.publish('MESSAGE_FAILED', base, { messageId, error: { code: failure.code, message: failure.message, retryable: failure.retryable } });
+        await this.publish('MESSAGE_FAILED', base, { messageId, error: safeError });
       }
-      await this.publish('MODEL_CALL_FAILED', base, { error: { code: failure.code, message: failure.message, retryable: failure.retryable }, attempt: 1, retryable: failure.retryable, durationMs: Math.max(0, clock.now().getTime() - startedAt) });
+      await this.publish('MODEL_CALL_FAILED', base, {
+        error: safeError, attempt: 1, retryable: failure.retryable, durationMs: Math.max(0, clock.now().getTime() - startedAt),
+        ...(error instanceof ModelFailure && error.usage !== undefined ? { usage: error.usage } : {}),
+        ...(error instanceof ModelFailure && error.finishReason !== undefined ? { finishReason: error.finishReason } : {}),
+      });
       throw error;
     }
   }

@@ -151,6 +151,19 @@ describe('metrics_subagent runtime composition', () => {
     expect(result.isError).not.toBe(true);
   });
 
+  it('requires an injected immutable smoke snapshot window to match exactly', async () => {
+    let created = false;
+    const tool = createMetricsSubagentTool({
+      profile: settlementMetricsLabProfile,
+      settlementTool: settlementTool(),
+      childAgentFactory: { create: () => { created = true; throw new Error('child must not be created'); } },
+      clock: { now: () => new Date(now) },
+      sourceWindow: { start: new Date(now - 301_000).toISOString(), end: new Date(now - 1_000).toISOString() },
+    });
+    await expect(drain(tool, request)).rejects.toMatchObject({ code: 'INVALID_INPUT', retryable: false });
+    expect(created).toBe(false);
+  });
+
   it.each([{ name: 'arbitrary.http' }, { kind: 'action' }, { source: 'builtin' }, { call: undefined }])(
     'rejects invalid settlement composition at bootstrap', (override) => {
       expect(() => createMetricsSubagentTool({ profile: settlementMetricsLabProfile,

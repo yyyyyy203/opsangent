@@ -9,8 +9,11 @@ import { summarizeRunUsage } from '../contracts/run-usage.js';
 import { assessSettlementMetrics, settlementMetricsLabProfile } from '../profiles/settlement.js';
 import type { ExportDiagnosticCode } from '../observability/export-diagnostics.js';
 import { readSourceReports } from './source-reports.js';
+import { collectAcceptanceFailures } from './failure-summary.js';
+import { agentErrorCodeV2Schema } from '../contracts/event-v2/common.js';
+import { isModelFailureCategory } from '../model/model-failure.js';
+import { parseAcceptanceDiagnostics } from './diagnostics.js';
 import type {
-  AcceptanceCheckCode,
   AcceptanceInput,
   AcceptanceReport,
   ManualReview,
@@ -23,6 +26,7 @@ const TERMINAL_EVENTS = new Set(['RUN_FINISHED', 'RUN_FAILED', 'RUN_CANCELLED', 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 const EXPORT_DIAGNOSTIC_CODES: readonly ExportDiagnosticCode[] = [
   'TRACE_QUEUE_FULL', 'TRACE_NETWORK_ERROR', 'TRACE_REQUEST_TIMEOUT', 'TRACE_FLUSH_TIMEOUT',
+  'TRACE_HTTP_ERROR', 'TRACE_LOCAL_AUDIT_REJECTED',
   'TRACE_PARENT_MISSING', 'TRACE_PAYLOAD_DROPPED',
 ];
 
@@ -35,6 +39,7 @@ const EXPECTED_COUNTS: Readonly<Record<AcceptanceInput['caseId'], { total: numbe
 };
 
 export function evaluateAcceptance(input: AcceptanceInput): AcceptanceReport {
+  const failures = collectAcceptanceFailures(input.events, new Set([input.parent.runId, ...input.children.map((child) => child.runId)]));
   const eventReports = readSourceReports(input.events);
   const sourceStarts = input.events.filter((event): event is Extract<AgentEventEnvelopeV2, { type: 'TOOL_STARTED' }> => (
     event.type === 'TOOL_STARTED'
@@ -90,8 +95,16 @@ export function evaluateAcceptance(input: AcceptanceInput): AcceptanceReport {
       passed: isTerminalComplete(input.parent, input.children, input.events),
     },
     {
+      code: 'SCENARIO_OUTCOME_VALID',
+      passed: isScenarioOutcomeValid(input, failures),
+    },
+    {
+      code: 'SOURCE_FINGERPRINT_VALID',
+      passed: isValidFingerprint(input.sourceFingerprint),
+    },
+    {
       code: 'MODEL_HTTP_BUDGET',
-      passed: isBudgetValid(input.budget),
+      passed: isBudgetValid(input.budget) && (input.outputBudget === undefined || safeOutputBudget(input.outputBudget) !== undefined),
     },
     {
       code: 'USAGE_CONSISTENT',
@@ -109,17 +122,21 @@ export function evaluateAcceptance(input: AcceptanceInput): AcceptanceReport {
   ];
 
   const report: AcceptanceReport = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     caseId: input.caseId,
     codeRevision: safeCodeRevision(input.codeRevision),
+    sourceFingerprint: isValidFingerprint(input.sourceFingerprint) ? input.sourceFingerprint : 'unverified',
     profileRevision: safeIdentifier(input.profileRevision, 'unverified'),
     snapshotId: safeIdentifier(input.snapshotId, 'unverified'),
     runId: safeIdentifier(input.parent.runId, 'unavailable'),
     childRunIds: input.children.map((child) => safeIdentifier(child.runId, 'unavailable')),
     checks,
+    ...(failures.length > 0 ? { failures } : {}),
     budget: safeBudget(input.budget),
+    ...(safeOutputBudget(input.outputBudget) === undefined ? {} : { outputBudget: safeOutputBudget(input.outputBudget)! }),
     usage: summarizeTreeUsage(input.parent, input.children, input.events),
     exportDiagnostics: safeExportDiagnostics(input.exportDiagnostics),
+    ...(input.diagnostics === undefined ? {} : { diagnostics: parseAcceptanceDiagnostics(input.diagnostics) }),
     traceVerification: safeTraceVerification(input.traceVerification),
     manualReview: safeManualReview(input.manualReview),
     verdict: calculateVerdict(checks, input.traceVerification, input.manualReview),
@@ -129,22 +146,58 @@ export function evaluateAcceptance(input: AcceptanceInput): AcceptanceReport {
 
 export function applyManualReview(report: AcceptanceReport, review: ManualReview): AcceptanceReport {
   const normalizedReview = safeManualReview(review);
+  const runIds = new Set([report.runId, ...report.childRunIds]);
+  const failures = report.failures?.filter((failure) => runIds.has(failure.runId)
+    && agentErrorCodeV2Schema.safeParse(failure.code).success).slice(0, 100).map((failure) => ({
+    runId: safeIdentifier(failure.runId, 'unavailable'), code: failure.code,
+    ...(isModelFailureCategory(failure.category) ? { category: failure.category } : {}),
+  }));
+  const reviewedChecks: AcceptanceReport['checks'] = report.checks.map((check) => ({ code: check.code,
+    passed: check.passed === true && check.status !== 'failed' && check.status !== 'not_run',
+    ...(check.status === 'passed' || check.status === 'failed' || check.status === 'not_run' ? { status: check.status } : {}),
+  }));
+  if (!reviewedChecks.some((check) => check.code === 'SCENARIO_OUTCOME_VALID')) {
+    // Legacy reports cannot prove this newly-added hard gate. Approval must not infer a pass.
+    reviewedChecks.push({ code: 'SCENARIO_OUTCOME_VALID', passed: false, status: 'not_run' });
+  }
+  if (!reviewedChecks.some((check) => check.code === 'SOURCE_FINGERPRINT_VALID')) {
+    reviewedChecks.push({ code: 'SOURCE_FINGERPRINT_VALID', passed: false, status: 'not_run' });
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     caseId: report.caseId,
     codeRevision: safeCodeRevision(report.codeRevision),
+    ...(isValidFingerprint(report.sourceFingerprint) ? { sourceFingerprint: report.sourceFingerprint } : {}),
     profileRevision: safeIdentifier(report.profileRevision, 'unverified'),
     snapshotId: safeIdentifier(report.snapshotId, 'unverified'),
     runId: safeIdentifier(report.runId, 'unavailable'),
     childRunIds: report.childRunIds.map((id) => safeIdentifier(id, 'unavailable')),
-    checks: report.checks.map((check) => ({ code: check.code, passed: check.passed === true })),
+    checks: reviewedChecks,
+    ...(failures === undefined ? {} : { failures }),
     budget: safeBudget(report.budget),
+    ...(safeOutputBudget(report.outputBudget) === undefined ? {} : { outputBudget: safeOutputBudget(report.outputBudget)! }),
     usage: safeUsage(report.usage),
     exportDiagnostics: safeExportDiagnostics(report.exportDiagnostics),
+    ...(report.diagnostics === undefined ? {} : { diagnostics: parseAcceptanceDiagnostics(report.diagnostics) }),
     traceVerification: safeTraceVerification(report.traceVerification),
     manualReview: normalizedReview,
-    verdict: calculateVerdict(report.checks, report.traceVerification, normalizedReview),
+    verdict: calculateVerdict(reviewedChecks, report.traceVerification, normalizedReview),
   };
+}
+
+function isScenarioOutcomeValid(
+  input: AcceptanceInput,
+  failures: NonNullable<AcceptanceReport['failures']>,
+): boolean {
+  return input.parent.status === 'completed'
+    && input.children.length === input.parent.childRunIds.length
+    && input.children.every((child) => child.status === 'completed')
+    // Truncated output is a terminal model failure, not a valid partial source result.
+    && failures.every((failure) => failure.category !== 'output_truncated');
+}
+
+function isValidFingerprint(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f\d]{64}$/u.test(value);
 }
 
 function isMetricFactValid(input: AcceptanceInput, report: SourceSubagentResult | undefined): boolean {
@@ -289,11 +342,12 @@ function sameStrings(left: readonly string[], right: readonly string[]): boolean
 }
 
 function calculateVerdict(
-  checks: readonly { code: AcceptanceCheckCode; passed: boolean }[],
+  checks: readonly AcceptanceReport['checks'][number][],
   trace: TraceVerification,
   review: ManualReview,
 ): AcceptanceReport['verdict'] {
-  if (checks.some((check) => check.passed !== true) || trace.status === 'failed' || review.status === 'rejected') return 'failed';
+  if (checks.some((check) => check.passed !== true || check.status === 'failed' || check.status === 'not_run')
+    || trace.status === 'failed' || review.status === 'rejected') return 'failed';
   if (review.status === 'approved' && review.unsupportedClaimCount !== 0) return 'failed';
   if (trace.status !== 'verified' || review.status !== 'approved') return 'review_required';
   return 'passed';
@@ -332,6 +386,15 @@ function safeUsage(usage: RunUsageSummary): RunUsageSummary {
     ...(isSafeCount(usage.outputTokens) ? { outputTokens: usage.outputTokens } : {}),
     ...(isSafeCount(usage.cachedInputTokens) ? { cachedInputTokens: usage.cachedInputTokens } : {}),
   };
+}
+
+function safeOutputBudget(value: AcceptanceReport['outputBudget']): AcceptanceReport['outputBudget'] {
+  if (value === undefined) return undefined;
+  const keys = ['limit', 'reserved', 'settled', 'available', 'reservations', 'settlements', 'rejected'] as const;
+  if (!keys.every((key) => isSafeCount(value[key])) || value.limit < 1 || value.limit > 5120
+    || value.reserved + value.settled + value.available !== value.limit || value.settlements > value.reservations) return undefined;
+  return { limit: value.limit, reserved: value.reserved, settled: value.settled, available: value.available,
+    reservations: value.reservations, settlements: value.settlements, rejected: value.rejected };
 }
 
 function safeExportDiagnostics(diagnostics: AcceptanceInput['exportDiagnostics']): AcceptanceInput['exportDiagnostics'] {

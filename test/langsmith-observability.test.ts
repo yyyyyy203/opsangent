@@ -86,6 +86,33 @@ describe('privacy-safe LangSmith event exporter', () => {
     expect(exporter.getDiagnostics().pending).toBe(0);
   });
 
+  it('exports known failure usage while retaining an error state and removing error narratives', async () => {
+    const requests: string[] = [];
+    const exporter = createLangSmithEventObservability({
+      enabled: true, apiKey: 'unit-test-key', projectName: 'inspection-agent-test', endpoint: 'https://smith.invalid',
+    }, { fetch: async (input, init) => {
+      requests.push(await new Request(input, init).text());
+      return Response.json({});
+    } });
+    const root = exporter.eventObservability.startSpan({
+      name: 'agent.run', kind: 'chain', runId: 'failure-run', spanKey: 'run:failure-run:initial',
+    });
+    const model = exporter.eventObservability.startSpan({
+      name: 'model.test-model', kind: 'llm', runId: 'failure-run', spanKey: 'model:failure-run:attempt-1',
+      parentSpanKey: 'run:failure-run:initial',
+    });
+    model.fail({ code: 'MODEL_ERROR', category: 'output_truncated', message: 'PRIVATE_ERROR_CANARY',
+      usage: { inputTokens: 120, outputTokens: 512, cachedInputTokens: 64 }, finishReason: 'length' });
+    root.fail({ code: 'MODEL_ERROR' });
+    await exporter.eventObservability.flush();
+    const payload = requests.join('\n');
+    expect(payload).toContain('"input_tokens":120');
+    expect(payload).toContain('"output_tokens":512');
+    expect(payload).toContain('"cache_read":64');
+    expect(payload).toContain('"error":"TRACE_ERROR"');
+    expect(payload).not.toContain('PRIVATE_ERROR_CANARY');
+  });
+
   it('does not honor SDK replica endpoints from process environment', async () => {
     vi.stubEnv('LANGSMITH_RUNS_ENDPOINTS', JSON.stringify([
       { api_url: 'https://unapproved-replica.invalid', api_key: 'replica-key-canary' },
@@ -289,7 +316,33 @@ describe('privacy-safe LangSmith event exporter', () => {
     }
   });
 
-  it('aborts an exporter whose final flush exceeds its deadline and does not report it drained', async () => {
+  it('distinguishes local audit rejection from remote HTTP failure without logging bodies', async () => {
+    const createExporter = (local: boolean) => createLangSmithEventObservability({
+      enabled: true, apiKey: 'unit-test-key', projectName: 'inspection-agent-test', endpoint: 'https://smith.invalid',
+    }, { fetch: () => Promise.resolve(Response.json({ error: 'PRIVATE_ERROR_CANARY' }, {
+      status: local ? 400 : 403,
+      headers: local ? { 'x-agentops-trace-error': 'TRACE_LOCAL_AUDIT_REJECTED' } : {},
+    })) });
+    const logged: string[] = [];
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => { logged.push(args.join(' ')); });
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation((...args: unknown[]) => { logged.push(args.join(' ')); });
+    try {
+      const local = createExporter(true);
+      const remote = createExporter(false);
+      for (const exporter of [local, remote]) {
+        const span = exporter.eventObservability.startSpan({ name: 'agent.run', kind: 'chain', runId: 'diagnostic-run', spanKey: 'run:diagnostic-run' });
+        span.end({ status: 'completed' });
+        await exporter.eventObservability.flush();
+      }
+      expect(local.getDiagnostics().counts.TRACE_LOCAL_AUDIT_REJECTED).toBeGreaterThan(0);
+      expect(local.getDiagnostics().counts.TRACE_NETWORK_ERROR ?? 0).toBe(0);
+      expect(remote.getDiagnostics().counts.TRACE_HTTP_ERROR).toBeGreaterThan(0);
+      expect(remote.getDiagnostics().counts.TRACE_LOCAL_AUDIT_REJECTED ?? 0).toBe(0);
+      expect(logged.join('\n')).not.toContain('PRIVATE_ERROR_CANARY');
+    } finally { errorSpy.mockRestore(); warnSpy.mockRestore(); }
+  });
+
+  it('aborts a timed-out flush and releases transport work while retaining failure diagnostics', async () => {
     vi.useFakeTimers();
     let requestSignal: AbortSignal | undefined;
     const exporter = createLangSmithEventObservability({
@@ -313,7 +366,9 @@ describe('privacy-safe LangSmith event exporter', () => {
     await flush;
 
     expect(exporter.getDiagnostics().counts.TRACE_FLUSH_TIMEOUT).toBe(1);
-    expect(exporter.getDiagnostics().pending).toBeGreaterThan(0);
+    // Pending counts local work, not remote delivery. Cancellation must settle
+    // the wrapper even when the injected network promise never settles.
+    expect(exporter.getDiagnostics().pending).toBe(0);
     expect(requestSignal?.aborted).toBe(true);
   });
 });

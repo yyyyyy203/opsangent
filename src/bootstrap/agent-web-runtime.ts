@@ -54,6 +54,8 @@ export interface AgentWebRuntimeOptions {
     modelIdentity?: ModelIdentity;
     cursorSecret: string;
   };
+  /** Smoke-only exact window shared by the simulator snapshot and both source agents. */
+  sourceWindow?: { start: string; end: string };
   profiles?: readonly AgentWebProfileConfig[];
   host?: string;
   port?: number;
@@ -82,6 +84,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
   validateLocalHost(host);
   const metrics = normalizeMetricsConfig(options.metrics);
   const logs = normalizeLogsConfig(options.logs);
+  const sourceWindow = normalizeSmokeSourceWindow(options.sourceWindow, metrics !== undefined);
   if (options.sourceInvocationLimit !== undefined && metrics === undefined) {
     throw new Error('sourceInvocationLimit requires the Metrics simulation source.');
   }
@@ -126,6 +129,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
           const tools = createMetricsWebSource(ports, {
             mcpUrl: metrics.mcpUrl,
             model: metricsModel,
+            ...(sourceWindow === undefined ? {} : { sourceWindow }),
             ...(metricsModelIdentity === undefined ? {} : { modelIdentity: metricsModelIdentity }),
           });
           return sourceInvocationLimiter === undefined ? tools : tools.map((tool) => sourceInvocationLimiter.wrap(tool));
@@ -136,6 +140,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
               mcpUrl: logs.mcpUrl,
               model: logsModel,
               cursorSecret: logs.cursorSecret,
+              ...(sourceWindow === undefined ? {} : { sourceWindow }),
               ...(logsModelIdentity === undefined ? {} : { modelIdentity: logsModelIdentity }),
             });
             return sourceInvocationLimiter === undefined ? tools : tools.map((tool) => sourceInvocationLimiter.wrap(tool));
@@ -165,7 +170,7 @@ export async function startAgentWebRuntime(options: AgentWebRuntimeOptions): Pro
     const execution = new RunExecutionCoordinator(
       runtime.agent,
       runtime.checkpoints,
-      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock, logs !== undefined) },
+      metrics === undefined ? {} : { prepareStart: createSimulationStartPreparation(clock, logs !== undefined, sourceWindow) },
     );
     const confirmation = new WebConfirmationService(runtime.hitl, runtime.durableState.checkpoints, clock);
     const server = await startInspectionHttpServer({
@@ -279,7 +284,11 @@ function normalizeLogsConfig(
   return value;
 }
 
-function createSimulationStartPreparation(clock: Clock, includeLogs: boolean): (options: ReplyOptions) => ReplyOptions {
+function createSimulationStartPreparation(
+  clock: Clock,
+  includeLogs: boolean,
+  sourceWindow?: { start: string; end: string },
+): (options: ReplyOptions) => ReplyOptions {
   return (options) => {
     const end = Math.floor(clock.now().getTime() / 1_000) * 1_000;
     const start = end - 300_000;
@@ -287,14 +296,32 @@ function createSimulationStartPreparation(clock: Clock, includeLogs: boolean): (
       'Host-generated inspection scope; user and model text cannot change it.',
       'profile=simulation',
       'service=checkout',
-      `start=${new Date(start).toISOString()}`,
-      `end=${new Date(end).toISOString()}`,
+      `start=${sourceWindow?.start ?? new Date(start).toISOString()}`,
+      `end=${sourceWindow?.end ?? new Date(end).toISOString()}`,
       `allowed_tools=metrics_subagent${includeLogs ? ',logs_subagent' : ''}`,
       'source=local-prometheus-lab',
-      ...(includeLogs ? ['日志来源窗口与快照时间以来源元数据为准，不保证完全一致。'] : []),
+      ...(includeLogs && sourceWindow === undefined ? ['日志来源窗口与快照时间以来源元数据为准，不保证完全一致。'] : []),
     ].join('\n');
     return { ...options, trustedSystemContext };
   };
+}
+
+function normalizeSmokeSourceWindow(
+  value: AgentWebRuntimeOptions['sourceWindow'],
+  hasMetrics: boolean,
+): AgentWebRuntimeOptions['sourceWindow'] {
+  if (value === undefined) return undefined;
+  if (!hasMetrics || !isCanonicalTimestamp(value.start) || !isCanonicalTimestamp(value.end)
+    || Date.parse(value.end) - Date.parse(value.start) !== 300_000) {
+    throw new Error('sourceWindow must be a canonical 300-second simulation window.');
+  }
+  return Object.freeze({ start: value.start, end: value.end });
+}
+
+function isCanonicalTimestamp(value: string): boolean {
+  if (typeof value !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/u.test(value)) return false;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value;
 }
 
 function normalizeProfiles(profiles: readonly AgentWebProfileConfig[]): readonly ConfiguredWebProfile[] {

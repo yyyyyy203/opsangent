@@ -30,46 +30,37 @@ export async function readRunUsageSummary(store: EventStore, runId: string): Pro
 }
 
 export function summarizeRunUsage(events: readonly AgentEventEnvelopeV2[]): RunUsageSummary {
-  const completed = events.filter((event) => event.type === 'MODEL_CALL_COMPLETED');
-  if (completed.length === 0) {
-    return { completeness: events.length === 0 ? 'unavailable' : 'partial' };
-  }
-
-  let inputTokens = 0;
-  let outputTokens = 0;
-  let cachedInputTokens = 0;
-  let allInputKnown = true;
-  let allOutputKnown = true;
-  let allCachedInputKnown = true;
-  for (const event of completed) {
-    if (event.type !== 'MODEL_CALL_COMPLETED' || event.payload.usage === undefined) {
-      allInputKnown = false;
-      allOutputKnown = false;
-      allCachedInputKnown = false;
-      continue;
+  type Terminal = Extract<AgentEventEnvelopeV2, { type: 'MODEL_CALL_COMPLETED' | 'MODEL_CALL_FAILED' }>;
+  const terminals = new Map<string, Terminal>();
+  const starts = new Map<string, AgentEventEnvelopeV2>();
+  let hasIncompleteAttempt = false;
+  for (const event of new Map(events.map((item) => [item.eventId, item])).values()) {
+    const key = event.attemptId === undefined ? event.eventId : `${event.runId}:${event.attemptId}`;
+    if (event.type === 'MODEL_CALL_STARTED') starts.set(key, event);
+    if (event.type === 'MODEL_CALL_COMPLETED' || event.type === 'MODEL_CALL_FAILED') {
+      const previous = terminals.get(key);
+      if (previous === undefined) terminals.set(key, event);
+      else if (previous.type !== event.type || JSON.stringify(previous.payload.usage) !== JSON.stringify(event.payload.usage)) hasIncompleteAttempt = true;
     }
-    const usage = event.payload.usage;
-    if (usage.inputTokens === undefined || !Number.isSafeInteger(usage.inputTokens)
-      || !Number.isSafeInteger(inputTokens + usage.inputTokens)) allInputKnown = false;
-    else inputTokens += usage.inputTokens;
-    if (usage.outputTokens === undefined || !Number.isSafeInteger(usage.outputTokens)
-      || !Number.isSafeInteger(outputTokens + usage.outputTokens)) allOutputKnown = false;
-    else outputTokens += usage.outputTokens;
-    if (usage.cachedInputTokens === undefined || !Number.isSafeInteger(usage.cachedInputTokens)
-      || !Number.isSafeInteger(cachedInputTokens + usage.cachedInputTokens)) allCachedInputKnown = false;
-    else cachedInputTokens += usage.cachedInputTokens;
+    if (event.type === 'MODEL_CALL_FAILED' || event.type === 'MODEL_RETRY_SCHEDULED' || event.type === 'MODEL_FALLBACK_ACTIVATED') hasIncompleteAttempt = true;
   }
+  if (terminals.size === 0) return { completeness: starts.size === 0 ? 'unavailable' : 'partial' };
+  if (starts.size > terminals.size || [...starts].some(([key, event]) => event.attemptId !== undefined && !terminals.has(key))) hasIncompleteAttempt = true;
 
-  const started = events.filter((event) => event.type === 'MODEL_CALL_STARTED').length;
-  const hasIncompleteAttempt = started > completed.length || events.some((event) => event.type === 'MODEL_CALL_FAILED'
-    || event.type === 'MODEL_RETRY_SCHEDULED' || event.type === 'MODEL_FALLBACK_ACTIVATED');
-  const completeness: UsageCompleteness = !hasIncompleteAttempt && allInputKnown && allOutputKnown
-    ? 'complete'
-    : 'partial';
-  return {
-    completeness,
-    ...(allInputKnown ? { inputTokens } : {}),
-    ...(allOutputKnown ? { outputTokens } : {}),
-    ...(allCachedInputKnown ? { cachedInputTokens } : {}),
-  };
+  const result: RunUsageSummary = { completeness: 'complete' };
+  for (const field of ['inputTokens', 'outputTokens', 'cachedInputTokens'] as const) {
+    let total = 0;
+    let known = 0;
+    let overflow = false;
+    for (const event of terminals.values()) {
+      const count = event.payload.usage?.[field];
+      if (count === undefined || !Number.isSafeInteger(count) || count < 0) continue;
+      if (!Number.isSafeInteger(total + count)) overflow = true;
+      else { total += count; known += 1; }
+    }
+    if (known > 0 && !overflow) result[field] = total;
+    if (field !== 'cachedInputTokens' && (known !== terminals.size || overflow)) hasIncompleteAttempt = true;
+  }
+  result.completeness = hasIncompleteAttempt ? 'partial' : 'complete';
+  return result;
 }

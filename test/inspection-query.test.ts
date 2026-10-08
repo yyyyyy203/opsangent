@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createAgentRuntime } from '../src/application/create-runtime.js';
 import type { Clock, EvidencePage, EvidenceQueryStore, EvidenceRecord, EvidenceStore } from '../src/contracts/index.js';
+import { publicEvidenceFromRecord } from '../src/contracts/read-model.js';
 import { InMemoryCheckpointStore } from '../src/storage/in-memory-checkpoint-store.js';
 import { InMemoryEventMessageStore } from '../src/event/v2/in-memory-event-store.js';
 import { EventFactoryV2 } from '../src/event/v2/event-factory.js';
@@ -9,6 +10,81 @@ import { InMemoryEvidenceStore } from '../src/storage/in-memory-evidence-store.j
 import { ScriptedModel } from '../src/model/scripted-model.js';
 
 const fixedClock: Clock = { now: () => new Date('2026-10-01T00:00:00.000Z') };
+
+describe('publicEvidenceFromRecord metric windows', () => {
+  it('projects Unix seconds without exposing the raw evidence', () => {
+    const record: EvidenceRecord = {
+      evidenceId: 'metric-window-1', runId: 'metrics-child', source: 'metric',
+      summary: { start: 1791421875, end: 1791422175 },
+      raw: { privateCanary: 'RAW_MUST_NOT_LEAK' }, businessTraceIds: [],
+      capturedAt: '2026-10-08T01:16:15.000Z',
+    };
+
+    const view = publicEvidenceFromRecord(record);
+
+    expect(view.timeRange).toEqual({
+      start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z',
+    });
+    expect(view.retrievable).toBe(false);
+    expect(JSON.stringify(view)).not.toContain('RAW_MUST_NOT_LEAK');
+  });
+
+  it.each([
+    { start: 0, end: 1, expected: { start: '1970-01-01T00:00:00.000Z', end: '1970-01-01T00:00:01.000Z' } },
+    { start: 8_639_999_999_999, end: 8_640_000_000_000, expected: { start: '+275760-09-12T23:59:59.000Z', end: '+275760-09-13T00:00:00.000Z' } },
+  ])('accepts valid boundary seconds $start to $end', ({ start, end, expected }) => {
+    const view = publicEvidenceFromRecord({
+      evidenceId: 'boundary-window', runId: 'metrics-child', source: 'metric',
+      summary: { start, end }, raw: null, businessTraceIds: [], capturedAt: fixedClock.now().toISOString(),
+    });
+
+    expect(view.timeRange).toEqual(expected);
+  });
+
+  it.each([
+    { label: 'negative start', summary: { start: -1, end: 1 } },
+    { label: 'negative end', summary: { start: 0, end: -1 } },
+    { label: 'NaN start', summary: { start: NaN, end: 1 } },
+    { label: 'NaN end', summary: { start: 0, end: NaN } },
+    { label: 'infinite start', summary: { start: Infinity, end: 1 } },
+    { label: 'infinite end', summary: { start: 0, end: Infinity } },
+    { label: 'unsafe start', summary: { start: Number.MAX_SAFE_INTEGER + 1, end: Number.MAX_SAFE_INTEGER + 2 } },
+    { label: 'unsafe end', summary: { start: 0, end: Number.MAX_SAFE_INTEGER + 1 } },
+    { label: 'start outside Date range', summary: { start: 8_640_000_000_001, end: 8_640_000_000_002 } },
+    { label: 'end outside Date range', summary: { start: 0, end: 8_640_000_000_001 } },
+    { label: 'fractional start', summary: { start: 0.5, end: 1 } },
+    { label: 'fractional end', summary: { start: 0, end: 1.5 } },
+    { label: 'string start', summary: { start: '0', end: 1 } },
+    { label: 'string end', summary: { start: 0, end: '1' } },
+    { label: 'null start', summary: { start: null, end: 1 } },
+    { label: 'null end', summary: { start: 0, end: null } },
+    { label: 'missing start', summary: { end: 1 } },
+    { label: 'missing end', summary: { start: 0 } },
+    { label: 'legacy record without a window', summary: {} },
+    { label: 'reversed window', summary: { start: 1, end: 0 } },
+    { label: 'equal window', summary: { start: 1, end: 1 } },
+  ])('omits invalid windows without guessing from raw or capturedAt: $label', ({ summary }) => {
+    const view = publicEvidenceFromRecord({
+      evidenceId: 'invalid-window', runId: 'metrics-child', source: 'metric', summary,
+      raw: { start: 1791421875, end: 1791422175, privateCanary: 'RAW_MUST_NOT_LEAK' },
+      businessTraceIds: [], capturedAt: '2026-10-08T01:16:15.000Z',
+    });
+
+    expect(view).not.toHaveProperty('timeRange');
+    expect(view.retrievable).toBe(false);
+    expect(JSON.stringify(view)).not.toContain('RAW_MUST_NOT_LEAK');
+  });
+
+  it.each(['log', 'trace', 'change'] as const)('does not infer windows for %s evidence', (source) => {
+    const view = publicEvidenceFromRecord({
+      evidenceId: 'other-source-window', runId: 'child-run', source,
+      summary: { start: 1791421875, end: 1791422175 }, raw: null,
+      businessTraceIds: [], capturedAt: '2026-10-08T01:16:15.000Z',
+    });
+
+    expect(view).not.toHaveProperty('timeRange');
+  });
+});
 
 describe('InspectionQueryService', () => {
   it.each([
@@ -168,7 +244,8 @@ describe('InspectionQueryService', () => {
     await events.append('parent-run', 0, [relation]);
     for (const [index, evidenceId] of ['child-evidence-1', 'child-evidence-2'].entries()) {
       await evidence.save({
-        evidenceId, runId: 'child-run', source: 'metric', summary: { failureRate: 0.15 + index },
+        evidenceId, runId: 'child-run', source: 'metric',
+        summary: { failureRate: 0.15 + index, start: 1791421875, end: 1791422175 },
         raw: { marker: 'must-stay-private' }, businessTraceIds: [],
         capturedAt: `2026-10-01T00:00:0${index + 1}.000Z`,
       });
@@ -181,8 +258,14 @@ describe('InspectionQueryService', () => {
 
     expect(first.items.map((item) => item.evidenceId)).toEqual(['child-evidence-1']);
     expect(second.items.map((item) => item.evidenceId)).toEqual(['child-evidence-2']);
+    for (const item of [...first.items, ...second.items]) {
+      expect(item.timeRange).toEqual({
+        start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z',
+      });
+    }
     expect(await queries.getEvidence('parent-run', 'child-evidence-1')).toMatchObject({
       evidenceId: 'child-evidence-1', runId: 'child-run', retrievable: false,
+      timeRange: { start: '2026-10-08T01:11:15.000Z', end: '2026-10-08T01:16:15.000Z' },
     });
     expect(JSON.stringify([first, second])).not.toContain('must-stay-private');
   });

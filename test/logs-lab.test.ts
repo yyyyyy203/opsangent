@@ -66,6 +66,10 @@ describe('logs lab lifecycle', () => {
     expect(lab).toMatchObject({
       metricsMcpUrl: 'http://127.0.0.1:19210/mcp', logsMcpUrl: 'http://127.0.0.1:19211/mcp',
       statusUrl: 'http://127.0.0.1:19209/status', scenario: 'settlement_failure', snapshotId: 'fixture-1',
+      sourceWindow: {
+        start: new Date(clock - 300_000).toISOString(),
+        end: new Date(clock).toISOString(),
+      },
     });
     await lab.close();
     await lab.close();

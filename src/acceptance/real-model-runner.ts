@@ -1,4 +1,5 @@
 import { Client } from 'langsmith';
+import { randomUUID } from 'node:crypto';
 import { mkdir, realpath, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 import { safeParseAgentMessageV2 } from '../contracts/message-v2/schema.js';
@@ -16,19 +17,30 @@ import { readAcceptanceSnapshot } from '../bootstrap/acceptance-reader.js';
 import type { AcceptanceSnapshot } from './types.js';
 import type { AcceptanceCheckCode, AcceptanceReport } from './types.js';
 import { evaluateAcceptance } from './evaluator.js';
+import { collectAcceptanceFailures } from './failure-summary.js';
 import { readSourceReports } from './source-reports.js';
 import { createBoundedSmokeFetch } from '../model/bounded-smoke-fetch.js';
 import { SmokeRequestBudget } from '../model/smoke-request-budget.js';
+import { SmokeOutputBudget } from '../model/smoke-output-budget.js';
+import { createSmokeModelPolicy, selectSmokeOutputTokens } from './smoke-model-policy.js';
 import { createOpenAICompatibleModel } from '../bootstrap/openai-compatible.js';
 import type { CreateOpenAICompatibleModelOptions } from '../bootstrap/openai-compatible.js';
 import type { ModelIdentity } from '../bootstrap/model-identity.js';
 import type { ExportDiagnostics } from '../observability/export-diagnostics.js';
-import { isSafeLangSmithRunPayload, verifyLangSmithTrace } from './langsmith-verifier.js';
+import { verifyLangSmithTrace } from './langsmith-verifier.js';
+import { createAuditedLangSmithFetch as createLangSmithAuditedFetch } from './langsmith-export-transport.js';
+export { createLangSmithAuditedFetch };
+export { isSafeLangSmithExportBody } from './langsmith-export-safety.js';
 import type { TraceVerification } from './types.js';
 import { containsSensitivePublicContent, isForbiddenPublicFieldName } from './privacy-audit.js';
+import { summarizeRunUsage } from '../contracts/run-usage.js';
+import { AcceptanceDiagnosticsRecorder, parseAcceptanceDiagnostics, type AcceptanceDiagnostics, type TraceVerificationDiagnostic } from './diagnostics.js';
+import { runLangSmithTraceProbe, type TraceProbeErrorCode } from './langsmith-trace-probe.js';
+import { createLangSmithQueryFetch } from './langsmith-query-transport.js';
+import { ACCEPTANCE_LANGSMITH_EXPORT_LIMITS } from '../observability/langsmith-export-policy.js';
 
 const SMOKE_REQUEST_LIMIT = 10;
-const MAX_OUTPUT_TOKENS = 512;
+const MAX_OUTPUT_TOKENS = 1024;
 const RUN_DEADLINE_MS = 90_000;
 const MIN_SNAPSHOT_REMAINING_MS = 100_000;
 const RUN_POLL_INTERVAL_MS = 500;
@@ -37,7 +49,6 @@ const PUBLIC_SSE_TIMEOUT_MS = 5_000;
 const PUBLIC_RESPONSE_MAX_BYTES = 512_000;
 const PUBLIC_SSE_MAX_BYTES = 2_097_152;
 const PUBLIC_PAGE_LIMIT = 3;
-const LANGSMITH_BODY_MAX_BYTES = 1_048_576;
 const REPORT_MAX_BYTES = 256_000;
 const PUBLIC_EVENT_FIELDS = new Set([
   'schemaVersion', 'eventId', 'sequence', 'type', 'runId', 'sessionId', 'replyId', 'streamId', 'stepId',
@@ -57,19 +68,15 @@ const PUBLIC_LOG_SUMMARY_FIELDS = new Set([
 const PUBLIC_EVIDENCE_SOURCES: readonly PublicEvidenceView['source'][] = ['metric', 'log', 'trace', 'change'];
 const PUBLIC_EVIDENCE_STATES: readonly PublicEvidenceView['state'][] = ['available', 'committed', 'partial'];
 const PUBLIC_TERMINAL_EVENTS = new Set(['RUN_FINISHED', 'RUN_FAILED', 'RUN_CANCELLED']);
-const LANGSMITH_BATCH_OPERATIONS = new Set(['post', 'patch', 'pre']);
-const LANGSMITH_EXPORT_RUN_FIELDS = new Set([
-  'id', 'name', 'run_type', 'trace_id', 'parent_run_id', 'inputs', 'outputs', 'extra', 'error',
-  'start_time', 'end_time', 'tags', 'session_name', 'dotted_order', 'reference_example_id',
-  'child_runs', 'attachments', 'events', 'serialized',
+const ACCEPTANCE_CAUSE_CODES = new Set([
+  'EACCES', 'EPERM', 'EADDRINUSE', 'EADDRNOTAVAIL', 'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT',
+  'ENOTFOUND', 'ENOENT', 'EEXIST', 'EIO', 'SQLITE_BUSY', 'SQLITE_CANTOPEN', 'SQLITE_CORRUPT',
+  'SQLITE_ERROR', 'SQLITE_READONLY', 'SQLITE_SCHEMA', 'ERR_DLOPEN_FAILED', 'ERR_MODULE_NOT_FOUND',
 ]);
-const LANGSMITH_REMOTE_SELECTED_FIELDS = [
-  'id', 'trace_id', 'parent_run_id', 'name', 'run_type', 'end_time', 'status', 'error', 'inputs', 'outputs', 'extra',
-];
-const LANGSMITH_SAFE_TAGS = new Set(['agentops', 'event-v2', 'inspection-smoke']);
 const CHECK_CODES: readonly AcceptanceCheckCode[] = [
   'SOURCE_ALLOWLIST', 'SOURCE_CALL_LIMIT', 'METRIC_FACT_VALID', 'SOURCE_WINDOW_VALID',
   'MISSING_EVIDENCE_VISIBLE', 'EVIDENCE_OWNERSHIP', 'TERMINAL_COMPLETE', 'MODEL_HTTP_BUDGET',
+  'SCENARIO_OUTCOME_VALID', 'SOURCE_FINGERPRINT_VALID',
   'USAGE_CONSISTENT', 'PUBLIC_DATA_SAFE', 'TRACE_EXPORT_SAFE',
 ];
 
@@ -88,10 +95,12 @@ export interface RealModelAcceptanceOptions {
     readonly evidenceCursorSecret: string;
   };
   readonly codeRevision: string;
+  readonly sourceFingerprint: string;
   readonly profileRevision: string;
 }
 
 export interface RealModelAcceptanceDependencies {
+  readonly traceProbe?: typeof runLangSmithTraceProbe;
   readonly startLab?: typeof startLogsLab;
   readonly startWeb?: typeof startAgentWebRuntime;
   /** Model transport seam. It is always wrapped by the shared request budget. */
@@ -101,6 +110,7 @@ export interface RealModelAcceptanceDependencies {
   /** LangSmith exporter seam; the request body is inspected before this fetch is called. */
   readonly langSmithFetch?: typeof globalThis.fetch;
   readonly now?: () => number;
+  readonly createFailureId?: () => string;
   readonly readSnapshot?: typeof readAcceptanceSnapshot;
   readonly verifyTrace?: typeof verifyLangSmithTrace;
 }
@@ -109,6 +119,7 @@ export type RealModelAcceptanceErrorCode =
   | 'SMOKE_NOT_AUTHORIZED'
   | 'PRECHECK_OPTIONS_INVALID'
   | 'PRECHECK_MODEL_CONFIG_INVALID'
+  | 'PRECHECK_TRACE_PROBE_FAILED'
   | 'PRECHECK_LAB_NOT_READY'
   | 'PRECHECK_SNAPSHOT_TOO_CLOSE'
   | 'PRECHECK_WEB_NOT_LOCAL'
@@ -119,8 +130,67 @@ export type RealModelAcceptanceErrorCode =
   | 'SNAPSHOT_INVALID'
   | 'ACCEPTANCE_REPORT_WRITE_FAILED';
 
+export type RealModelAcceptanceFailurePhase =
+  | 'trace_probe'
+  | 'lab_start'
+  | 'lab_readiness'
+  | 'web_start'
+  | 'parent_run_start'
+  | 'run_poll'
+  | 'event_flush'
+  | 'run_terminal_status'
+  | 'snapshot_read'
+  | 'public_boundary_check'
+  | 'trace_verification'
+  | 'acceptance_evaluation'
+  | 'acceptance_report';
+
+export type RealModelAcceptanceTerminalStatus =
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'paused'
+  | 'awaiting_confirmation';
+
+export interface RealModelAcceptanceFailureDetails {
+  readonly probeCode?: TraceProbeErrorCode;
+  readonly httpStatus?: number;
+  readonly runStatus?: RealModelAcceptanceTerminalStatus;
+  readonly causeCode?: RealModelAcceptanceCauseCode;
+}
+
+export type RealModelAcceptanceCauseCode =
+  | 'EACCES' | 'EPERM' | 'EADDRINUSE' | 'EADDRNOTAVAIL' | 'ECONNREFUSED' | 'ECONNRESET' | 'ETIMEDOUT'
+  | 'ENOTFOUND' | 'ENOENT' | 'EEXIST' | 'EIO' | 'SQLITE_BUSY' | 'SQLITE_CANTOPEN' | 'SQLITE_CORRUPT'
+  | 'SQLITE_ERROR' | 'SQLITE_READONLY' | 'SQLITE_SCHEMA' | 'ERR_DLOPEN_FAILED' | 'ERR_MODULE_NOT_FOUND';
+
+export interface RealModelAcceptanceFailureDiagnostics extends RealModelAcceptanceFailureDetails {
+  readonly diagnostics?: AcceptanceDiagnostics;
+  readonly schemaVersion: 1;
+  readonly failureId: string;
+  readonly code: RealModelAcceptanceErrorCode;
+  readonly phase: RealModelAcceptanceFailurePhase;
+  readonly modelRequestsSent: number;
+  readonly parentRunCreated: boolean;
+  readonly persisted: boolean;
+}
+
+interface RealModelAcceptanceFailureRecord extends RealModelAcceptanceFailureDetails {
+  readonly diagnostics?: AcceptanceDiagnostics;
+  readonly schemaVersion: 1;
+  readonly failureId: string;
+  readonly code: RealModelAcceptanceErrorCode;
+  readonly phase: RealModelAcceptanceFailurePhase;
+  readonly modelRequestsSent: number;
+  readonly parentRunCreated: boolean;
+}
+
 export class RealModelAcceptanceError extends Error {
-  public constructor(public readonly code: RealModelAcceptanceErrorCode) {
+  public constructor(
+    public readonly code: RealModelAcceptanceErrorCode,
+    public readonly failureDetails: RealModelAcceptanceFailureDetails = {},
+    public readonly diagnostics?: RealModelAcceptanceFailureDiagnostics,
+  ) {
     super(code);
     this.name = 'RealModelAcceptanceError';
   }
@@ -144,6 +214,8 @@ export async function runRealModelAcceptance(
   const now = dependencies.now ?? Date.now;
   const httpFetch = dependencies.httpFetch ?? globalThis.fetch;
   const budget = new SmokeRequestBudget(SMOKE_REQUEST_LIMIT);
+  const outputBudget = new SmokeOutputBudget(5120);
+  const diagnostics = new AcceptanceDiagnosticsRecorder();
   let lab: Awaited<ReturnType<typeof startLogsLab>> | undefined;
   let web: Awaited<ReturnType<typeof startAgentWebRuntime>> | undefined;
   let runId: string | undefined;
@@ -151,6 +223,8 @@ export async function runRealModelAcceptance(
   let report: AcceptanceReport | undefined;
   let snapshotId = 'unavailable';
   let tracePayloadSafe = true;
+  let phase: RealModelAcceptanceFailurePhase = 'lab_start';
+  let terminalStatus: RealModelAcceptanceTerminalStatus | undefined;
   const sensitiveValues = [
     options.modelConfig.apiKey,
     options.lab.labCursorSecret,
@@ -159,6 +233,15 @@ export async function runRealModelAcceptance(
   ];
 
   try {
+    phase = 'trace_probe';
+    const probe = await (dependencies.traceProbe ?? runLangSmithTraceProbe)({
+      authorization: 'explicit-probe', config: options.langSmithConfig,
+    }, { ...(dependencies.langSmithFetch === undefined ? {} : { fetch: dependencies.langSmithFetch }) });
+    const probeDiagnostics = parseAcceptanceDiagnostics(probe.diagnostics, sensitiveValues);
+    for (const request of probeDiagnostics.traceRequests) diagnostics.recordTraceRequest(request);
+    if (probe.status !== 'verified') throw new RealModelAcceptanceError('PRECHECK_TRACE_PROBE_FAILED',
+      { probeCode: probe.code ?? 'TRACE_PROBE_CONFIG_INVALID' });
+    phase = 'lab_start';
     lab = await (dependencies.startLab ?? startLogsLab)({
       elasticsearchUrl: options.lab.elasticsearchUrl,
       prometheusUrl: options.lab.prometheusUrl,
@@ -166,6 +249,7 @@ export async function runRealModelAcceptance(
       initialScenario: 'settlement_failure',
     });
     snapshotId = lab.snapshotId;
+    phase = 'lab_readiness';
     await verifyLabReady(lab, httpFetch, now());
 
     const boundedFetch = createBoundedSmokeFetch({
@@ -173,15 +257,21 @@ export async function runRealModelAcceptance(
       fetch: dependencies.fetch ?? globalThis.fetch,
       limit: SMOKE_REQUEST_LIMIT,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
+      outputBudget,
+      selectOutputTokens: selectSmokeOutputTokens,
       onAttempt: () => undefined,
     });
-    const model = createOpenAICompatibleModel({ ...options.modelConfig, fetch: boundedFetch });
+    const model = createSmokeModelPolicy(createOpenAICompatibleModel({ ...options.modelConfig, fetch: boundedFetch }), {
+      onDecision: (value) => diagnostics.recordModelDecision(value),
+    });
     tracing = createLangSmithEventObservability(options.langSmithConfig, {
+      limits: ACCEPTANCE_LANGSMITH_EXPORT_LIMITS,
       fetch: createLangSmithAuditedFetch(
         dependencies.langSmithFetch ?? globalThis.fetch,
         options.langSmithConfig,
         sensitiveValues,
         () => { tracePayloadSafe = false; },
+        { limits: ACCEPTANCE_LANGSMITH_EXPORT_LIMITS, onDiagnostic: (value) => diagnostics.recordTraceRequest(value) },
       ),
     });
     const webOptions: AgentWebRuntimeOptions = {
@@ -191,6 +281,7 @@ export async function runRealModelAcceptance(
       modelIdentity: options.modelIdentity,
       sourceInvocationLimit: 1,
       metrics: { profileId: 'simulation', mcpUrl: lab.metricsMcpUrl },
+      sourceWindow: lab.sourceWindow,
       logs: {
         profileId: 'simulation',
         mcpUrl: lab.logsMcpUrl,
@@ -200,10 +291,13 @@ export async function runRealModelAcceptance(
       host: '127.0.0.1',
       port: 0,
     };
+    phase = 'web_start';
     web = await (dependencies.startWeb ?? startAgentWebRuntime)(webOptions);
     assertLocalHttpUrl(web.url, 'PRECHECK_WEB_NOT_LOCAL');
+    phase = 'lab_readiness';
     await verifyLabReady(lab, httpFetch, now());
 
+    phase = 'parent_run_start';
     const startResponse = await fetchWithTimeout(httpFetch, `${web.url}/runs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -214,16 +308,24 @@ export async function runRealModelAcceptance(
         maxToolCalls: 12,
       }),
     });
-    if (startResponse.status !== 202) throw new RealModelAcceptanceError('RUN_START_REJECTED');
+    if (startResponse.status !== 202) {
+      throw new RealModelAcceptanceError('RUN_START_REJECTED', { httpStatus: startResponse.status });
+    }
     const started = await readObject(startResponse);
     runId = readRunId(started['runId']);
     if (runId === undefined) throw new RealModelAcceptanceError('RUN_ID_INVALID');
 
-    const terminalStatus = await waitForTerminal(httpFetch, web.url, runId);
+    phase = 'run_poll';
+    terminalStatus = await waitForTerminal(httpFetch, web.url, runId);
+    phase = 'event_flush';
     await web.flushEventObservability();
     const traceLinks = tracing.getTraceLinks();
     const exportDiagnostics = tracing.getDiagnostics();
-    if (terminalStatus !== 'completed') throw new RealModelAcceptanceError('RUN_NOT_COMPLETE');
+    if (terminalStatus !== 'completed') {
+      phase = 'run_terminal_status';
+      throw new RealModelAcceptanceError('RUN_NOT_COMPLETE', { runStatus: terminalStatus });
+    }
+    phase = 'snapshot_read';
     const snapshot = await (dependencies.readSnapshot ?? readAcceptanceSnapshot)({
       dataDirectory: options.dataDirectory,
       runId,
@@ -231,6 +333,7 @@ export async function runRealModelAcceptance(
     if (snapshot.parent.runId !== runId || snapshot.parent.childRunIds.length !== snapshot.children.length) {
       throw new RealModelAcceptanceError('SNAPSHOT_INVALID');
     }
+    phase = 'public_boundary_check';
     const publicBoundarySafe = await inspectPublicBoundaries(httpFetch, web.url, snapshot, sensitiveValues);
     await web.close();
     web = undefined;
@@ -238,33 +341,74 @@ export async function runRealModelAcceptance(
     lab = undefined;
 
     const metricFact = readMetricFact(snapshot);
-    const traceVerification = await verifyTraceLinks(options.langSmithConfig, traceLinks, snapshot, dependencies);
+    phase = 'trace_verification';
+    const traceVerification = await verifyTraceLinks(options.langSmithConfig, traceLinks, snapshot, dependencies, diagnostics);
+    phase = 'acceptance_evaluation';
     report = evaluateAcceptance({
       ...snapshot,
       caseId: 'settlement_failure',
       codeRevision: options.codeRevision,
+      sourceFingerprint: options.sourceFingerprint,
       profileRevision: options.profileRevision,
       snapshotId,
       reports: readSourceReports(snapshot.events),
       metricFact,
       budget: budget.snapshot(),
+      outputBudget: outputBudget.snapshot(),
       exportDiagnostics,
       traceVerification,
       manualReview: { status: 'pending' },
+      diagnostics: parseAcceptanceDiagnostics(diagnostics.snapshot(), sensitiveValues),
       boundaryChecks: {
         publicDataSafe: isPublicSnapshotSafe(snapshot, sensitiveValues) && publicBoundarySafe,
         traceExportSafe: tracePayloadSafe && areTraceLinksSafe(traceLinks, exportDiagnostics, sensitiveValues),
       },
     });
+    phase = 'acceptance_report';
     await writeAcceptanceReport(options, report);
     return report;
   } catch (error) {
     if (runId !== undefined && report === undefined) {
-      const failure = createFailureReport(options, runId, snapshotId, budget.snapshot(), tracing?.getDiagnostics());
+      // Stop the owned writer before opening the persisted failure snapshot. This
+      // diagnostic read must never create another Run or mask the original error.
+      let failureSnapshot: AcceptanceSnapshot | undefined;
+      try {
+        await web?.flushEventObservability();
+        await web?.close();
+        web = undefined;
+        const candidate = await (dependencies.readSnapshot ?? readAcceptanceSnapshot)({
+          dataDirectory: options.dataDirectory, runId,
+        });
+        if (isFailureSnapshotForRun(candidate, runId)) failureSnapshot = candidate;
+      } catch {
+        // Original failure remains authoritative; unavailable checks stay not_run.
+      }
+      const failure = createFailureReport(options, runId, snapshotId, budget.snapshot(), tracing?.getDiagnostics(), failureSnapshot,
+        outputBudget.snapshot(), parseAcceptanceDiagnostics(diagnostics.snapshot(), sensitiveValues));
       await writeAcceptanceReport(options, failure).catch(() => undefined);
     }
-    if (error instanceof RealModelAcceptanceError) throw error;
-    throw new RealModelAcceptanceError('RUN_NOT_COMPLETE');
+    const code = error instanceof RealModelAcceptanceError ? error.code : 'RUN_NOT_COMPLETE';
+    const caughtFailureDetails = error instanceof RealModelAcceptanceError
+      ? sanitizeFailureDetails(error.failureDetails)
+      : {};
+    const causeCode = readSafeCauseCode(error);
+    const failureDetails: RealModelAcceptanceFailureDetails = {
+      ...caughtFailureDetails,
+      ...(caughtFailureDetails.runStatus === undefined && terminalStatus !== undefined ? { runStatus: terminalStatus } : {}),
+      ...(causeCode === undefined ? {} : { causeCode }),
+    };
+    const diagnosticRecord: RealModelAcceptanceFailureRecord = {
+      schemaVersion: 1,
+      failureId: createSafeFailureId(dependencies.createFailureId),
+      code,
+      phase,
+      modelRequestsSent: budget.snapshot().sent,
+      parentRunCreated: runId !== undefined,
+      diagnostics: parseAcceptanceDiagnostics(diagnostics.snapshot(), sensitiveValues),
+      ...failureDetails,
+    };
+    const persisted = await writeFailureDiagnostics(options, diagnosticRecord).then(() => true, () => false);
+    throw new RealModelAcceptanceError(code, failureDetails, { ...diagnosticRecord, persisted });
   } finally {
     await Promise.allSettled([web?.close() ?? Promise.resolve(), lab?.close() ?? Promise.resolve()]);
     if (report === undefined && tracing !== undefined) await tracing.eventObservability.flush().catch(() => undefined);
@@ -274,7 +418,8 @@ export async function runRealModelAcceptance(
 function validateOptions(options: RealModelAcceptanceOptions): void {
   const paths = [options.dataDirectory, options.workspaceRoot, options.artifactDirectory];
   if (paths.some((path) => typeof path !== 'string' || path.trim() === '' || !isAbsolute(path) || path.includes('\0'))
-    || !isValidRevision(options.codeRevision) || !isValidRevision(options.profileRevision)
+    || !isValidRevision(options.codeRevision) || !/^[a-f\d]{64}$/u.test(options.sourceFingerprint)
+    || !isValidRevision(options.profileRevision)
     || !isSafeIdentifier(options.modelIdentity.provider) || !isSafeIdentifier(options.modelIdentity.model)
     || options.modelIdentity.model !== options.modelConfig.model
     || Buffer.byteLength(options.lab.labCursorSecret, 'utf8') < 32
@@ -345,16 +490,16 @@ async function waitForTerminal(
   fetcher: typeof globalThis.fetch,
   baseUrl: string,
   runId: string,
-): Promise<string> {
+): Promise<RealModelAcceptanceTerminalStatus> {
   const deadline = Date.now() + RUN_DEADLINE_MS + 10_000;
   while (Date.now() < deadline) {
     const response = await fetchWithTimeout(fetcher, `${baseUrl}/runs/${encodeURIComponent(runId)}`, { method: 'GET' });
-    if (!response.ok) throw new RealModelAcceptanceError('RUN_NOT_COMPLETE');
+    if (!response.ok) throw new RealModelAcceptanceError('RUN_NOT_COMPLETE', { httpStatus: response.status });
     const run = await readObject(response);
     if (run['runId'] !== runId || typeof run['status'] !== 'string') {
       throw new RealModelAcceptanceError('SNAPSHOT_INVALID');
     }
-    if (['completed', 'failed', 'cancelled', 'paused', 'awaiting_confirmation'].includes(run['status'])) {
+    if (isTerminalRunStatus(run['status'])) {
       return run['status'];
     }
     await new Promise((resolveDelay) => setTimeout(resolveDelay, RUN_POLL_INTERVAL_MS));
@@ -408,6 +553,7 @@ async function verifyTraceLinks(
   links: readonly TraceLink[],
   snapshot: AcceptanceSnapshot,
   dependencies: RealModelAcceptanceDependencies,
+  diagnostics: AcceptanceDiagnosticsRecorder,
 ): Promise<TraceVerification> {
   if (!config.enabled) return { status: 'unavailable', checkedSpanCount: 0 };
   const client = new Client({
@@ -415,8 +561,11 @@ async function verifyTraceLinks(
     apiKey: config.apiKey,
     timeout_ms: 10_000,
     callerOptions: { maxRetries: 0 },
+    fetchImplementation: createLangSmithQueryFetch(dependencies.langSmithFetch ?? globalThis.fetch, config.endpoint),
   });
-  return (dependencies.verifyTrace ?? verifyLangSmithTrace)({ client, links, snapshot });
+  const verificationDependencies = { now: () => performance.now(),
+    onDiagnostic: (value: TraceVerificationDiagnostic) => diagnostics.recordTraceVerification(value) };
+  return (dependencies.verifyTrace ?? verifyLangSmithTrace)({ client, links, snapshot }, verificationDependencies);
 }
 
 function isPublicSnapshotSafe(snapshot: AcceptanceSnapshot, secrets: readonly string[]): boolean {
@@ -442,62 +591,6 @@ export function isPublicBoundaryPayloadSafe(value: unknown, sensitiveValues: rea
     });
   };
   return visit(value, 0);
-}
-
-/** Validates the serialized SDK batch request, not just locally projected Span data. */
-export function isSafeLangSmithExportBody(body: string, sensitiveValues: readonly string[] = []): boolean {
-  if (Buffer.byteLength(body, 'utf8') > LANGSMITH_BODY_MAX_BYTES) return false;
-  let payload: unknown;
-  try {
-    payload = JSON.parse(body) as unknown;
-  } catch {
-    return false;
-  }
-  if (!isPublicBoundaryPayloadSafe(payload, sensitiveValues) || !isRecord(payload)
-    || Object.keys(payload).some((key) => !LANGSMITH_BATCH_OPERATIONS.has(key))) return false;
-  let runCount = 0;
-  for (const [operation, candidate] of Object.entries(payload)) {
-    if (!Array.isArray(candidate) || candidate.length > 512) return false;
-    for (const run of candidate) {
-      if (!isSafeLangSmithExportRun(run, operation)) return false;
-      runCount += 1;
-    }
-  }
-  return runCount > 0;
-}
-
-function isSafeLangSmithExportRun(value: unknown, operation: string): boolean {
-  if (!isRecord(value) || Object.keys(value).some((key) => !LANGSMITH_EXPORT_RUN_FIELDS.has(key))
-    || !isSafeIdentifier(value['id'])) return false;
-  if (operation === 'post' && (!isSafeIdentifier(value['name'])
-    || typeof value['run_type'] !== 'string'
-    || !['chain', 'tool', 'llm', 'retriever'].includes(value['run_type']))) return false;
-  if (value['name'] !== undefined && !isSafeIdentifier(value['name'])) return false;
-  if (value['run_type'] !== undefined && (typeof value['run_type'] !== 'string'
-    || !['chain', 'tool', 'llm', 'retriever'].includes(value['run_type']))) return false;
-  if (value['trace_id'] !== undefined && !isSafeIdentifier(value['trace_id'])) return false;
-  if (value['parent_run_id'] !== undefined && value['parent_run_id'] !== null && !isSafeIdentifier(value['parent_run_id'])) return false;
-  if (value['session_name'] !== undefined && !isSafeLangSmithSessionName(value['session_name'])) return false;
-  if (value['dotted_order'] !== undefined
-    && (typeof value['dotted_order'] !== 'string' || !/^[A-Za-z0-9._:-]{1,1024}$/u.test(value['dotted_order']))) return false;
-  if (value['reference_example_id'] !== undefined && value['reference_example_id'] !== null
-    && !isSafeIdentifier(value['reference_example_id'])) return false;
-  for (const key of ['child_runs', 'attachments', 'events'] as const) {
-    if (value[key] !== undefined && (!Array.isArray(value[key]) || value[key].length !== 0)) return false;
-  }
-  if (value['serialized'] !== undefined && value['serialized'] !== null
-    && (!isRecord(value['serialized']) || Object.keys(value['serialized']).length !== 0)) return false;
-  const remoteShape = Object.fromEntries(LANGSMITH_REMOTE_SELECTED_FIELDS
-    .filter((key) => Object.prototype.hasOwnProperty.call(value, key))
-    .map((key) => [key, value[key]]));
-  if (!isSafeLangSmithRunPayload(remoteShape)) return false;
-  for (const key of ['start_time', 'end_time'] as const) {
-    const timestamp = value[key];
-    if (timestamp !== undefined && !(typeof timestamp === 'number' && Number.isFinite(timestamp))
-      && !timestampV2Schema.safeParse(timestamp).success) return false;
-  }
-  return value['tags'] === undefined || (Array.isArray(value['tags']) && value['tags'].length <= 16
-    && value['tags'].every((tag) => typeof tag === 'string' && LANGSMITH_SAFE_TAGS.has(tag)));
 }
 
 async function inspectPublicBoundaries(
@@ -896,70 +989,6 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>): b
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-function isSafeLangSmithSessionName(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0 && value.length <= 128
-    && !hasControlChars(value);
-}
-
-export function createLangSmithAuditedFetch(
-  fetcher: typeof globalThis.fetch,
-  config: LangSmithEventConfig,
-  sensitiveValues: readonly string[],
-  onUnsafe: () => void,
-): typeof globalThis.fetch {
-  if (!config.enabled) return fetcher;
-  const expectedOrigin = new URL(config.endpoint).origin;
-  return async (input, init) => {
-    try {
-      const request = input instanceof Request
-        ? init === undefined ? input.clone() : new Request(input, init)
-        : new Request(input, init);
-      const requestUrl = new URL(request.url);
-      if (requestUrl.origin !== expectedOrigin || requestUrl.username !== '' || requestUrl.password !== ''
-        || requestUrl.search !== '' || requestUrl.hash !== '') {
-        onUnsafe();
-        return new Response('{"error":"TRACE_PAYLOAD_REJECTED"}', { status: 400 });
-      }
-      const body = await readBoundedBody(request.clone().body, LANGSMITH_BODY_MAX_BYTES);
-      const sanitizedBody = body === null || body.length === 0 ? body : stripSdkRuntimeFromLangSmithExport(body);
-      if (sanitizedBody === null || (sanitizedBody.length > 0 && !isSafeLangSmithExportBody(sanitizedBody, sensitiveValues))) {
-        onUnsafe();
-        return new Response('{"error":"TRACE_PAYLOAD_REJECTED"}', { status: 400 });
-      }
-      const forwarded = sanitizedBody === null || sanitizedBody === body
-        ? request
-        : new Request(request, { body: sanitizedBody });
-      return await fetcher(forwarded);
-    } catch {
-      onUnsafe();
-      return new Response('{"error":"TRACE_PAYLOAD_REJECTED"}', { status: 400 });
-    }
-  };
-}
-
-function stripSdkRuntimeFromLangSmithExport(body: string): string | null {
-  let payload: unknown;
-  try {
-    payload = JSON.parse(body) as unknown;
-  } catch {
-    return null;
-  }
-  if (!isRecord(payload)) return body;
-  let changed = false;
-  for (const operation of ['post', 'patch', 'pre'] as const) {
-    const runs = payload[operation];
-    if (!Array.isArray(runs)) continue;
-    for (const run of runs) {
-      if (!isRecord(run) || !isRecord(run['extra']) || !Object.prototype.hasOwnProperty.call(run['extra'], 'runtime')) continue;
-      const extra = { ...run['extra'] };
-      delete extra['runtime'];
-      run['extra'] = extra;
-      changed = true;
-    }
-  }
-  return changed ? JSON.stringify(payload) : body;
-}
-
 function areTraceLinksSafe(
   links: readonly TraceLink[],
   diagnostics: ExportDiagnostics,
@@ -987,6 +1016,23 @@ async function writeAcceptanceReport(options: RealModelAcceptanceOptions, report
   }
 }
 
+async function writeFailureDiagnostics(
+  options: RealModelAcceptanceOptions,
+  diagnostic: RealModelAcceptanceFailureRecord,
+): Promise<void> {
+  const serialized = `${JSON.stringify(diagnostic, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, 'utf8') > 32_768) throw new Error('FAILURE_DIAGNOSTIC_TOO_LARGE');
+  try {
+    const dataFailureDirectory = await ensureRealDirectory(join(options.dataDirectory, 'acceptance', 'failures'));
+    const artifactFailureDirectory = await ensureRealDirectory(join(options.artifactDirectory, 'failures'));
+    const fileName = `${diagnostic.failureId}.json`;
+    await writeFile(join(dataFailureDirectory, fileName), serialized, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    await writeFile(join(artifactFailureDirectory, fileName), serialized, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+  } catch {
+    throw new Error('FAILURE_DIAGNOSTIC_WRITE_FAILED');
+  }
+}
+
 async function ensureRealDirectory(path: string): Promise<string> {
   const absolutePath = resolve(path);
   await mkdir(absolutePath, { recursive: true });
@@ -1001,23 +1047,43 @@ function createFailureReport(
   snapshotId: string,
   budget: ReturnType<SmokeRequestBudget['snapshot']>,
   diagnostics?: ExportDiagnostics,
+  snapshot?: AcceptanceSnapshot,
+  outputBudget?: ReturnType<SmokeOutputBudget['snapshot']>,
+  localDiagnostics?: AcceptanceDiagnostics,
 ): AcceptanceReport {
+  const runIds = new Set([runId, ...(snapshot?.children.map((child) => child.runId) ?? [])]);
+  const events = snapshot?.events.filter((event) => runIds.has(event.runId)) ?? [];
+  const failures = collectAcceptanceFailures(events, runIds);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     caseId: 'settlement_failure',
     codeRevision: safeRevision(options.codeRevision),
+    sourceFingerprint: safeFingerprint(options.sourceFingerprint),
     profileRevision: safeRevision(options.profileRevision),
     snapshotId: isSafeIdentifier(snapshotId) ? snapshotId : 'unavailable',
     runId: isSafeIdentifier(runId) ? runId : 'unavailable',
-    childRunIds: [],
-    checks: CHECK_CODES.map((code) => ({ code, passed: false })),
+    childRunIds: snapshot?.children.map((child) => child.runId) ?? [],
+    checks: CHECK_CODES.map((code) => ({ code, passed: false,
+      status: code === 'TERMINAL_COMPLETE' && snapshot !== undefined && snapshot.parent.status !== 'completed'
+        ? 'failed' : 'not_run' })),
+    ...(failures.length > 0 ? { failures } : {}),
     budget,
-    usage: { completeness: 'unavailable' },
+    ...(outputBudget === undefined ? {} : { outputBudget }),
+    usage: summarizeRunUsage(events),
     exportDiagnostics: diagnostics ?? { pending: 0, dropped: 0, counts: {} },
     traceVerification: { status: 'unavailable', checkedSpanCount: 0 },
     manualReview: { status: 'pending' },
     verdict: 'failed',
+    ...(localDiagnostics === undefined ? {} : { diagnostics: parseAcceptanceDiagnostics(localDiagnostics) }),
   };
+}
+
+function isFailureSnapshotForRun(snapshot: AcceptanceSnapshot, runId: string): boolean {
+  return snapshot.parent.runId === runId && snapshot.children.length <= 2
+    && snapshot.parent.childRunIds.length === snapshot.children.length
+    && new Set(snapshot.parent.childRunIds).size === snapshot.children.length
+    && snapshot.children.every((child) => isSafeIdentifier(child.runId)
+      && child.parentRunId === runId && snapshot.parent.childRunIds.includes(child.runId));
 }
 
 function assertLocalHttpUrl(value: string, code: RealModelAcceptanceErrorCode): void {
@@ -1039,6 +1105,52 @@ function isSafeIdentifier(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u.test(value);
 }
 
+function createSafeFailureId(createId?: () => string): string {
+  try {
+    const candidate = createId?.() ?? randomUUID();
+    return isSafeIdentifier(candidate) ? candidate : randomUUID();
+  } catch {
+    return randomUUID();
+  }
+}
+
+function isTerminalRunStatus(value: string): value is RealModelAcceptanceTerminalStatus {
+  return value === 'completed' || value === 'failed' || value === 'cancelled'
+    || value === 'paused' || value === 'awaiting_confirmation';
+}
+
+function sanitizeFailureDetails(value: RealModelAcceptanceFailureDetails): RealModelAcceptanceFailureDetails {
+  const safe: {
+    probeCode?: TraceProbeErrorCode;
+    httpStatus?: number;
+    runStatus?: RealModelAcceptanceTerminalStatus;
+    causeCode?: RealModelAcceptanceCauseCode;
+  } = {};
+  if (['TRACE_PROBE_CONFIG_INVALID', 'TRACE_PROBE_UPLOAD_FAILED', 'TRACE_PROBE_QUERY_UNAVAILABLE',
+    'TRACE_PROBE_MISMATCH', 'TRACE_PROBE_DEADLINE'].includes(value.probeCode ?? '') && value.probeCode !== undefined) safe.probeCode = value.probeCode;
+  if (typeof value.httpStatus === 'number' && Number.isSafeInteger(value.httpStatus)
+    && value.httpStatus >= 100 && value.httpStatus <= 599) safe.httpStatus = value.httpStatus;
+  if (typeof value.runStatus === 'string' && isTerminalRunStatus(value.runStatus)) safe.runStatus = value.runStatus;
+  if (typeof value.causeCode === 'string' && ACCEPTANCE_CAUSE_CODES.has(value.causeCode)) {
+    safe.causeCode = value.causeCode;
+  }
+  return safe;
+}
+
+function readSafeCauseCode(error: unknown): RealModelAcceptanceCauseCode | undefined {
+  let current = error;
+  const visited = new Set<object>();
+  for (let depth = 0; depth < 4 && typeof current === 'object' && current !== null; depth += 1) {
+    if (visited.has(current)) return undefined;
+    visited.add(current);
+    const candidate = current as Record<string, unknown>;
+    const code = candidate['code'];
+    if (typeof code === 'string' && ACCEPTANCE_CAUSE_CODES.has(code)) return code as RealModelAcceptanceCauseCode;
+    current = candidate['cause'];
+  }
+  return undefined;
+}
+
 function isValidRevision(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0 && value.length <= 128 && !hasControlChars(value);
 }
@@ -1052,6 +1164,10 @@ function hasControlChars(value: string): boolean {
 
 function safeRevision(value: string): string {
   return isValidRevision(value) ? value : 'unverified';
+}
+
+function safeFingerprint(value: string): string {
+  return /^[a-f\d]{64}$/u.test(value) ? value : 'unverified';
 }
 
 function isSafeCount(value: unknown): value is number {
