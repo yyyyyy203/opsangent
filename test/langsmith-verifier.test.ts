@@ -47,8 +47,10 @@ describe('LangSmith remote payload privacy', () => {
   it.each([
     [0, true],
     [4, true],
+    [Number.MAX_SAFE_INTEGER, true],
     [-1, false],
     [1.5, false],
+    [Number.MAX_SAFE_INTEGER + 1, false],
     ['0', false],
   ] as const)('validates readback LangSmith run depth %j as a nonnegative safe integer', (depth, expected) => {
     expect(isSafeLangSmithRunPayload({
