@@ -5,6 +5,7 @@ import type {
   SourceSubagentType,
   ToolResponse,
 } from '../contracts/index.js';
+import { projectSourceMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 import { readSourceEvidenceObservation } from './source-evidence-observation.js';
 
 const DEFAULT_MAX_SUMMARY_BYTES = 16 * 1024;
@@ -158,6 +159,7 @@ export class DefaultSourceReportCollector implements SourceReportCollector {
       evidenceIds,
       businessTraceIds: this.accepted?.businessTraceIds ?? [],
       missingEvidence,
+      missingEvidenceCodes: projectSourceMissingEvidenceCodes(input.source, missingEvidence),
       coverage,
       toolCallsUsed: this.toolCallsUsed,
       durationMs: Math.max(0, input.finishedAt - input.startedAt),

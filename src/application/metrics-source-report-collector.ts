@@ -4,6 +4,7 @@ import type {
   SourceSubagentResult,
   ToolResponse,
 } from '../contracts/index.js';
+import { projectSourceMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 import { assessSettlementMetrics, type SettlementMetricFact, type SettlementMetricsProfile } from '../profiles/settlement.js';
 import { readSourceEvidenceObservation } from './source-evidence-observation.js';
 import {
@@ -136,6 +137,7 @@ export class MetricsSourceReportCollector implements SourceReportCollector {
       evidenceIds,
       businessTraceIds: [],
       missingEvidence,
+      missingEvidenceCodes: projectSourceMissingEvidenceCodes('metrics', missingEvidence),
       coverage,
       toolCallsUsed: this.toolCallsUsed,
       durationMs: Math.max(0, input.finishedAt - input.startedAt),

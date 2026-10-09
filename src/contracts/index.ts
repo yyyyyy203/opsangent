@@ -18,6 +18,7 @@ export * from './model.js';
 export * from './observability.js';
 export * from './storage.js';
 export * from './read-model.js';
+export * from './missing-evidence.js';
 export * from './run-usage.js';
 export * from './web-read-model.js';
 export * from './log-evidence.js';

@@ -45,6 +45,8 @@ export interface SourceSubagentResult {
   evidenceIds: string[];
   businessTraceIds: string[];
   missingEvidence: string[];
+  /** Additive, safe machine-code projection; legacy readers derive it from missingEvidence. */
+  missingEvidenceCodes?: string[];
   coverage: number;
   toolCallsUsed: number;
   durationMs: number;

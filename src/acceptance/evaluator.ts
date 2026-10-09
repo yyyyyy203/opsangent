@@ -12,6 +12,7 @@ import { readSourceReports } from './source-reports.js';
 import { collectAcceptanceFailures } from './failure-summary.js';
 import { agentErrorCodeV2Schema } from '../contracts/event-v2/common.js';
 import { isModelFailureCategory } from '../model/model-failure.js';
+import { normalizeSourceReportMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 import { parseAcceptanceDiagnostics } from './diagnostics.js';
 import type {
   AcceptanceInput,
@@ -245,8 +246,11 @@ function isSourceWindowValid(
 function isMissingEvidenceVisible(parent: PublicRunDetail, reports: readonly SourceSubagentResult[]): boolean {
   const visible = new Set(parent.missingEvidence);
   return reports.every((report) => {
-    if (report.status === 'complete' && report.missingEvidence.length === 0) return true;
-    return report.missingEvidence.length > 0 && report.missingEvidence.every((code) => visible.has(code));
+    const codes = normalizeSourceReportMissingEvidenceCodes(
+      report.source, report.missingEvidence, report.missingEvidenceCodes,
+    );
+    if (report.status === 'complete' && codes.length === 0) return true;
+    return codes.length > 0 && codes.every((code) => visible.has(code));
   });
 }
 
@@ -324,8 +328,13 @@ function summarizeTreeUsage(
 }
 
 function sameSourceReports(left: readonly SourceSubagentResult[], right: readonly SourceSubagentResult[]): boolean {
-  return stableJson([...left].sort((a, b) => a.source.localeCompare(b.source)))
-    === stableJson([...right].sort((a, b) => a.source.localeCompare(b.source)));
+  const normalize = (reports: readonly SourceSubagentResult[]): SourceSubagentResult[] => reports.map((report) => ({
+    ...report,
+    missingEvidenceCodes: normalizeSourceReportMissingEvidenceCodes(
+      report.source, report.missingEvidence, report.missingEvidenceCodes,
+    ),
+  })).sort((a, b) => a.source.localeCompare(b.source));
+  return stableJson(normalize(left)) === stableJson(normalize(right));
 }
 
 function sameWindow(

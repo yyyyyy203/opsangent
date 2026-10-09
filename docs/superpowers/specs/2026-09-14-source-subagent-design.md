@@ -141,6 +141,8 @@ export interface SourceSubagentResult {
   evidenceIds: string[];
   businessTraceIds: string[];
   missingEvidence: string[];
+  /** Optional safe machine-code projection; older results are normalized by the host. */
+  missingEvidenceCodes?: string[];
   coverage: number;
   toolCallsUsed: number;
   durationMs: number;
@@ -155,6 +157,13 @@ export interface SourceSubagentResult {
 coverage 根据 capture Manifest 状态、分页完整性、预算和缺失项由代码计算，
 不采信模型自行填写的覆盖率。summary 可以是自然语言，但只能来自脱敏、
 有界 child 结果。
+
+`missingEvidence` 保留兼容的内部描述；`missingEvidenceCodes` 由 Collector 和
+宿主按来源专属目录确定性生成。Run read model、压缩摘要、V2 公共消息块、SSE
+事件和验收报告等所有公开投影，都使用同一契约 allowlist。未知描述统一投影为
+`unclassified_evidence_gap`，表示存在尚未分类的补充取证需求；原文不进入公开
+投影。旧 Checkpoint/事件缺少新字段时，由同一目录从 `missingEvidence` 派生，
+保持历史数据可读。
 
 ### 6.2 执行上下文
 

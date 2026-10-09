@@ -293,7 +293,9 @@ describe('SQLite inspection query read model', () => {
 
       const detail = await persistence.queries.getRun('parent-run');
 
-      expect(detail?.missingEvidence).toEqual(['logs', 'logs_capture_unavailable', 'traces']);
+      expect(detail?.missingEvidence).toEqual([
+        'logs', 'logs_capture_unavailable', 'traces', 'unclassified_evidence_gap',
+      ]);
     } finally {
       persistence.close();
     }

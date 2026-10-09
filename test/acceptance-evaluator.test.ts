@@ -126,6 +126,50 @@ describe('combined-source acceptance evaluator', () => {
     expect(missingTerminal.checks.find((check) => check.code === 'TERMINAL_COMPLETE')?.passed).toBe(false);
   });
 
+  it('checks model-proposed missing evidence through the safe machine-code projection', () => {
+    const input = createAcceptanceFixture('settlement_failure');
+    const missingDescription = '需要核实发布变更记录';
+    const reports = input.reports.map((source) => source.source === 'logs'
+      ? {
+        ...source,
+        missingEvidence: [...source.missingEvidence, missingDescription],
+        missingEvidenceCodes: [...(source.missingEvidenceCodes ?? []), 'unclassified_evidence_gap'],
+      }
+      : source);
+    const events = input.events.map((event) => {
+      if (event.type !== 'TOOL_RESULT' || event.payload.result.toolName !== 'logs_subagent'
+        || event.payload.result.response === undefined) return event;
+      return {
+        ...event,
+        payload: {
+          ...event.payload,
+          result: {
+            ...event.payload.result,
+            response: {
+              ...event.payload.result.response,
+              blocks: event.payload.result.response.blocks.map((block) => block.type === 'json'
+                ? { ...block, value: reports.find((source) => source.source === 'logs') }
+                : block),
+            },
+          },
+        },
+      };
+    });
+    const result = evaluateAcceptance({
+      ...input,
+      reports,
+      events,
+      parent: {
+        ...input.parent,
+        missingEvidence: [...input.parent.missingEvidence, 'unclassified_evidence_gap'],
+      },
+    });
+
+    expect(result.checks.find((check) => check.code === 'MISSING_EVIDENCE_VISIBLE')?.passed).toBe(true);
+    expect(result.checks.find((check) => check.code === 'SOURCE_ALLOWLIST')?.passed).toBe(true);
+    expect(JSON.stringify(result)).not.toContain(missingDescription);
+  });
+
   it('rejects failed trace verification and explicit review rejection', () => {
     const input = createAcceptanceFixture('settlement_failure');
     expect(evaluateAcceptance({ ...input, traceVerification: { status: 'failed', checkedSpanCount: 0 } }).verdict).toBe('failed');

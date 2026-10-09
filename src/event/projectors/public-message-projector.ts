@@ -9,6 +9,7 @@ import type {
 import type { ContextSummary } from '../../contracts/message.js';
 import type { JsonValue } from '../../contracts/common.js';
 import type { ToolExecutionResult } from '../../contracts/tool.js';
+import { projectGeneralMissingEvidenceCodes } from '../../contracts/missing-evidence.js';
 
 const FORBIDDEN_KEY = /(authorization|cookie|password|passwd|secret|token|api[-_]?key|system[-_]?prompt|raw[-_]?arguments)/i;
 const FORBIDDEN_VALUE = /\bBearer\s+\S+|\bsk-[A-Za-z0-9_-]{8,}/i;
@@ -84,7 +85,7 @@ function projectBlock(block: MessageBlockV2): MessageBlockV2 | null {
       return {
         type: 'diagnosis', blockId: safeIdentifier(block.blockId), outcome: block.outcome,
         rootCauseCandidates: block.rootCauseCandidates.map((candidate) => ({ summary: safeText(candidate.summary), confidence: candidate.confidence })),
-        evidenceIds: block.evidenceIds.map(safeIdentifier), missingEvidence: block.missingEvidence.map(safeText), limitations: block.limitations.map(safeText),
+        evidenceIds: block.evidenceIds.map(safeIdentifier), missingEvidence: projectGeneralMissingEvidenceCodes(block.missingEvidence), limitations: block.limitations.map(safeText),
       };
     case 'action_proposal':
       return {
@@ -126,7 +127,7 @@ function projectContextSummary(block: ContextSummaryMessageBlockV2): ContextSumm
     summary: {
       confirmedFacts: summary.confirmedFacts.map(safeText),
       hypotheses: summary.hypotheses.map(safeText),
-      missingEvidence: summary.missingEvidence.map(safeText),
+      missingEvidence: projectGeneralMissingEvidenceCodes(summary.missingEvidence),
       pendingActionIds: summary.pendingActionIds.map(safeIdentifier),
       executedActionIds: summary.executedActionIds.map(safeIdentifier),
       unresolvedRisks: summary.unresolvedRisks.map(safeText),

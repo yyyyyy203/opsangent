@@ -4,6 +4,7 @@ import type {
   SourceSubagentResult,
   ToolResponse,
 } from '../contracts/index.js';
+import { projectSourceMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 import { readSourceEvidenceObservation } from './source-evidence-observation.js';
 import {
   DefaultSourceReportCollector,
@@ -225,9 +226,11 @@ export class LogsSourceReportCollector implements SourceReportCollector {
     coverage: number,
     missingEvidence: string[],
   ): SourceSubagentResult {
+    const boundedMissingEvidence = unique(missingEvidence, MAX_ITEMS);
     return {
       source: 'logs', status, summary, findings, evidenceIds, businessTraceIds,
-      missingEvidence: unique(missingEvidence, MAX_ITEMS), coverage,
+      missingEvidence: boundedMissingEvidence, coverage,
+      missingEvidenceCodes: projectSourceMissingEvidenceCodes('logs', boundedMissingEvidence),
       toolCallsUsed: generic.toolCallsUsed, durationMs: generic.durationMs,
     };
   }

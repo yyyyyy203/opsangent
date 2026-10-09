@@ -13,6 +13,10 @@ import type {
   ToolResponseChunk,
 } from '../../contracts/index.js';
 import { canonicalSourceToolName } from '../../contracts/index.js';
+import {
+  projectSourceMissingEvidenceCodes,
+  sourceMissingEvidenceCodesAreConsistent,
+} from '../../contracts/missing-evidence.js';
 import { validateToolInput } from '../schema.js';
 
 const MAX_ATTEMPTS = 3;
@@ -313,13 +317,21 @@ function validateResult(value: SourceSubagentResult, source: SourceSubagentDescr
     || !Number.isFinite(value.durationMs) || value.durationMs < 0) {
     throw new SourceToolFailure('MCP_PROTOCOL_ERROR', 'Source subagent returned an invalid result.', false);
   }
+  const missingEvidence = uniqueStrings(value.missingEvidence, MAX_STATEMENT_CHARS);
+  if (value.missingEvidenceCodes !== undefined
+    && (!Array.isArray(value.missingEvidenceCodes) || value.missingEvidenceCodes.length > MAX_ITEMS
+      || value.missingEvidenceCodes.some((code) => typeof code !== 'string')
+      || !sourceMissingEvidenceCodesAreConsistent(source, missingEvidence, value.missingEvidenceCodes))) {
+    throw new SourceToolFailure('MCP_PROTOCOL_ERROR', 'Source subagent returned inconsistent missing-evidence codes.', false);
+  }
   return {
     ...value,
     summary: truncateUtf8(value.summary, MAX_SUMMARY_BYTES),
     findings: value.findings.slice(0, MAX_ITEMS).map(normalizeFinding),
     evidenceIds: uniqueStrings(value.evidenceIds),
     businessTraceIds: uniqueStrings(value.businessTraceIds, MAX_TRACE_ID_CHARS),
-    missingEvidence: uniqueStrings(value.missingEvidence, MAX_STATEMENT_CHARS),
+    missingEvidence,
+    missingEvidenceCodes: projectSourceMissingEvidenceCodes(source, missingEvidence),
   };
 }
 

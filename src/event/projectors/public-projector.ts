@@ -1,5 +1,6 @@
 import type { AgentEventEnvelopeV2, JsonObject, JsonValue } from '../../contracts/index.js';
 import { parseAgentEventV2 } from '../../contracts/event-v2/schema.js';
+import { projectGeneralMissingEvidenceCodes } from '../../contracts/missing-evidence.js';
 
 export interface PublicAgentEventV2 {
   schemaVersion: 2;
@@ -185,13 +186,13 @@ export class PublicEventProjectorV2 {
         return sanitizeRecord({
           source: event.payload.source,
           error: { code: event.payload.error.code, message: safeText(event.payload.error.message), retryable: event.payload.error.retryable },
-          missingEvidence: event.payload.missingEvidence.map(safeText),
+          missingEvidence: projectGeneralMissingEvidenceCodes(event.payload.missingEvidence),
         });
       case 'HYPOTHESIS_UPDATED':
         return sanitizeRecord({
           candidates: event.payload.candidates.map((candidate) => ({ summary: safeText(candidate.summary), confidence: candidate.confidence })),
           evidenceIds: event.payload.evidenceIds,
-          missingEvidence: event.payload.missingEvidence.map(safeText),
+          missingEvidence: projectGeneralMissingEvidenceCodes(event.payload.missingEvidence),
         });
       case 'DIAGNOSIS_COMPLETED':
         return sanitizeRecord({ outcome: event.payload.outcome, reportId: event.payload.reportId, evidenceIds: event.payload.evidenceIds, limitations: event.payload.limitations.map(safeText) });

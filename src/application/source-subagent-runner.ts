@@ -12,6 +12,7 @@ import type {
   SourceSubagentType,
   ToolResponseChunk,
 } from '../contracts/index.js';
+import { projectSourceMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 import { DefaultSourceReportCollector, type SourceReportCandidate, type SourceReportCollector } from './source-report-collector.js';
 
 export type { AgentContext } from '../contracts/context.js';
@@ -304,10 +305,12 @@ function restoreCheckpoint(
 }
 
 function reducedScope(result: SourceSubagentResult, reason: string): SourceSubagentResult {
+  const missingEvidence = [...new Set([...result.missingEvidence, reason])].slice(0, 20);
   return {
     ...result,
     status: 'partial',
-    missingEvidence: [...new Set([...result.missingEvidence, reason])].slice(0, 20),
+    missingEvidence,
+    missingEvidenceCodes: projectSourceMissingEvidenceCodes(result.source, missingEvidence),
   };
 }
 

@@ -157,7 +157,8 @@ describe('L1StructurePruner', () => {
             status: 'success',
             response: { blocks: [{ type: 'json', value: {
               source: 'logs', status: 'unavailable', missingEvidence: [
-                'logs_capture_unavailable', 'traces', 'elasticsearch:9200', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
+                'logs_capture_unavailable', 'traces', '需要核实发布变更记录', 'elasticsearch:9200',
+                'ghp_abcdefghijklmnopqrstuvwxyz0123456789',
               ],
             } }] },
             startedAt: timestamp,
@@ -181,10 +182,14 @@ describe('L1StructurePruner', () => {
     expect(visibleToolResultIds(candidate.context)).not.toContain(callId);
     expect(summaryMissingEvidence).toContain('logs_capture_unavailable');
     expect(summaryMissingEvidence).toContain('traces');
+    expect(summaryMissingEvidence).toContain('unclassified_evidence_gap');
+    expect(summaryMissingEvidence).not.toContain('需要核实发布变更记录');
     expect(summaryMissingEvidence).not.toContain('elasticsearch:9200');
     expect(summaryMissingEvidence).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
     expect(publicRunMissingEvidence(candidate.context)).toContain('logs_capture_unavailable');
     expect(publicRunMissingEvidence(candidate.context)).toContain('traces');
+    expect(publicRunMissingEvidence(candidate.context)).toContain('unclassified_evidence_gap');
+    expect(publicRunMissingEvidence(candidate.context)).not.toContain('需要核实发布变更记录');
     expect(publicRunMissingEvidence(candidate.context)).not.toContain('elasticsearch:9200');
     expect(publicRunMissingEvidence(candidate.context)).not.toContain('ghp_abcdefghijklmnopqrstuvwxyz0123456789');
   });

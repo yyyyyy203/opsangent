@@ -1,4 +1,5 @@
 import type { AgentEventEnvelopeV2, SourceSubagentResult, ToolResponseBlock } from '../contracts/index.js';
+import { normalizeSourceReportMissingEvidenceCodes } from '../contracts/missing-evidence.js';
 
 const SOURCE_BY_TOOL = {
   metrics_subagent: 'metrics',
@@ -115,6 +116,12 @@ function parseSourceReport(
   const evidenceIds = uniqueStrings(value['evidenceIds']);
   if (evidenceIds.length !== value['evidenceIds'].length
     || !sameStrings(evidenceIds, responseEvidenceIds)) return undefined;
+  const missingEvidence = uniqueStrings(value['missingEvidence']);
+  const declaredMissingEvidenceCodes = value['missingEvidenceCodes'] === undefined
+    ? undefined
+    : isStringArray(value['missingEvidenceCodes']) && value['missingEvidenceCodes'].length <= 20
+      ? value['missingEvidenceCodes']
+      : ['unclassified_evidence_gap'];
   return {
     source: expectedSource,
     status: value['status'],
@@ -122,7 +129,10 @@ function parseSourceReport(
     findings,
     evidenceIds,
     businessTraceIds: uniqueStrings(value['businessTraceIds']),
-    missingEvidence: uniqueStrings(value['missingEvidence']),
+    missingEvidence,
+    missingEvidenceCodes: normalizeSourceReportMissingEvidenceCodes(
+      expectedSource, missingEvidence, declaredMissingEvidenceCodes,
+    ),
     coverage: value['coverage'],
     toolCallsUsed: value['toolCallsUsed'],
     durationMs: value['durationMs'],
