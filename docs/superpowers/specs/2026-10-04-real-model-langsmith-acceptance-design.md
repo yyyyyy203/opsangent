@@ -222,6 +222,17 @@ Preflight 在付费调用前完成：工具链/构建、ES/Prometheus ready、MC
 - 新增独立 opt-in Trace 探针，仅上传两个 synthetic Span 并有界回查，不调用模型或启动 Lab/MCP。真实模型 runner 在 Lab/模型调用前执行同一准入，探针失败时模型请求为 0 且不创建父 Run；独立探针成功也不等于诊断验收通过。
 - 本轮默认只执行离线回归和质量门，真实探针/模型不自动重跑。10 次模型 HTTP、512/1024 cap、5120 共享输出预算、90/30 秒 Run 截止时间、摘要与引用公开边界均不变。
 
+### ADR：2026-10-08 LangSmith 查询响应投影
+
+- LangSmith `/runs/query` 的 `select` 是请求投影提示；SDK 不会替调用方过滤响应里的额外 Run 字段。查询 Fetch 边界必须在 SDK 解码前把每个 Run 投影到唯一共享的 11 个验收字段；root、model 和完整烟测校验器复用同一字段清单。
+- 查询响应只保留 `runs` 和分页 `cursors`；Run 上额外顶层字段只计算数量，不保留名称或值。响应仍受 1 MiB、10 秒请求期限和每个查询 Fetch 最多 3 次实际请求限制；分页游标继续由 SDK 使用。
+- `inputs`、`outputs`、`extra.metadata`、`error`、Run ID、trace/parent 关系、终态和 usage 在投影后继续由现有校验器逐项检查。坏 JSON、错误响应结构和非对象 Run 以固定 `TRACE_QUERY_UNAVAILABLE` 结束，不能被投影成空结果。
+- 远端 `extra.metadata` 校验只为 LangSmith 自动添加的 `ls_run_depth` 增加读回例外，并且仅接受非负安全整数；未知 metadata 键和其他类型仍 fail-closed。此例外不改变上传端隐私白名单。
+- 读回与上传使用不同的 metadata 校验策略：读回校验器允许上述数值例外，上传校验器明确拒绝 `ls_run_depth`，即使值是有效非负整数。两条路径共享其他字段约束，但不能共享放宽后的读回 allowlist。
+- 离线 trace-probe fixture 必须能把固定 mismatch 应用到指定的 root 或 model Span；至少有一条 root mismatch 用例断言只输出 `mismatchSpan: root`，并且不泄露 Run ID 或远端 payload。
+- 上传方向的严格隐私审计不变。读回投影只说明应用后续校验和报告看到的字段，不证明远端未保存或未返回其他字段；原始响应只在 1 MiB 有界读取和解析期间留在进程内。
+- 独立探针可输出被丢弃顶层字段的总数，不输出远端字段名、值、ID 或原始 payload。离线 fake server 必须忽略 `select` 并返回额外字段，覆盖真实查询消费路径、游标分页及嵌套字段仍 fail-closed。
+
 ## 10. 测试与验收门槛
 
 - Node 24＋锁定 pnpm 11 的冻结安装，Windows/Linux 各跑 lint/typecheck/test/build/web:typecheck/web:build。

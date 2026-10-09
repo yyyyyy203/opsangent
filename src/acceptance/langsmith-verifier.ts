@@ -3,6 +3,7 @@ import type { TraceLink } from '../bootstrap/langsmith.js';
 import type { AcceptanceSnapshot, TraceVerification } from './types.js';
 import type { TraceVerificationDiagnostic } from './diagnostics.js';
 import { containsSensitivePublicContent } from './privacy-audit.js';
+import { LANGSMITH_RUN_READBACK_FIELDS } from './langsmith-query-transport.js';
 
 const MAX_QUERIES = 3;
 const MAX_DURATION_MS = 10_000;
@@ -14,10 +15,7 @@ const TERMINAL_SPAN_STATUSES = new Set([
   'aborted', 'partial', 'unavailable',
 ]);
 const SAFE_IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
-const SELECTED_RUN_FIELDS = [
-  'id', 'trace_id', 'parent_run_id', 'name', 'run_type', 'end_time', 'status', 'error', 'inputs', 'outputs', 'extra',
-];
-const SAFE_REMOTE_RUN_FIELDS = new Set(SELECTED_RUN_FIELDS);
+const SAFE_REMOTE_RUN_FIELDS = new Set<string>(LANGSMITH_RUN_READBACK_FIELDS);
 const SAFE_REMOTE_INPUT_KEYS = new Set(['profile', 'purpose', 'stage']);
 const SAFE_REMOTE_OUTPUT_KEYS = new Set([
   'status', 'outcome', 'stage', 'code', 'category', 'reasonCode', 'terminalStatus', 'finishReason',
@@ -34,6 +32,16 @@ const SAFE_REMOTE_METADATA_KEYS = new Set([
   'ls_provider', 'ls_model_name',
 ]);
 const UUID_PATTERN = /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/iu;
+
+export type LangSmithRunPayloadSafetyIssue = 'remote_run_top_level_shape_invalid' | 'remote_run_extra_shape_invalid'
+  | 'remote_run_inputs_shape_invalid' | 'remote_run_outputs_shape_invalid'
+  | 'remote_run_metadata_shape_invalid' | 'remote_run_error_shape_invalid';
+export type LangSmithRunTopLevelShape = 'not_object' | 'unselected_fields';
+export interface LangSmithRunPayloadInspection {
+  readonly issue: LangSmithRunPayloadSafetyIssue;
+  readonly topLevelShape?: LangSmithRunTopLevelShape;
+  readonly unexpectedTopLevelFieldCount?: number;
+}
 
 type RemoteRun = Awaited<ReturnType<Client['readRun']>>;
 type SpanKind = 'execution' | 'invocation' | 'tool' | 'model';
@@ -436,7 +444,7 @@ async function collectRuns(client: Client, ids: readonly string[]): Promise<Remo
   const iterator = client.listRuns({
     id: [...ids],
     limit: ids.length,
-    select: SELECTED_RUN_FIELDS,
+    select: [...LANGSMITH_RUN_READBACK_FIELDS],
   })[Symbol.asyncIterator]();
   const runs: RemoteRun[] = [];
   for (;;) {
@@ -556,16 +564,44 @@ function remoteModelOutcome(run: RemoteRun): ModelAttempt['state'] | 'unknown' {
   return 'unknown';
 }
 
+/** Validates selected remote/readback Run fields, including LangSmith-generated run-depth metadata. */
 export function isSafeLangSmithRunPayload(value: unknown): boolean {
-  if (!isRecord(value) || Object.keys(value).some((key) => !SAFE_REMOTE_RUN_FIELDS.has(key))) return false;
+  return inspectLangSmithRunPayload(value) === undefined;
+}
+
+/** Validates locally constructed export metadata with no LangSmith readback-only fields. */
+export function isSafeLangSmithOutboundRunPayload(value: unknown): boolean {
+  return inspectLangSmithRunPayloadDetails(value, { allowLangSmithRunDepth: false }) === undefined;
+}
+
+/** Returns a fixed privacy-safe rejection category without exposing keys or values. */
+export function inspectLangSmithRunPayload(value: unknown): LangSmithRunPayloadSafetyIssue | undefined {
+  return inspectLangSmithRunPayloadDetails(value)?.issue;
+}
+
+/** Adds only static shape information and a count; remote field names and values stay private. */
+export function inspectLangSmithRunPayloadDetails(
+  value: unknown,
+  options: { readonly allowLangSmithRunDepth?: boolean } = {},
+): LangSmithRunPayloadInspection | undefined {
+  if (!isRecord(value)) return { issue: 'remote_run_top_level_shape_invalid', topLevelShape: 'not_object' };
+  const unexpectedTopLevelFieldCount = Object.keys(value).filter((key) => !SAFE_REMOTE_RUN_FIELDS.has(key)).length;
+  if (unexpectedTopLevelFieldCount > 0) {
+    return { issue: 'remote_run_top_level_shape_invalid', topLevelShape: 'unselected_fields', unexpectedTopLevelFieldCount };
+  }
   const extra = value['extra'];
-  if (extra !== undefined && extra !== null && !isRecord(extra)) return false;
-  if (isRecord(extra) && Object.keys(extra).some((key) => key !== 'metadata')) return false;
+  if (extra !== undefined && extra !== null && !isRecord(extra)) return { issue: 'remote_run_extra_shape_invalid' };
+  if (isRecord(extra) && Object.keys(extra).some((key) => key !== 'metadata')) return { issue: 'remote_run_extra_shape_invalid' };
   const metadata = isRecord(extra) ? extra['metadata'] : undefined;
-  return isSafeIdentifierMap(value['inputs'], SAFE_REMOTE_INPUT_KEYS)
-    && isSafeOutputMap(value['outputs'])
-    && isSafeMetadataMap(metadata)
-    && (value['error'] === undefined || value['error'] === null || value['error'] === '' || value['error'] === 'TRACE_ERROR');
+  if (!isSafeIdentifierMap(value['inputs'], SAFE_REMOTE_INPUT_KEYS)) return { issue: 'remote_run_inputs_shape_invalid' };
+  if (!isSafeOutputMap(value['outputs'])) return { issue: 'remote_run_outputs_shape_invalid' };
+  if (!isSafeMetadataMap(metadata, options.allowLangSmithRunDepth !== false)) {
+    return { issue: 'remote_run_metadata_shape_invalid' };
+  }
+  if (value['error'] !== undefined && value['error'] !== null && value['error'] !== '' && value['error'] !== 'TRACE_ERROR') {
+    return { issue: 'remote_run_error_shape_invalid' };
+  }
+  return undefined;
 }
 
 function isSafeIdentifierMap(value: unknown, allowedKeys: ReadonlySet<string>): boolean {
@@ -592,11 +628,11 @@ function isSafeOutputMap(value: unknown): boolean {
   });
 }
 
-function isSafeMetadataMap(value: unknown): boolean {
+function isSafeMetadataMap(value: unknown, allowLangSmithRunDepth: boolean): boolean {
   if (value === undefined || value === null) return true;
   if (!isRecord(value)) return false;
   return Object.entries(value).every(([key, item]) => {
-    if (!SAFE_REMOTE_METADATA_KEYS.has(key)) return false;
+    if (!SAFE_REMOTE_METADATA_KEYS.has(key) && !(allowLangSmithRunDepth && key === 'ls_run_depth')) return false;
     if (key === 'eventType') return typeof item === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(item);
     if (['agentRunId', 'sessionId', 'replyId', 'streamId', 'spanKey', 'parentSpanKey', 'correlationId',
       'causationId', 'attemptId', 'toolCallId', 'stepId', 'profile', 'purpose', 'provider', 'model',
@@ -604,7 +640,11 @@ function isSafeMetadataMap(value: unknown): boolean {
       'category', 'reasonCode', 'terminalStatus', 'usageCompleteness', 'ls_provider', 'ls_model_name'].includes(key)) {
       return isSafeIdentifier(item);
     }
-    if (['attempt', 'durationMs', 'ttftMs', 'retryCount', 'inputTokens', 'outputTokens'].includes(key)) return isSafeToken(item);
+    // LangSmith adds this numeric metadata during remote readback; outbound metadata remains separately allowlisted.
+    if (key === 'ls_run_depth') return allowLangSmithRunDepth && isSafeToken(item);
+    if (['attempt', 'durationMs', 'ttftMs', 'retryCount', 'inputTokens', 'outputTokens'].includes(key)) {
+      return isSafeToken(item);
+    }
     if (['cacheHit', 'retryable', 'orphan', 'continuedAfterPause'].includes(key)) return typeof item === 'boolean';
     if (key === 'evidenceIds' || key === 'missingEvidenceCodes') {
       return Array.isArray(item) && item.length <= 100 && item.every(isSafeIdentifier);

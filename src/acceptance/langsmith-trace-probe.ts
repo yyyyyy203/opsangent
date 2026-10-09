@@ -6,15 +6,37 @@ import { withLangSmithAbort } from '../observability/langsmith-http.js';
 import type { ExportDiagnostics } from '../observability/export-diagnostics.js';
 import { AcceptanceDiagnosticsRecorder, type AcceptanceDiagnostics } from './diagnostics.js';
 import { createAuditedLangSmithFetch } from './langsmith-export-transport.js';
-import { isSafeLangSmithRunPayload } from './langsmith-verifier.js';
+import {
+  inspectLangSmithRunPayloadDetails,
+  type LangSmithRunPayloadInspection,
+  type LangSmithRunPayloadSafetyIssue,
+  type LangSmithRunTopLevelShape,
+} from './langsmith-verifier.js';
 import { containsSensitivePublicContent } from './privacy-audit.js';
-import { createLangSmithQueryFetch } from './langsmith-query-transport.js';
+import { createLangSmithQueryFetch, LANGSMITH_RUN_READBACK_FIELDS } from './langsmith-query-transport.js';
 
 export type TraceProbeErrorCode = 'TRACE_PROBE_CONFIG_INVALID' | 'TRACE_PROBE_UPLOAD_FAILED'
   | 'TRACE_PROBE_QUERY_UNAVAILABLE' | 'TRACE_PROBE_MISMATCH' | 'TRACE_PROBE_DEADLINE';
+export type TraceProbeMismatchReason = LangSmithRunPayloadSafetyIssue | 'remote_run_identity_mismatch' | 'remote_run_missing'
+  | 'trace_id_mismatch' | 'parent_run_mismatch' | 'end_time_invalid' | 'run_error_present' | 'run_name_mismatch'
+  | 'run_type_mismatch' | 'output_status_mismatch' | 'run_status_mismatch' | 'usage_metadata_missing'
+  | 'input_tokens_mismatch' | 'output_tokens_mismatch' | 'total_tokens_mismatch' | 'cached_input_tokens_mismatch';
+export type TraceProbeMismatchSpan = 'root' | 'model';
+interface TraceProbeMismatch {
+  readonly reason: TraceProbeMismatchReason;
+  readonly span?: TraceProbeMismatchSpan;
+  readonly shape?: LangSmithRunTopLevelShape;
+  readonly unexpectedTopLevelFieldCount?: number;
+}
 export interface TraceProbeResult {
   readonly status: 'verified' | 'failed';
   readonly code?: TraceProbeErrorCode;
+  /** Fixed safe category and optional synthetic span category; never remote values or payloads. */
+  readonly mismatchReason?: TraceProbeMismatchReason;
+  readonly mismatchSpan?: TraceProbeMismatchSpan;
+  readonly mismatchShape?: LangSmithRunTopLevelShape;
+  readonly unexpectedTopLevelFieldCount?: number;
+  readonly discardedTopLevelFieldCount?: number;
   readonly checkedSpanCount: number;
   readonly remoteQueriesSent: number;
   readonly diagnostics: AcceptanceDiagnostics;
@@ -27,7 +49,6 @@ export interface TraceProbeDependencies {
   readonly sleep?: (milliseconds: number) => Promise<void>;
 }
 
-const SELECT = ['id', 'trace_id', 'parent_run_id', 'name', 'run_type', 'end_time', 'status', 'error', 'inputs', 'outputs', 'extra'];
 const EMPTY_EXPORT: ExportDiagnostics = { pending: 0, dropped: 0, counts: {} };
 
 /** No Lab, MCP or ChatModel dependency: two synthetic spans admit the next layer. */
@@ -38,9 +59,19 @@ export async function runLangSmithTraceProbe(
   const recorder = new AcceptanceDiagnosticsRecorder();
   let remoteQueriesSent = 0;
   let checkedSpanCount = 0;
+  let discardedTopLevelFieldCount = 0;
   let exporter: ReturnType<typeof createLangSmithEventObservability> | undefined;
-  const result = (code?: TraceProbeErrorCode): TraceProbeResult => ({ status: code === undefined ? 'verified' : 'failed',
-    ...(code === undefined ? {} : { code }), checkedSpanCount, remoteQueriesSent,
+  const result = (code?: TraceProbeErrorCode, mismatch?: TraceProbeMismatch): TraceProbeResult => ({
+    status: code === undefined ? 'verified' : 'failed',
+    ...(code === undefined ? {} : { code }),
+    ...(mismatch === undefined ? {} : { mismatchReason: mismatch.reason,
+      ...(mismatch.span === undefined ? {} : { mismatchSpan: mismatch.span }),
+      ...(mismatch.shape === undefined ? {} : { mismatchShape: mismatch.shape }),
+      ...(mismatch.unexpectedTopLevelFieldCount === undefined ? {} : {
+        unexpectedTopLevelFieldCount: mismatch.unexpectedTopLevelFieldCount,
+      }) }),
+    checkedSpanCount, remoteQueriesSent,
+    ...(discardedTopLevelFieldCount === 0 ? {} : { discardedTopLevelFieldCount }),
     diagnostics: recorder.snapshot(), exportDiagnostics: exporter?.getDiagnostics() ?? EMPTY_EXPORT });
   if (options.authorization !== 'explicit-probe' || !options.config.enabled) return result('TRACE_PROBE_CONFIG_INVALID');
 
@@ -87,22 +118,27 @@ export async function runLangSmithTraceProbe(
       callerOptions: { maxRetries: 0 }, debug: false,
       fetchImplementation: createLangSmithQueryFetch(fetcher, config.endpoint, {
         signal: controller.signal, onRequest: () => { remoteQueriesSent += 1; },
+        onUnselectedFieldCount: (count) => { discardedTopLevelFieldCount += count; },
       }),
     });
     for (let query = 0; query < 3; query += 1) {
       const runs: Record<string, unknown>[] = [];
       const read = async (): Promise<void> => {
-        for await (const run of queryClient.listRuns({ id: ids, limit: 2, select: SELECT })) {
+        for await (const run of queryClient.listRuns({ id: ids, limit: 2, select: [...LANGSMITH_RUN_READBACK_FIELDS] })) {
           if (runs.length >= 2) throw new Error('TRACE_PROBE_MISMATCH');
           runs.push(run as unknown as Record<string, unknown>);
         }
       };
       await withLangSmithAbort(read(), controller.signal);
       checkedSpanCount = runs.length;
-      if (runs.some((run) => !ids.includes(String(run['id']))) || new Set(runs.map((run) => run['id'])).size !== runs.length) {
-        return result('TRACE_PROBE_MISMATCH');
+      if (runs.some((run) => typeof run['id'] !== 'string' || !ids.includes(run['id']))
+        || new Set(runs.map((run) => run['id'])).size !== runs.length) {
+        return result('TRACE_PROBE_MISMATCH', { reason: 'remote_run_identity_mismatch' });
       }
-      if (runs.length === 2) return result(matchesRemote(runs, links) ? undefined : 'TRACE_PROBE_MISMATCH');
+      if (runs.length === 2) {
+        const mismatch = findRemoteMismatch(runs, links);
+        return mismatch === undefined ? result() : result('TRACE_PROBE_MISMATCH', mismatch);
+      }
       if (query < 2) await withLangSmithAbort(dependencies.sleep === undefined
         ? sleep(1000, controller.signal) : dependencies.sleep(1000), controller.signal);
     }
@@ -124,21 +160,49 @@ function validLinks(links: readonly TraceLink[], runId: string): boolean {
     && child.parentRemoteRunId === root.remoteRunId && child.traceId === root.traceId;
 }
 
-function matchesRemote(runs: readonly Record<string, unknown>[], links: readonly TraceLink[]): boolean {
-  return links.every((link) => {
+function findRemoteMismatch(
+  runs: readonly Record<string, unknown>[],
+  links: readonly TraceLink[],
+): TraceProbeMismatch | undefined {
+  for (const link of links) {
     const run = runs.find((candidate) => candidate['id'] === link.remoteRunId);
-    if (run === undefined || !isSafeLangSmithRunPayload(run) || run['trace_id'] !== link.traceId
-      || (run['parent_run_id'] ?? undefined) !== link.parentRemoteRunId || !validEnd(run['end_time'])
-      || (run['error'] !== undefined && run['error'] !== null && run['error'] !== '')) return false;
+    if (run === undefined) return mismatchFor(link, 'remote_run_missing');
+    const payloadInspection = inspectLangSmithRunPayloadDetails(run);
+    if (payloadInspection !== undefined) return payloadMismatchFor(link, payloadInspection);
+    if (run['id'] !== link.remoteRunId) return mismatchFor(link, 'remote_run_identity_mismatch');
+    if (run['trace_id'] !== link.traceId) return mismatchFor(link, 'trace_id_mismatch');
+    if ((run['parent_run_id'] ?? undefined) !== link.parentRemoteRunId) return mismatchFor(link, 'parent_run_mismatch');
+    if (!validEnd(run['end_time'])) return mismatchFor(link, 'end_time_invalid');
+    if (run['error'] !== undefined && run['error'] !== null && run['error'] !== '') return mismatchFor(link, 'run_error_present');
     const isModel = link.spanKey === 'trace-probe-model';
-    if (run['name'] !== (isModel ? 'model.trace-probe' : 'agent.run') || run['run_type'] !== (isModel ? 'llm' : 'chain')) return false;
+    if (run['name'] !== (isModel ? 'model.trace-probe' : 'agent.run')) return mismatchFor(link, 'run_name_mismatch');
+    if (run['run_type'] !== (isModel ? 'llm' : 'chain')) return mismatchFor(link, 'run_type_mismatch');
     const outputs = record(run['outputs']);
-    if (outputs?.['status'] !== 'completed' || (run['status'] !== undefined && run['status'] !== 'success' && run['status'] !== 'completed')) return false;
-    if (!isModel) return true;
+    if (outputs?.['status'] !== 'completed') return mismatchFor(link, 'output_status_mismatch');
+    if (run['status'] !== undefined && run['status'] !== 'success' && run['status'] !== 'completed') return mismatchFor(link, 'run_status_mismatch');
+    if (!isModel) continue;
     const usage = record(outputs['usage_metadata']);
-    return usage?.['input_tokens'] === 12 && usage['output_tokens'] === 5 && usage['total_tokens'] === 17
-      && record(usage['input_token_details'])?.['cache_read'] === 4;
-  });
+    if (usage === undefined) return mismatchFor(link, 'usage_metadata_missing');
+    if (usage['input_tokens'] !== 12) return mismatchFor(link, 'input_tokens_mismatch');
+    if (usage['output_tokens'] !== 5) return mismatchFor(link, 'output_tokens_mismatch');
+    if (usage['total_tokens'] !== 17) return mismatchFor(link, 'total_tokens_mismatch');
+    if (record(usage['input_token_details'])?.['cache_read'] !== 4) return mismatchFor(link, 'cached_input_tokens_mismatch');
+  }
+  return undefined;
+}
+
+function mismatchFor(link: TraceLink, reason: TraceProbeMismatchReason): TraceProbeMismatch {
+  return { reason, span: link.spanKey === 'trace-probe-model' ? 'model' : 'root' };
+}
+
+function payloadMismatchFor(link: TraceLink, inspection: LangSmithRunPayloadInspection): TraceProbeMismatch {
+  return {
+    ...mismatchFor(link, inspection.issue),
+    ...(inspection.topLevelShape === undefined ? {} : { shape: inspection.topLevelShape }),
+    ...(inspection.unexpectedTopLevelFieldCount === undefined ? {} : {
+      unexpectedTopLevelFieldCount: inspection.unexpectedTopLevelFieldCount,
+    }),
+  };
 }
 
 function validEnd(value: unknown): boolean {

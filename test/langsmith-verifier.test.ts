@@ -3,7 +3,11 @@ import type { AgentEventEnvelopeV2, AgentEventPayloadMap, AgentEventTypeV2, Publ
 import type { TraceLink } from '../src/bootstrap/langsmith.js';
 import type { AcceptanceSnapshot } from '../src/acceptance/types.js';
 import { describe, expect, it } from 'vitest';
-import { isSafeLangSmithRunPayload, verifyLangSmithTrace } from '../src/acceptance/langsmith-verifier.js';
+import {
+  inspectLangSmithRunPayloadDetails,
+  isSafeLangSmithRunPayload,
+  verifyLangSmithTrace,
+} from '../src/acceptance/langsmith-verifier.js';
 
 const PARENT_RUN_ID = 'acceptance-parent';
 const CHILD_RUN_ID = 'acceptance-metrics-child';
@@ -17,6 +21,18 @@ const EXPECTED_USAGE = { inputTokens: 12, outputTokens: 5 };
 const EVENT_TIME = '2026-10-04T12:00:00.000Z';
 
 describe('LangSmith remote payload privacy', () => {
+  it('distinguishes non-object responses from unselected top-level fields without returning field names', () => {
+    expect(inspectLangSmithRunPayloadDetails(null)).toEqual({
+      issue: 'remote_run_top_level_shape_invalid',
+      topLevelShape: 'not_object',
+    });
+    expect(inspectLangSmithRunPayloadDetails({ id: 'remote-run', privateField: 'REMOTE_CANARY' })).toEqual({
+      issue: 'remote_run_top_level_shape_invalid',
+      topLevelShape: 'unselected_fields',
+      unexpectedTopLevelFieldCount: 1,
+    });
+  });
+
   it('rejects credential-shaped strings even inside allowlisted metadata fields', () => {
     expect(isSafeLangSmithRunPayload({
       id: 'remote-run',
@@ -26,6 +42,23 @@ describe('LangSmith remote payload privacy', () => {
       outputs: { status: 'completed' },
       extra: { metadata: { provider: 'sk-SYNTHETIC_ACCESS_KEY_CANARY_LONG' } },
     })).toBe(false);
+  });
+
+  it.each([
+    [0, true],
+    [4, true],
+    [-1, false],
+    [1.5, false],
+    ['0', false],
+  ] as const)('validates readback LangSmith run depth %j as a nonnegative safe integer', (depth, expected) => {
+    expect(isSafeLangSmithRunPayload({
+      id: 'remote-run',
+      name: 'agent.run',
+      run_type: 'chain',
+      inputs: { profile: 'simulation' },
+      outputs: { status: 'completed' },
+      extra: { metadata: { ls_run_depth: depth } },
+    })).toBe(expected);
   });
 });
 

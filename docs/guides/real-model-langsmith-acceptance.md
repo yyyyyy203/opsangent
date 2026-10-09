@@ -28,7 +28,13 @@ if ($traceProbeExitCode -ne 0) { throw 'Trace 探针失败；不要继续模型�
 
 探针通过生产 exporter 创建两个 synthetic Span（一个 root、一个 model），固定 usage 为 input=12、output=5、cache=4；只按本次两个 ID 回查，最多 3 次查询、整体 30 秒。请求和正文共用 10 秒期限、flush 15 秒；普通非验收 exporter 默认仍为 1 秒请求/2 秒 flush。SDK 隐式重试被传输边界阻止。
 
+查询 Fetch 会在 LangSmith SDK 解码前，将每个 Run 限定到验收所需的 11 个字段；`/runs/query` 额外 Run 字段和响应 envelope 字段不会进入校验器，分页 cursor 保留。探针可报告 `discardedTopLevelFieldCount`，只统计被裁掉字段数。选中字段中的 `inputs`、`outputs`、`extra.metadata`、错误、层级和 usage 仍照常校验；远端 `extra.metadata` 仅额外允许 LangSmith 自动补充的 `ls_run_depth`，且必须是非负安全整数，其他未知键和非法值仍拒绝。读回校验和上传校验使用分开的 metadata 策略：上传即使遇到整数形式的 `ls_run_depth` 也会 fail-closed，不扩展上传端字段白名单。该处理验证应用消费的字段视图，不表示 LangSmith 远端没有其他字段。
+
 失败码区分 `TRACE_PROBE_UPLOAD_FAILED`、`TRACE_PROBE_QUERY_UNAVAILABLE`、`TRACE_PROBE_MISMATCH`、`TRACE_PROBE_DEADLINE`。安全诊断只保留 route/phase/outcome/elapsedMs/httpStatus，不包含远端错误正文、URL、消息和密钥。422 的具体服务端拒绝字段仍需依据实际响应另行定位，不能因离线通过就宣布远端已修复。
+
+`TRACE_PROBE_MISMATCH` 会额外返回固定枚举 `mismatchReason`（包括 inputs、outputs、extra、metadata、error 结构类别，以及父子关系、状态和 token 字段 mismatch）。能关联到某个测试 Span 时还返回 `mismatchSpan`，仅为 `root` 或 `model`。`discardedTopLevelFieldCount` 是读回投影丢弃的额外字段数量，不包含字段名、值、Run ID 或原始 payload。投影后选中字段结构仍 fail-closed；不能通过删除嵌套检查或放宽预期把 mismatch 改为通过。
+
+离线 fixture 会按选择对 root 或 model Span 应用 readback mismatch；root mismatch 测试断言诊断只返回固定的 `root` 标签，不含远端 ID 或内容。
 
 探针 `verified` 只证明上传/读回这两个测试 Span 的协议，不代表完整 Agent、模型回答质量或生产数据通过。联合烟测仍会重新执行同一准入探针，通过后才启动 Lab 和一次父 Run。
 

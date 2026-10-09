@@ -1,5 +1,5 @@
 import { timestampV2Schema } from '../contracts/event-v2/common.js';
-import { isSafeLangSmithRunPayload } from './langsmith-verifier.js';
+import { isSafeLangSmithOutboundRunPayload } from './langsmith-verifier.js';
 import { containsSensitivePublicContent, isForbiddenPublicFieldName } from './privacy-audit.js';
 
 const MAX_BODY_BYTES = 1_048_576;
@@ -80,7 +80,7 @@ function isSafeExportRun(value: unknown, operation: string): boolean {
   const remoteShape = Object.fromEntries(REMOTE_SELECTED_FIELDS
     .filter((key) => Object.prototype.hasOwnProperty.call(value, key))
     .map((key) => [key, value[key]]));
-  if (!isSafeLangSmithRunPayload(remoteShape)) return false;
+  if (!isSafeLangSmithOutboundRunPayload(remoteShape)) return false;
   for (const key of ['start_time', 'end_time'] as const) {
     const timestamp = value[key];
     if (timestamp !== undefined && !(typeof timestamp === 'number' && Number.isFinite(timestamp))
