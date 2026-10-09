@@ -2,13 +2,14 @@ import type {
   EventFactoryV2Like,
   EventPublisherV2Like,
 } from './event-publisher.js';
+import type { SourceSubagentType } from './source-kind.js';
 import type { IdGenerator } from './common.js';
+export type { SourceSubagentType };
 import type {
   Tool,
   ToolResponseChunk,
 } from './tool.js';
 
-export type SourceSubagentType = 'metrics' | 'logs' | 'traces';
 export type SourceSubagentStatus = 'complete' | 'partial' | 'unavailable';
 export type SourceFindingKind = 'observation' | 'inference';
 

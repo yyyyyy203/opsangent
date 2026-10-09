@@ -1,4 +1,4 @@
-import type { SourceSubagentType } from './source-subagent.js';
+import type { SourceSubagentType } from './source-kind.js';
 
 export const UNCLASSIFIED_EVIDENCE_GAP = 'unclassified_evidence_gap' as const;
 
