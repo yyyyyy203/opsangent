@@ -21,7 +21,7 @@ export default tseslint.config(
   {
     // These are JavaScript entry points; check basic rules without treating
     // unannotated JavaScript as typed TypeScript that requires generated `dist`.
-    files: ['apps/metrics-lab/*.mjs', 'apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
+    files: ['apps/metrics-lab/*.mjs', 'apps/logs-lab/*.mjs', 'apps/acceptance/*.mjs', 'test/e2e/logs-fixture-server.mjs', 'test/fixtures/langsmith-fetch-proxy.mjs'],
     languageOptions: {
       ...tseslint.configs.disableTypeChecked.languageOptions,
       globals: { process: 'readonly', fetch: 'readonly', Buffer: 'readonly', AbortSignal: 'readonly', Request: 'readonly', URL: 'readonly' },
