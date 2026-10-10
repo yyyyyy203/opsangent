@@ -12,6 +12,8 @@ export * from './governance.js';
 export * from './hooks.js';
 export * from './hitl.js';
 export * from './memory.js';
+export * from './diagnostic-memory.js';
+export * from './diagnostic-memory-schema.js';
 export * from './message.js';
 export * from './message-v2/index.js';
 export * from './model.js';

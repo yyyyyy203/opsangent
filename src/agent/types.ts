@@ -1,4 +1,5 @@
 import type { AgentContext, AgentEvent } from '../contracts/index.js';
+import type { MemoryPreferences, RunMemoryControl } from '../contracts/diagnostic-memory.js';
 
 /** Internal sentinel used to preserve the trusted origin of a user cancel command. */
 export const USER_RUN_CANCELLATION_REASON: unique symbol = Symbol('user-run-cancellation');
@@ -19,6 +20,10 @@ export interface ReplyOptions {
   networkAttemptBudget?: { remaining: number };
   /** @internal Host-only trusted scope; never accept from an external request parser. */
   trustedSystemContext?: string;
+  /** @internal Host-only memory scope and policy; never accept from an external request parser. */
+  trustedMemoryControl?: RunMemoryControl;
+  /** External preferences select only capabilities allowed by the host Profile policy. */
+  memoryPreferences?: MemoryPreferences;
 }
 
 export interface DiagnosisRunResult {

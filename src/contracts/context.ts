@@ -1,4 +1,5 @@
 import type { AgentError } from './errors.js';
+import type { RunMemoryControl, RunMemoryState } from './diagnostic-memory.js';
 import type { RunGovernanceState, ToolBatchGovernanceSnapshot } from './governance.js';
 import type { SerializableInterrupt } from './hitl.js';
 import type { AgentMessage } from './message.js';
@@ -56,5 +57,9 @@ export interface AgentContext {
   networkAttemptBudget?: { remaining: number };
   /** Additive Run-level governance state; legacy checkpoints are migrated by the durable codec. */
   governance?: RunGovernanceState;
+  /** Host-resolved capture/recall policy, independent of whether recall was prepared. */
+  memoryControl?: RunMemoryControl;
+  /** Frozen historical selections and active hints; never current-run evidence. */
+  memory?: RunMemoryState;
   failure?: AgentError;
 }

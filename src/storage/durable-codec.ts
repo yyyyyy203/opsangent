@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { canonicalJson, checkpointChecksum } from '../contracts/stable-json.js';
 import type { AgentContext, PendingToolBatch } from '../contracts/context.js';
+import { runMemoryControlSchema, runMemoryStateSchema } from '../contracts/diagnostic-memory-schema.js';
 import { createInitialRunGovernanceState, type ToolBatchGovernanceSnapshot } from '../contracts/governance.js';
 import type { EvidenceRecord, ToolExecutionRecord } from '../contracts/storage.js';
 
@@ -137,7 +138,7 @@ const governance = z.object({
   }).strict(),
 }).strict();
 
-const agentContext = z.object({
+const legacyAgentContext = z.object({
   runId: z.string().min(1),
   sessionId: z.string().min(1).optional(),
   replyId: z.string().min(1).optional(),
@@ -169,6 +170,11 @@ const agentContext = z.object({
   networkAttemptBudget: z.object({ remaining: z.number().int().nonnegative() }).strict().optional(),
   governance: governance.optional(),
   failure: agentError.optional(),
+}).strict();
+
+const agentContext = legacyAgentContext.extend({
+  memoryControl: runMemoryControlSchema.optional(),
+  memory: runMemoryStateSchema.optional(),
 }).strict();
 
 const toolExecutionRecord = z.object({
@@ -216,8 +222,9 @@ export function parsePendingToolBatch(value: unknown): PendingToolBatch {
   return structuredClone(parsed) as PendingToolBatch;
 }
 
-export function parseAgentContext(value: unknown): AgentContext {
-  const parsed = agentContext.parse(value);
+export function parseAgentContext(value: unknown, schemaVersion: 1 | 2 | 3 = 3): AgentContext {
+  // Legacy codecs remain closed to memory fields; migration must not infer scope.
+  const parsed = schemaVersion === 3 ? agentContext.parse(value) : legacyAgentContext.parse(value);
   if (parsed.pendingToolBatch?.governance !== undefined) parseToolBatchGovernanceSnapshot(parsed.pendingToolBatch.governance);
   const migrated = {
     ...parsed,

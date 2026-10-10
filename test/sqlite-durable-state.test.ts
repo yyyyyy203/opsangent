@@ -12,8 +12,10 @@ import type {
   ToolExecutionRecord,
   ToolExecutionResult,
 } from '../src/contracts/index.js';
+import { createInitialRunGovernanceState } from '../src/contracts/governance.js';
 import { createSqlitePersistence, SqliteDatabase } from '../src/infrastructure/sqlite/index.js';
 import { checkpointChecksum } from '../src/storage/durable-codec.js';
+import { memoryCase, memoryNow, simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 
 const roots: string[] = [];
 const now = '2026-09-10T00:00:00.000Z';
@@ -109,6 +111,22 @@ function evidence(evidenceId: string, capturedAt: string): EvidenceRecord {
   };
 }
 
+function insertCheckpoint(path: string, value: AgentContext | Record<string, unknown>, schemaVersion: number,
+  checksum = checkpointChecksum(value)): void {
+  const database = SqliteDatabase.open(path);
+  try {
+    database.raw.prepare(`
+      INSERT INTO agent_checkpoints(
+        run_id, revision, context_version, status, stage, profile_id, checkpoint_schema_version,
+        checkpoint_json, checksum, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(value.runId, 1, value.contextVersion, value.status, value.stage, value.profileId,
+      schemaVersion, JSON.stringify(value), checksum, now, now);
+  } finally {
+    database.close();
+  }
+}
+
 describe('SQLite durable-state persistence', () => {
   it('reopens a versioned checkpoint and Evidence record after closing SQLite', async () => {
     const path = await databasePath();
@@ -155,7 +173,7 @@ describe('SQLite durable-state persistence', () => {
     }
   });
 
-  it('loads a legacy checkpoint checksum and upgrades its next write to the governance schema', async () => {
+  it('loads a legacy checkpoint checksum and upgrades its next write to schema 3', async () => {
     const path = await databasePath();
     const legacy = context('run-legacy');
     const database = SqliteDatabase.open(path);
@@ -189,11 +207,121 @@ describe('SQLite durable-state persistence', () => {
         SELECT checkpoint_schema_version, checkpoint_json
         FROM agent_checkpoints WHERE run_id = ?
       `).get('run-legacy') as { checkpoint_schema_version: number; checkpoint_json: string };
-      expect(row.checkpoint_schema_version).toBe(2);
+      expect(row.checkpoint_schema_version).toBe(3);
       expect(JSON.parse(row.checkpoint_json)).toMatchObject({ governance: { schemaVersion: 1 } });
     } finally {
       upgraded.close();
     }
+  });
+
+  it.each([1, 2])('restores real schema %i rows using their original checksum and no invented memory scope', async (version) => {
+    const path = await databasePath();
+    const stored = context(`old-${version}`, {
+      toolCorrections: { 'metrics.capture': { firstCallId: 'call-legacy', failures: 1 } },
+      ...(version === 2 ? { governance: createInitialRunGovernanceState({ profileId: 'group-buy-market', capturedAt: now }) } : {}),
+    });
+    insertCheckpoint(path, stored, version);
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      const loaded = await persistence.checkpoints.load(stored.runId);
+      expect(loaded?.checksum).toBe(checkpointChecksum(stored));
+      expect(loaded?.context).toMatchObject(stored);
+      expect(loaded?.context).not.toHaveProperty('memoryControl');
+      expect(loaded?.context).not.toHaveProperty('memory');
+    } finally { persistence.close(); }
+  });
+
+  it('verifies a schema 2 checksum before applying conservative missing-governance defaults', async () => {
+    const path = await databasePath();
+    const stored = context('v2-defaults');
+    insertCheckpoint(path, stored, 2);
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      const loaded = await persistence.checkpoints.load(stored.runId);
+      expect(loaded?.checksum).toBe(checkpointChecksum(stored));
+      expect(loaded?.context.governance?.profile.source).toBe('legacy_checkpoint');
+      expect(loaded?.context).not.toHaveProperty('memory');
+    } finally { persistence.close(); }
+  });
+
+  it('upgrades an unchanged schema 2 checkpoint on its first valid save', async () => {
+    const path = await databasePath();
+    const stored = context('v2-upgrade', { governance: createInitialRunGovernanceState({ profileId: 'group-buy-market', capturedAt: now }) });
+    insertCheckpoint(path, stored, 2);
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      const loaded = await persistence.checkpoints.load(stored.runId);
+      if (loaded === null) throw new Error('expected old checkpoint');
+      expect((await persistence.checkpoints.save(loaded.context, loaded.revision)).revision).toBe(2);
+    } finally { persistence.close(); }
+    const database = SqliteDatabase.open(path);
+    try {
+      const row = database.raw.prepare('SELECT checkpoint_schema_version FROM agent_checkpoints WHERE run_id = ?').get(stored.runId);
+      expect(row).toEqual({ checkpoint_schema_version: 3 });
+    } finally { database.close(); }
+  });
+
+  it.each(['control-only', 'full-memory'])('writes and reopens schema 3 with %s', async (kind) => {
+    const path = await databasePath();
+    const memoryControl = { schemaVersion: 1 as const, scope: simulationMemoryScope(), profilePolicyRevision: 'policy-v1', capture: 'manual' as const, recall: kind === 'full-memory' };
+    const candidate = memoryCase();
+    const memory = { schemaVersion: 1 as const, scope: simulationMemoryScope(), selectionState: 'selected' as const, availability: 'ready' as const,
+      selections: [{ memoryId: candidate.id, revision: candidate.revision, digest: candidate.digest }],
+      hints: [{ memoryId: candidate.id, revision: candidate.revision, digest: candidate.digest, sourceRunId: candidate.sourceRunId,
+        capturedAt: candidate.capturedAt, validUntil: candidate.validUntil, summary: candidate.summary,
+        limitations: candidate.limitations, evidenceRefs: candidate.evidenceRefs, diagnosisOnly: true as const }],
+      selectedAt: memoryNow, validatedAt: memoryNow };
+    const first = createSqlitePersistence({ path, clock });
+    try {
+      await first.checkpoints.save({ ...context('v3', { profileId: 'simulation' }), memoryControl,
+        ...(kind === 'full-memory' ? { memory } : {}) }, null);
+    } finally { first.close(); }
+    const second = createSqlitePersistence({ path, clock });
+    try {
+      const loaded = await second.checkpoints.load('v3');
+      expect(loaded?.context).toHaveProperty('memoryControl', memoryControl);
+      if (kind === 'full-memory') expect(loaded?.context).toHaveProperty('memory', memory);
+      else expect(loaded?.context).not.toHaveProperty('memory');
+    } finally { second.close(); }
+    const database = SqliteDatabase.open(path);
+    try {
+      expect(database.raw.prepare('SELECT checkpoint_schema_version FROM agent_checkpoints WHERE run_id = ?').get('v3'))
+        .toEqual({ checkpoint_schema_version: 3 });
+    } finally { database.close(); }
+  });
+
+  it.each([1, 2])('rejects new memory fields smuggled into schema %i despite a matching checksum', async (version) => {
+    for (const field of ['memoryControl', 'memory']) {
+      const path = await databasePath();
+      const value = field === 'memoryControl'
+        ? { schemaVersion: 1, scope: simulationMemoryScope(), profilePolicyRevision: 'policy-v1', capture: 'manual', recall: false }
+        : { schemaVersion: 1, scope: simulationMemoryScope(), selectionState: 'unselected', availability: 'empty', selections: [], hints: [] };
+      insertCheckpoint(path, { ...context(`smuggled-${field}`), [field]: value }, version);
+      const persistence = createSqlitePersistence({ path, clock });
+      try {
+        await expect(persistence.checkpoints.load(`smuggled-${field}`)).rejects.toMatchObject({ recordType: 'checkpoint' });
+      } finally { persistence.close(); }
+    }
+  });
+
+  it.each([1, 2, 3])('rejects schema %i tampering even if the checksum matches the migrated context', async (version) => {
+    const path = await databasePath();
+    const stored = context(`tampered-${version}`);
+    const migrated = { ...stored, governance: createInitialRunGovernanceState({ profileId: stored.profileId, capturedAt: now }) };
+    insertCheckpoint(path, stored, version, checkpointChecksum(migrated));
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      await expect(persistence.checkpoints.load(stored.runId)).rejects.toMatchObject({ recordType: 'checkpoint' });
+    } finally { persistence.close(); }
+  });
+
+  it('rejects a future checkpoint version with a valid payload and checksum', async () => {
+    const path = await databasePath();
+    insertCheckpoint(path, context('future'), 4);
+    const persistence = createSqlitePersistence({ path, clock });
+    try {
+      await expect(persistence.checkpoints.load('future')).rejects.toMatchObject({ recordType: 'checkpoint' });
+    } finally { persistence.close(); }
   });
 
   it('reopens a pending durable Outbox event after SQLite restarts', async () => {

@@ -20,8 +20,7 @@ import {
 import type { SqliteDatabase } from './database.js';
 import { enqueueOutboxEvents } from './event-outbox-store.js';
 
-const LEGACY_CHECKPOINT_SCHEMA_VERSION = 1;
-const CHECKPOINT_SCHEMA_VERSION = 2;
+const CHECKPOINT_SCHEMA_VERSION = 3;
 
 interface CheckpointRow {
   run_id: string;
@@ -183,7 +182,8 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     if (!validCreate && !validUpdate) {
       throw new CheckpointConflictError(normalized.runId, expectedRevision, actualRevision);
     }
-    if (current !== undefined && current.checksum === checksum && !forceRevisionAdvance) return current;
+    if (current !== undefined && row?.checkpoint_schema_version === CHECKPOINT_SCHEMA_VERSION
+      && current.checksum === checksum && !forceRevisionAdvance) return current;
 
     const savedAt = this.clock.now().toISOString();
     const checkpoint: StoredRunCheckpoint = {
@@ -263,20 +263,21 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
   private parseCheckpoint(row: CheckpointRow): StoredRunCheckpoint {
     try {
       const decoded: unknown = JSON.parse(row.checkpoint_json) as unknown;
-      const storedChecksum = checkpointChecksum(decoded);
-      const context = parseAgentContext(decoded);
-      const checksum = row.checkpoint_schema_version === LEGACY_CHECKPOINT_SCHEMA_VERSION
-        ? storedChecksum
-        : checkpointChecksum(context);
+      // Always verify the original JSON before any codec adds governance defaults.
+      if (checkpointChecksum(decoded) !== row.checksum) throw new Error('checkpoint checksum mismatch');
+      let context: AgentContext;
+      switch (row.checkpoint_schema_version) {
+        case 1: context = parseAgentContext(decoded, 1); break;
+        case 2: context = parseAgentContext(decoded, 2); break;
+        case 3: context = parseAgentContext(decoded, 3); break;
+        default: throw new Error('unsupported checkpoint schema version');
+      }
       if (!Number.isSafeInteger(row.revision) || row.revision <= 0
-        || (row.checkpoint_schema_version !== LEGACY_CHECKPOINT_SCHEMA_VERSION
-          && row.checkpoint_schema_version !== CHECKPOINT_SCHEMA_VERSION)
         || context.runId !== row.run_id
         || context.contextVersion !== row.context_version
         || context.status !== row.status
         || context.stage !== row.stage
-        || context.profileId !== row.profile_id
-        || checksum !== row.checksum) {
+        || context.profileId !== row.profile_id) {
         throw new Error('checkpoint row integrity mismatch');
       }
       return { context, revision: row.revision, savedAt: row.updated_at, checksum: row.checksum };

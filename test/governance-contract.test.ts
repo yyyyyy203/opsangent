@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { checkpointChecksum } from '../src/contracts/stable-json.js';
 import { parseAgentContext } from '../src/storage/durable-codec.js';
+import { simulationMemoryScope } from './fixtures/diagnostic-memory.js';
 
 const timestamp = '2026-09-11T00:00:00.000Z';
 
@@ -105,5 +106,22 @@ describe('governance checkpoint contract', () => {
     const context = { ...legacyContext(), governance: governanceSnapshot() };
 
     expect(parseAgentContext(context).governance).toEqual(governanceSnapshot());
+  });
+
+  it('does not invent memory scope or control while migrating legacy governance', () => {
+    const parsed = parseAgentContext(legacyContext());
+    expect(parsed).not.toHaveProperty('memoryControl');
+    expect(parsed).not.toHaveProperty('memory');
+  });
+
+  it('preserves independent memory control without changing governance or messages', () => {
+    const memoryControl = { schemaVersion: 1, scope: simulationMemoryScope(),
+      profilePolicyRevision: 'policy-v1', capture: 'manual', recall: false };
+    const messages = [{ id: 'message-1', role: 'user', blocks: [{ type: 'text', text: 'inspect' }], createdAt: timestamp }];
+    const parsed = parseAgentContext({ ...legacyContext('simulation'), governance: governanceSnapshot(), messages, memoryControl });
+    expect(parsed).toHaveProperty('memoryControl', memoryControl);
+    expect(parsed).not.toHaveProperty('memory');
+    expect(parsed.governance).toEqual(governanceSnapshot());
+    expect(parsed.messages).toEqual(messages);
   });
 });
