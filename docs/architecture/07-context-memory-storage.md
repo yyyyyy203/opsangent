@@ -22,16 +22,20 @@ ContextRenderer 组装稳定系统指令、工具快照、历史消息及尾部�
 
 ## 记忆
 
-2026-10-10 的具体增量设计见 [受控诊断记忆一期 Spec](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [实施计划](../superpowers/plans/2026-10-10-governed-diagnostic-memory.md)，两者当前待实施。下表是目标职责，不代表现有内存 Memory 原型已经具备持久化、审核或召回闭环。新方案保留旧 MemoryFacade，新增强制范围的小接口；实际接入以该 Spec 的兼容、事务和安全约束为准。
+2026-10-10 的具体增量设计见 [受控诊断记忆一期 Spec R2](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [实施计划](../superpowers/plans/2026-10-10-governed-diagnostic-memory.md)，两者当前待实施。下表是目标职责，不代表现有内存 Memory 原型已经具备持久化、审核或召回闭环。新方案保留旧 MemoryFacade，新增强制范围的捕获、审核、查询、召回小接口；实际接入以该 Spec 的兼容、事务和安全约束为准。
+
+部署能力与日常用户控制分离：未配置服务不改变旧行为，合法启用后默认 manual 保存/recall=false，前端可手动沉淀终态 Run、按允许策略自动保存，并独立决定是否使用已审核历史参考。保存先进入 observation，不要求先开启召回，不需每次找开发人员改环境变量；审核与工具执行授权完全分离。failed/cancelled 调查可手动归档但不可批准召回，已结束 Run 的 Checkpoint、状态和模型用量不因保存而改变。
 
 | 类型 | 内容 | V1 |
 |---|---|---|
-| Working | 当前 Run 结构化状态 | Checkpoint 支持 |
-| Episodic | 历史报告、证据引用、结果质量 | 保存与有界召回 |
-| Semantic | 拓扑、指标、阈值、Runbook | 受控 Profile/知识输入 |
-| Procedural | 审核后的经验模板 | 仅保留候选接口，不启用自动晋级 |
+| Working | 当前 Run 结构化状态 | 复用既有 Checkpoint；控制/召回快照恢复增量待实施 |
+| Episodic | 历史报告、证据引用、结果质量 | 前端保存、审核、撤销、有界召回的完整闭环待实施 |
+| Semantic | 拓扑、指标、阈值、Runbook | 既有 Profile 是受控来源，完整版本化知识库与检索仍未实现 |
+| Procedural | 审核后的经验模板 | 仅兼容候选接口；模板生命周期/召回仍未实现，不启用自动晋级 |
 
 MemoryFacade 是门面，内部拆召回、案例存取、语义检索和候选管理。先按 Profile、服务、时间、故障类型和数据来源过滤，再文本排序；V1 可采用 BM25/中文 bigram，实现可替换。只注入有界 MemoryHints，并保留来源和时间。
+
+向量不是第五类记忆，也不要求四套数据库：Working 不向量化，Episodic/Semantic 未来可选择混合检索，Procedural 先校验适用条件与审核。[向量实验 Spec](../superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 和 [独立计划](../superpowers/plans/2026-10-10-memory-vector-feasibility.md) 当前待实施，计划用可替换 SQLite Float32 派生索引验证真实落库、范围/模型版本隔离、重启与 BM25 降级；实验默认关闭，不接日常 Harness。实际 Embedding 包未提供时，只能报告机制测试，不能宣称语义质量或生产效果已验证。
 
 模拟案例标注 environment=simulation、eligibleForPromotion=false。不能把评测答案或模拟根因标签注入记忆供同一验收任务读取。LLM 只能提出 observation；人工 approved 且通过质量检查后才允许未来正式经验使用。
 

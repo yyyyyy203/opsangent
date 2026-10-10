@@ -22,7 +22,9 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
-记忆系统下一增量见 [受控诊断记忆一期 Spec](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md)。当前为待实施设计：默认关闭，以“案例保存 → 人工审核 → 同范围有界召回 → 恢复复核”为一期闭环；不启用向量模型、自动经验晋级或自动动作。
+记忆系统下一增量见 [受控诊断记忆一期 Spec R2](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md)。当前待实施：部署未配置保持旧行为；启用后前端可沉淀本次巡检，manual/automatic 保存策略与召回开关独立，候选人工审核后才可同范围有界召回。失败调查可归档但不可批准；四类记忆职责保留，完整 Semantic/Procedural 库仍未实现，不启用自动晋级或自动动作。
+
+向量存储可用性独立按 [向量实验 Spec](./superpowers/specs/2026-10-10-memory-vector-feasibility-design.md) 与 [向量实验计划](./superpowers/plans/2026-10-10-memory-vector-feasibility.md) 推进。计划验证 SQLite 向量落库、隔离、重启、降级和 BM25/向量/混合对照，默认关闭且不影响案例保存；无真实 Embedding 包不能宣称真实语义检索通过。该实验当前也未实施，不修改生产召回默认。
 
 下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
 
