@@ -27,3 +27,5 @@ export * from './log-evidence.js';
 export * from './log-redaction.js';
 export * from './source-subagent.js';
 export * from './tool.js';
+export * from './memory-vector.js';
+export * from './memory-vector-schema.js';
