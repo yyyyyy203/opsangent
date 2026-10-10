@@ -5,7 +5,8 @@ import type {
 
 // Match the existing bounded contract identifier convention; never trim scope identity.
 const identifier = z.string().min(1).max(256).refine((value) => value.trim().length > 0);
-const timestamp = z.string().datetime({ offset: true });
+const timestamp = z.string().max(64).datetime({ offset: true })
+  .refine((value) => Number.isFinite(Date.parse(value)), 'Memory timestamp must represent a finite instant');
 const sha256 = z.string().regex(/^[a-f0-9]{64}$/iu);
 const revision = z.number().int().positive().safe();
 const summary = z.string().min(1).refine((value) => Buffer.byteLength(value, 'utf8') <= 2 * 1024,

@@ -228,6 +228,29 @@ describe('strict diagnostic memory contracts', () => {
 });
 
 describe('diagnostic memory checkpoint boundary', () => {
+  it.each(['2026-10-10T00:00:00+99:99', '2026-10-10T00:00:00.' + '0'.repeat(131072) + 'Z'])(
+    'rejects invalid or unbounded timestamps throughout the persisted contract (case %#)', (invalid) => {
+      for (const field of ['capturedAt', 'validUntil'] as const) {
+        expect(() => parseDiagnosticMemoryCase(memoryCase({ [field]: invalid }))).toThrow();
+        expect(() => parseRunMemoryState(selectedState([hint({ [field]: invalid })]))).toThrow();
+      }
+      const reference = memoryCase().evidenceRefs[0];
+      if (reference === undefined) throw new Error('fixture evidence missing');
+      expect(() => parseDiagnosticMemoryCase(memoryCase({ evidenceRefs: [{ ...reference, capturedAt: invalid }] }))).toThrow();
+      expect(() => parseRunMemoryState(selectedState([hint({ evidenceRefs: [{ ...reference, capturedAt: invalid }] })]))).toThrow();
+      for (const field of ['selectedAt', 'validatedAt'] as const) {
+        const invalidState = { ...state(), selectionState: 'selected', [field]: invalid };
+        expect(() => parseRunMemoryState(invalidState)).toThrow();
+        expect(() => parseAgentContext(contextWithMemory({ memoryControl: control(), memory: invalidState }))).toThrow();
+      }
+    },
+  );
+  it('keeps valid timezone-bearing timestamps compatible with Z and real offsets', () => {
+    const offset = '2026-10-10T08:00:00+08:00';
+    expect(parseDiagnosticMemoryCase(memoryCase({ capturedAt: offset })).capturedAt).toBe(offset);
+    expect(parseRunMemoryState({ ...selectedState(), selectedAt: offset, validatedAt: memoryNow }).selectedAt).toBe(offset);
+    expect(parseAgentContext(contextWithMemory({ memory: { ...state(), selectedAt: offset } })).memory?.selectedAt).toBe(offset);
+  });
   it('preserves manual capture control when recall is disabled and no recall snapshot exists', () => {
     const parsed = parseAgentContext(contextWithMemory({ memoryControl: control() }));
     expect(parsed).toHaveProperty('memoryControl', control());
