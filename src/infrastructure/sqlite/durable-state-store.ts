@@ -1,6 +1,8 @@
 import type { Clock } from '../../contracts/common.js';
 import type { AgentContext } from '../../contracts/context.js';
+import type { MemoryCaptureIntent } from '../../contracts/diagnostic-memory.js';
 import { StoredDataCorruptionError, type PendingAgentEventV2 } from '../../contracts/event-store.js';
+import type { GovernanceEffect } from '../../contracts/hooks.js';
 import {
   CheckpointConflictError,
   type AgentStateUnitOfWork,
@@ -19,6 +21,7 @@ import {
 } from '../../storage/durable-codec.js';
 import type { SqliteDatabase } from './database.js';
 import { enqueueOutboxEvents } from './event-outbox-store.js';
+import { enqueueMemoryCapture, persistMemorySignals } from './memory-job-store.js';
 
 const CHECKPOINT_SCHEMA_VERSION = 3;
 
@@ -125,6 +128,8 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
     context: AgentContext;
     execution?: DurableExecutionTransition;
     outboxEvents: readonly PendingAgentEventV2[];
+    governanceEffects?: readonly GovernanceEffect[];
+    memoryCapture?: MemoryCaptureIntent;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => this.database.raw.transaction(() => {
       const transition = input.execution;
@@ -155,6 +160,8 @@ export class SqliteDurableStateStore implements VersionedCheckpointStore, ToolEx
         { events: input.outboxEvents, createdAt: this.clock.now().toISOString() },
         { expectedRunId: checkpoint.context.runId },
       );
+      if (input.governanceEffects !== undefined) persistMemorySignals(this.database, checkpoint.context, input.governanceEffects);
+      if (input.memoryCapture !== undefined) enqueueMemoryCapture(this.database, input.memoryCapture);
       return checkpoint;
     }).immediate());
   }

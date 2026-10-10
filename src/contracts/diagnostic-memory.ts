@@ -1,6 +1,8 @@
+import type { Clock } from './common.js';
 import type { AgentContext } from './context.js';
 import type { AgentMessage } from './message.js';
 import type { PendingAgentEventV2 } from './event-store.js';
+import type { AgentEventPayloadMap, AgentEventTypeV2 } from './event-v2/index.js';
 
 export interface MemoryScopeBase {
   profileId: string;
@@ -117,6 +119,7 @@ export interface MemoryOperation {
   signal?: AbortSignal;
   deadlineMs: number;
   availableMemoryTokens?: number;
+  clock?: Clock;
 }
 export interface MemorySearch {
   scope: MemoryScope;
@@ -207,7 +210,7 @@ export interface MemoryWriteUnitOfWork {
     now: string; events: readonly PendingAgentEventV2[] }): Promise<DiagnosticMemoryCase>;
   failCapture(input: { claim: MemoryJobClaim; now: string; code: MemoryErrorCode;
     events: readonly PendingAgentEventV2[] }): Promise<void>;
-  review(input: { command: MemoryReviewCommand;
+  review(input: { command: MemoryReviewCommand; now: string;
     events: readonly PendingAgentEventV2[] }): Promise<DiagnosticMemoryCase>;
 }
 export interface MemoryCaptureSource {
@@ -221,6 +224,11 @@ export interface MemoryCaptureSource {
     requiredEvidenceComplete: boolean;
     limitations: readonly string[];
   }>;
+}
+/** Adapter over the host's single V2 event factory; memory does not own an event source. */
+export interface MemoryEventFactory {
+  create<T extends AgentEventTypeV2>(type: T, runId: string,
+    payload: AgentEventPayloadMap[T]): PendingAgentEventV2<T>;
 }
 export interface MemoryMaintenance {
   prune(input: { now: string; limit: number }): Promise<{
@@ -236,6 +244,17 @@ export interface MemoryCaptureWorkerPort {
 export interface MemoryReviewPort {
   review(command: MemoryReviewCommand,
     operation: MemoryOperation): Promise<DiagnosticMemoryCase>;
+}
+export interface MemoryEvidenceValidator {
+  validate(input: { sourceRunId: string; refs: readonly HistoricalEvidenceRef[]; scope: MemoryScope },
+    operation: MemoryOperation): Promise<boolean>;
+}
+export interface MemoryReviewServiceOptions {
+  queries: MemoryQueryStore;
+  writes: MemoryWriteUnitOfWork;
+  evidence: MemoryEvidenceValidator;
+  events: MemoryEventFactory;
+  dispatch: () => Promise<void>;
 }
 export interface MemoryReadServicePort {
   capabilities(profileId: string): MemoryCapabilities;

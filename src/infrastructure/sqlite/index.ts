@@ -8,3 +8,8 @@ export * from './persistence-bundle.js';
 export * from './sqlite-evidence-store.js';
 export * from './blob-manifest-store.js';
 export * from './inspection-query-service.js';
+export { MemoryVectorDatabase } from './memory-vector-database.js';
+export { SqliteVectorIndex } from './memory-vector-index.js';
+export { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
+export { SqliteMemoryCaptureSource } from './memory-capture-source.js';
+export { enqueueMemoryCapture, persistMemorySignals } from './memory-job-store.js';

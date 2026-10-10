@@ -1,7 +1,9 @@
 import { systemClock, type Clock } from '../contracts/common.js';
 import type { AgentContext } from '../contracts/context.js';
+import type { MemoryCaptureIntent } from '../contracts/diagnostic-memory.js';
 import { EventIdConflictError, type PendingAgentEventV2 } from '../contracts/event-store.js';
 import { parseAgentEventV2 } from '../contracts/event-v2/schema.js';
+import type { GovernanceEffect } from '../contracts/hooks.js';
 import {
   CheckpointConflictError,
   type AgentStateUnitOfWork,
@@ -21,6 +23,10 @@ import {
 } from '../contracts/storage.js';
 import type { ToolExecutionResult } from '../contracts/tool.js';
 import { checkpointChecksum, parseAgentContext } from './durable-codec.js';
+import type { InMemoryDiagnosticTransaction } from '../memory/diagnostic-memory-state.js';
+import { cloneInMemoryDiagnosticRecords, createInMemoryDiagnosticRecords, createInMemoryDiagnosticRepository,
+  stageAutomaticMemoryCapture, stageMemorySignals } from '../memory/diagnostic-memory-state.js';
+import { InMemoryDiagnosticMemoryStore } from '../memory/in-memory-diagnostic-memory.js';
 
 const DEFAULT_EVIDENCE_PAGE_SIZE = 50;
 const MAX_EVIDENCE_PAGE_SIZE = 100;
@@ -33,6 +39,7 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   private readonly checkpointRecords = new Map<string, StoredRunCheckpoint>();
   private readonly executionRecords = new Map<string, ToolExecutionRecord>();
   private readonly outboxRecords = new Map<string, DurableOutboxRecord>();
+  private readonly diagnosticState: InMemoryDiagnosticTransaction;
 
   public readonly checkpoints: VersionedCheckpointStore = this;
   public readonly executions: ToolExecutionJournal = this;
@@ -41,8 +48,13 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
   public readonly outbox: DurableEventOutbox = this;
 
   public readonly evidence = new InMemoryEvidenceRepository();
+  public readonly memory: InMemoryDiagnosticMemoryStore;
 
-  public constructor(private readonly clock: Clock = systemClock) {}
+  public constructor(private readonly clock: Clock = systemClock) {
+    this.diagnosticState = { checkpointRecords: this.checkpointRecords, executionRecords: this.executionRecords,
+      outboxRecords: this.outboxRecords, memory: createInMemoryDiagnosticRecords() };
+    this.memory = new InMemoryDiagnosticMemoryStore({ clock, transaction: this.diagnosticState });
+  }
 
   public load(runId: string): Promise<StoredRunCheckpoint | null> {
     const checkpoint = this.checkpointRecords.get(runId);
@@ -109,6 +121,8 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
     context: AgentContext;
     execution?: DurableExecutionTransition;
     outboxEvents: readonly PendingAgentEventV2[];
+    governanceEffects?: readonly GovernanceEffect[];
+    memoryCapture?: MemoryCaptureIntent;
   }): Promise<StoredRunCheckpoint> {
     return Promise.resolve().then(() => {
       const transition = input.execution;
@@ -136,10 +150,22 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
         nextExecution = completedExecution(existing, transition.result, this.clock);
       }
       const outbox = this.planOutbox(input.outboxEvents, this.clock.now().toISOString(), nextContext.runId);
-
-      if (nextExecution !== undefined) this.executionRecords.set(nextExecution.toolCallId, clone(nextExecution));
-      this.checkpointRecords.set(nextContext.runId, clone(checkpoint));
-      for (const record of outbox) this.outboxRecords.set(record.event.eventId, clone(record));
+      const working: InMemoryDiagnosticTransaction = {
+        checkpointRecords: cloneMap(this.checkpointRecords),
+        executionRecords: cloneMap(this.executionRecords),
+        outboxRecords: cloneMap(this.outboxRecords),
+        memory: cloneInMemoryDiagnosticRecords(this.diagnosticState.memory),
+      };
+      working.checkpointRecords.set(nextContext.runId, clone(checkpoint));
+      if (nextExecution !== undefined) working.executionRecords.set(nextExecution.toolCallId, clone(nextExecution));
+      for (const record of outbox) working.outboxRecords.set(record.event.eventId, clone(record));
+      const repository = createInMemoryDiagnosticRepository(working);
+      if (input.governanceEffects !== undefined) stageMemorySignals(repository, nextContext, input.governanceEffects);
+      if (input.memoryCapture !== undefined) stageAutomaticMemoryCapture(repository, input.memoryCapture);
+      replaceMap(this.checkpointRecords, working.checkpointRecords);
+      replaceMap(this.executionRecords, working.executionRecords);
+      replaceMap(this.outboxRecords, working.outboxRecords);
+      replaceMemoryRecords(this.diagnosticState.memory, working.memory);
       return clone(checkpoint);
     });
   }
@@ -227,6 +253,25 @@ export class InMemoryDurableState implements DurableRunState, VersionedCheckpoin
       return { event: normalized, enqueuedAt: createdAt };
     });
   }
+}
+
+function cloneMap<K, V>(source: Map<K, V>): Map<K, V> {
+  return new Map([...source].map(([key, value]) => [key, clone(value)]));
+}
+
+function replaceMap<K, V>(target: Map<K, V>, source: Map<K, V>): void {
+  target.clear();
+  for (const [key, value] of source) target.set(key, clone(value));
+}
+
+function replaceMemoryRecords(target: ReturnType<typeof createInMemoryDiagnosticRecords>,
+  source: ReturnType<typeof createInMemoryDiagnosticRecords>): void {
+  replaceMap(target.cases, source.cases);
+  replaceMap(target.indexes, source.indexes);
+  replaceMap(target.jobs, source.jobs);
+  replaceMap(target.captureCommands, source.captureCommands);
+  replaceMap(target.reviews, source.reviews);
+  replaceMap(target.signals, source.signals);
 }
 
 /** In-memory Evidence repository with the same duplicate and pagination behavior as SQLite. */

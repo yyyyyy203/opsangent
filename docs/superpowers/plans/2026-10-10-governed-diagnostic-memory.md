@@ -254,7 +254,7 @@ checkpoints/captureService/计数器由本测试注入 fixture 建立；同一�
 - Produces: `MemoryEvidenceValidator.validate(input: { sourceRunId: string; refs: readonly HistoricalEvidenceRef[]; scope: MemoryScope }, operation: MemoryOperation): Promise<boolean>`。
 - Produces: `MemoryReviewService` constructor `{ queries: MemoryQueryStore; writes: MemoryWriteUnitOfWork; evidence: MemoryEvidenceValidator; events: MemoryEventFactory; dispatch: () => Promise<void> }`；`review(command: MemoryReviewCommand, operation: MemoryOperation): Promise<DiagnosticMemoryCase>`。
 
-- [ ] Step 1：以下红测试配合可控的 evidence validator fake；再覆盖 supported false、insufficient、过期、无证据、错误 scope、observation→approved、approved→rejected、rejected 再批准、CAS 冲突和相同 requestId 返回原结果。
+- [x] Step 1：先以红测试确认 review service 缺失，再配合可控的 evidence validator fake 覆盖 supported false、insufficient、过期、无证据、错误 scope、observation→approved、approved→rejected、rejected 再批准、CAS 冲突和相同 requestId 返回原结果；另覆盖 validator 抛错、取消来源和撤销后原请求重放。
 
 ```ts
 await expect(reviewService.review({
@@ -267,8 +267,8 @@ await expect(reviewService.review({
 
 setup 以 T2 Job/completeCapture 插入 observation；validator fake 明确返回 false，service 用已声明 constructor 注入。不能靠直接修改 SQL status 跳过本任务的主路径测试。
 
-- [ ] Step 2：运行 `pnpm exec vitest run test/memory-review-service.test.ts --maxWorkers=2` 看红。
-- [ ] Step 3：先验证完整 scope、revision、状态、有效期与质量，再读取证据；生产 approved=true eligibility 的判断最小规则：
+- [x] Step 2：运行 review service 红测；以 Node 24 下直接调用 Vitest 的方式执行，验证缺少实现时测试失败。
+- [x] Step 3：先验证完整 scope、revision、状态、有效期与质量，再读取证据；生产 approved=true eligibility 的判断最小规则：
 
 ```ts
 const eligibleForPromotion = command.decision === 'approved'
@@ -280,7 +280,10 @@ const eligibleForPromotion = command.decision === 'approved'
 
 failed/cancelled observation 的批准固定 MEMORY_APPROVAL_DENIED，不能靠 supported=true 或客户端 quality 改写绕过。approved 案例不自动变为 Semantic/Procedural。
 
-- [ ] Step 4：同事务写 EXPERIENCE_REVIEWED / MEMORY_UPDATE_COMPLETED；故障注入确认无半审核、不漏 actor/prompt。验证撤销移除 FTS、重开仍 rejected、模拟 approved promotion=false。运行 T4/T2 测试并提交：`feat(memory): add evidence-gated review and revocation`。
+- [x] Step 4：同事务写 EXPERIENCE_REVIEWED / MEMORY_UPDATE_COMPLETED；通过事件 ID 冲突注入验证 case/review/outbox 整体回滚，审核事件只包含候选 ID、决策和 reviewer。验证撤销移除 FTS、SQLite 重开后仍为 rejected、模拟 approved promotion=false。T4/T2 定向测试及全仓回归通过。
+- [ ] Commit：`feat(memory): add evidence-gated review and revocation`（尚未提交；工作树含其他已有未提交改动，需单独界定提交范围）。
+
+验证备注：本次 `tsc -p tsconfig.build.json --noEmit`、T4 新增测试严格定向类型检查、记忆相关源文件 ESLint 及全仓 Vitest 均通过。全仓 `tsc --noEmit` 与全仓 ESLint 仍失败于现有测试/Playwright/Vitest 类型解析诊断；未通过修改全仓配置掩盖。
 
 ## Task 5：中文检索、有界召回与冻结选择
 

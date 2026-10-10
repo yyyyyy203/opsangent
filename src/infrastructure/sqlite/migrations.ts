@@ -149,11 +149,87 @@ const MIGRATIONS = [
     'CREATE INDEX evidence_blob_manifests_run_time ON evidence_blob_manifests(run_id, range_start, range_end);',
     'CREATE INDEX evidence_blob_manifests_state_updated ON evidence_blob_manifests(state, updated_at);',
   ].join('\n'),
+  `
+    CREATE TABLE diagnostic_memory_cases (
+      id TEXT PRIMARY KEY,
+      scope_key TEXT NOT NULL,
+      profile_id TEXT NOT NULL, profile_revision TEXT NOT NULL,
+      service_id TEXT NOT NULL, fault_type TEXT NOT NULL, target_fingerprint TEXT NOT NULL,
+      environment TEXT NOT NULL, data_class TEXT NOT NULL, dataset_id TEXT,
+      source_run_id TEXT NOT NULL, extractor_version TEXT NOT NULL,
+      source_run_status TEXT NOT NULL CHECK (source_run_status IN ('completed', 'failed', 'cancelled')),
+      captured_at TEXT NOT NULL, valid_until TEXT NOT NULL,
+      revision INTEGER NOT NULL CHECK (revision > 0),
+      status TEXT NOT NULL CHECK (status IN ('observation', 'approved', 'rejected')),
+      quality TEXT NOT NULL CHECK (quality IN ('sufficient', 'insufficient', 'failed')),
+      case_json TEXT NOT NULL CHECK (length(CAST(case_json AS BLOB)) <= 16384),
+      case_checksum TEXT NOT NULL,
+      index_version TEXT NOT NULL,
+      UNIQUE(source_run_id, extractor_version)
+    );
+    CREATE INDEX diagnostic_memory_cases_scope_status
+      ON diagnostic_memory_cases(scope_key, status, id);
+    CREATE INDEX diagnostic_memory_cases_expiry ON diagnostic_memory_cases(status, valid_until, id);
+    CREATE VIRTUAL TABLE diagnostic_memory_case_fts USING fts5(tokens, memory_id UNINDEXED, tokenize='unicode61');
+    CREATE TABLE diagnostic_memory_reviews (
+      request_id TEXT PRIMARY KEY,
+      memory_id TEXT NOT NULL REFERENCES diagnostic_memory_cases(id) ON DELETE RESTRICT,
+      scope_key TEXT NOT NULL, actor_id TEXT NOT NULL,
+      decision TEXT NOT NULL CHECK (decision IN ('approved', 'rejected')),
+      claim_check TEXT NOT NULL CHECK (claim_check IN ('supported', 'unsupported')),
+      expected_revision INTEGER NOT NULL CHECK (expected_revision > 0),
+      command_digest TEXT NOT NULL,
+      command_json TEXT NOT NULL CHECK (length(CAST(command_json AS BLOB)) <= 16384),
+      command_checksum TEXT NOT NULL,
+      original_result_json TEXT NOT NULL CHECK (length(CAST(original_result_json AS BLOB)) <= 16384),
+      result_checksum TEXT NOT NULL, result_revision INTEGER NOT NULL,
+      reviewed_at TEXT NOT NULL
+    );
+    CREATE INDEX diagnostic_memory_reviews_case ON diagnostic_memory_reviews(memory_id, result_revision);
+    CREATE TABLE diagnostic_memory_capture_jobs (
+      candidate_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL,
+      extractor_version TEXT NOT NULL, scope_key TEXT NOT NULL,
+      source_checkpoint_revision INTEGER NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'completed', 'failed', 'skipped')),
+      attempt INTEGER NOT NULL CHECK (attempt BETWEEN 0 AND 2), owner_id TEXT, lease_until TEXT,
+      request_json TEXT NOT NULL CHECK (length(CAST(request_json AS BLOB)) <= 16384),
+      request_checksum TEXT NOT NULL,
+      terminal_failure_event_json TEXT NOT NULL CHECK (length(CAST(terminal_failure_event_json AS BLOB)) <= 16384),
+      failure_event_checksum TEXT NOT NULL,
+      memory_id TEXT, reason_code TEXT,
+      index_version TEXT NOT NULL,
+      UNIQUE(source_run_id, extractor_version)
+    );
+    CREATE INDEX diagnostic_memory_jobs_queue ON diagnostic_memory_capture_jobs(state, lease_until, candidate_id);
+    CREATE TABLE diagnostic_memory_capture_commands (
+      request_id TEXT PRIMARY KEY, source_run_id TEXT NOT NULL, scope_key TEXT NOT NULL,
+      actor_id TEXT NOT NULL, expected_checkpoint_revision INTEGER NOT NULL,
+      command_digest TEXT NOT NULL,
+      command_json TEXT NOT NULL CHECK (length(CAST(command_json AS BLOB)) <= 16384),
+      command_checksum TEXT NOT NULL,
+      original_ticket_json TEXT NOT NULL CHECK (length(CAST(original_ticket_json AS BLOB)) <= 16384),
+      ticket_checksum TEXT NOT NULL
+    );
+    CREATE TABLE diagnostic_memory_signals (
+      signal_key TEXT PRIMARY KEY, run_id TEXT NOT NULL, tool_call_id TEXT NOT NULL,
+      phase TEXT NOT NULL, observed_at TEXT NOT NULL,
+      signal_json TEXT NOT NULL CHECK (length(CAST(signal_json AS BLOB)) <= 16384),
+      signal_checksum TEXT NOT NULL, index_version TEXT NOT NULL
+    );
+    CREATE INDEX diagnostic_memory_signals_run ON diagnostic_memory_signals(run_id, observed_at, signal_key);
+    CREATE INDEX diagnostic_memory_signals_expiry ON diagnostic_memory_signals(observed_at, signal_key);
+  `,
 ] as const;
 
 export function migrateSqlite(database: Database.Database): void {
   const current = database.pragma('user_version', { simple: true }) as number;
   if (current > MIGRATIONS.length) throw new Error(`SQLite schema version ${current} is newer than supported ${MIGRATIONS.length}`);
+  // Preflight before *any* version upgrade. A failed capability check never
+  // creates memory tables or advances the original database's user_version.
+  if (current < 5) {
+    database.exec("CREATE VIRTUAL TABLE temp.diagnostic_memory_fts5_probe USING fts5(tokens, tokenize='unicode61')");
+    database.exec('DROP TABLE temp.diagnostic_memory_fts5_probe');
+  }
   for (let version = current + 1; version <= MIGRATIONS.length; version += 1) {
     const sql = MIGRATIONS[version - 1];
     if (sql === undefined) throw new Error(`Missing SQLite migration ${version}`);

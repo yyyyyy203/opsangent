@@ -50,6 +50,13 @@ describe('local file embedding provider', () => {
     await expect(loaded.embed(Array.from({ length: 17 }, () => '结算失败'), operation())).rejects.toMatchObject({ code: 'VECTOR_INPUT_INVALID' });
     await expect(loaded.embed(['汉'.repeat(683)], operation())).rejects.toMatchObject({ code: 'VECTOR_INPUT_INVALID' });
   });
+  it('rejects wholly and partly sparse embedding batches', async () => {
+    const loaded = await provider();
+    const partial = new Array<string>(2); partial[0] = '结算失败';
+    for (const texts of [new Array<string>(1), partial]) {
+      await expect(loaded.embed(texts, operation())).rejects.toMatchObject({ code: 'VECTOR_INPUT_INVALID' });
+    }
+  });
   it('propagates Abort and checks the injected deadline', async () => {
     const loaded = await provider(); const controller = new AbortController(); controller.abort();
     await expect(loaded.embed(['结算失败'], { ...operation(), signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' });

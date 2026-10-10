@@ -63,9 +63,13 @@ export class FileEmbeddingProvider implements EmbeddingProvider {
   public embed(texts: readonly string[], operation: MemoryOperation): Promise<readonly Float32Array[]> {
     return Promise.resolve().then(() => {
       this.checkBudget(operation);
-      if (!Array.isArray(texts) || texts.length > 16) throw new VectorExperimentError('VECTOR_INPUT_INVALID');
-      const results = texts.map((text) => {
+      const candidateTexts: unknown = texts;
+      if (!isUnknownArray(candidateTexts) || candidateTexts.length > 16) throw new VectorExperimentError('VECTOR_INPUT_INVALID');
+      const results: Float32Array[] = [];
+      for (let index = 0; index < candidateTexts.length; index += 1) {
         this.checkBudget(operation);
+        const text: unknown = candidateTexts[index];
+        if (!Object.hasOwn(candidateTexts, index)) throw new VectorExperimentError('VECTOR_INPUT_INVALID');
         if (typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 2 * 1024) {
           throw new VectorExperimentError('VECTOR_INPUT_INVALID');
         }
@@ -75,8 +79,8 @@ export class FileEmbeddingProvider implements EmbeddingProvider {
         }
         const vector = this.vectors.get(memoryEmbeddingTextDigest(normalized));
         if (vector === undefined) throw new VectorExperimentError('VECTOR_EMBEDDING_MISSING');
-        return vector.slice();
-      });
+        results.push(vector.slice());
+      }
       this.checkBudget(operation);
       return results;
     });
@@ -87,4 +91,8 @@ export class FileEmbeddingProvider implements EmbeddingProvider {
     if (!Number.isFinite(operation.deadlineMs)) throw new VectorExperimentError('VECTOR_INPUT_INVALID');
     if (this.clock.now().getTime() >= operation.deadlineMs) throw new DOMException('Embedding deadline exceeded.', 'TimeoutError');
   }
+}
+
+function isUnknownArray(value: unknown): value is readonly unknown[] {
+  return Array.isArray(value);
 }

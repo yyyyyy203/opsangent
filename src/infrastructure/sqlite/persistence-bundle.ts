@@ -1,5 +1,6 @@
 import { systemClock, type Clock, type IdGenerator } from '../../contracts/common.js';
 import type { EventStore, MessageStore } from '../../contracts/event-store.js';
+import type { MemoryCaptureSource, MemoryMaintenance, MemoryQueryStore, MemoryWriteUnitOfWork } from '../../contracts/diagnostic-memory.js';
 import type {
   AgentStateUnitOfWork,
   DurableEventOutbox,
@@ -25,6 +26,8 @@ import { SqliteEvidenceManifestStore } from './blob-manifest-store.js';
 import { LocalEvidenceBlobStore } from '../blob/local-evidence-blob-store.js';
 import { SqliteInspectionQueryService } from './inspection-query-service.js';
 import { SqliteWebMessageQuery } from './web-message-query.js';
+import { SqliteDiagnosticMemoryStore } from './diagnostic-memory-store.js';
+import { SqliteMemoryCaptureSource } from './memory-capture-source.js';
 
 export interface SqlitePersistenceLimits {
   maxEvidenceRawBytes?: number;
@@ -40,6 +43,8 @@ export interface CreateSqlitePersistenceOptions {
 
 /** Single ownership boundary for all SQLite-backed Agent state. */
 export interface SqlitePersistenceBundle {
+  memory: { queries: MemoryQueryStore; writes: MemoryWriteUnitOfWork;
+    maintenance: MemoryMaintenance; captureSource: MemoryCaptureSource };
   checkpoints: VersionedCheckpointStore;
   executions: ToolExecutionJournal;
   stateUnitOfWork: AgentStateUnitOfWork;
@@ -67,6 +72,14 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       ...(options.limits?.maxEvidenceRawBytes === undefined ? {} : { maxRawBytes: options.limits.maxEvidenceRawBytes }),
     });
     const evidenceManifests = new SqliteEvidenceManifestStore(database);
+    const inspectionQueries = new SqliteInspectionQueryService(database, durable, evidenceManifests, eventMessages);
+    const diagnosticMemory = new SqliteDiagnosticMemoryStore(database, { clock });
+    const memory: SqlitePersistenceBundle['memory'] = {
+      queries: diagnosticMemory,
+      writes: diagnosticMemory,
+      maintenance: diagnosticMemory,
+      captureSource: new SqliteMemoryCaptureSource({ database, queries: inspectionQueries }),
+    };
     const evidenceBlobs = options.evidenceBlobRootPath === undefined
       ? undefined
       : new LocalEvidenceBlobStore({
@@ -85,8 +98,9 @@ export function createSqlitePersistence(options: CreateSqlitePersistenceOptions)
       evidenceManifests,
       ...(evidenceBlobs === undefined ? {} : { evidenceBlobs }),
       eventMessages,
+      memory,
       webMessages: (cursorCodec) => new SqliteWebMessageQuery(database, cursorCodec),
-      queries: new SqliteInspectionQueryService(database, durable, evidenceManifests, eventMessages),
+      queries: inspectionQueries,
       projectionCheckpoints: new SqliteProjectionCheckpointStore(database),
       projectionFailures: new SqliteProjectionFailureSink(database, () => clock.now().toISOString()),
       close: () => {

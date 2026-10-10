@@ -2,6 +2,7 @@ import type { AgentContext } from './context.js';
 import type { JsonValue } from './common.js';
 import type { GovernanceEffect } from './hooks.js';
 import type { PendingAgentEventV2 } from './event-store.js';
+import type { MemoryCaptureIntent } from './diagnostic-memory.js';
 import type { ToolCall, ToolExecutionResult, ToolKind } from './tool.js';
 
 export interface CheckpointStore {
@@ -84,6 +85,8 @@ export interface DurableTransitionUnitOfWork {
     outboxEvents: readonly PendingAgentEventV2[];
     /** Observer effects are committed with the same transition when supported. */
     governanceEffects?: readonly GovernanceEffect[];
+    /** Optional bounded sidecar, staged atomically with the terminal checkpoint. */
+    memoryCapture?: MemoryCaptureIntent;
   }): Promise<StoredRunCheckpoint>;
 }
 

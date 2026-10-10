@@ -2,7 +2,7 @@ import type { DiagnosticMemoryCase, MemoryScope } from '../../src/contracts/diag
 
 export const memoryNow = '2026-10-10T00:00:00.000Z';
 
-export function simulationMemoryScope(): MemoryScope {
+export function simulationMemoryScope(): Extract<MemoryScope, { dataClass: 'simulated' }> {
   return {
     profileId: 'simulation', profileRevision: 'sim-v1', serviceId: 'settlement',
     faultType: 'settlement_failure', targetFingerprint: 'a'.repeat(64),
