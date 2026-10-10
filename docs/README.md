@@ -22,6 +22,8 @@
 
 完整 V1 设计基线见 [巡检诊断 Agent V1 设计规格](./superpowers/specs/2026-09-06-inspection-agent-v1-design.md)。
 
+记忆系统下一增量见 [受控诊断记忆一期 Spec](./superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [逐文件实施计划](./superpowers/plans/2026-10-10-governed-diagnostic-memory.md)。当前为待实施设计：默认关闭，以“案例保存 → 人工审核 → 同范围有界召回 → 恢复复核”为一期闭环；不启用向量模型、自动经验晋级或自动动作。
+
 下一持久化增量的已确认方案见 [Durable Run State & Evidence V1 设计](./superpowers/specs/2026-09-10-durable-run-state-evidence-design.md)。该文档目前是设计决策，不代表代码已经实现。
 
 后续 ELK 日志达到几十 MiB 时的已确认扩展方案见 [ELK 大体量证据流式摄取与 BlobStore 设计](./superpowers/specs/2026-09-10-elk-large-evidence-blob-storage-design.md)。该方案规定 SQLite Manifest、流式分页、BlobStore、预算截断、恢复和 LangSmith 脱敏边界，当前尚未实施。

@@ -22,6 +22,8 @@ ContextRenderer 组装稳定系统指令、工具快照、历史消息及尾部�
 
 ## 记忆
 
+2026-10-10 的具体增量设计见 [受控诊断记忆一期 Spec](../superpowers/specs/2026-10-10-governed-diagnostic-memory-design.md) 与 [实施计划](../superpowers/plans/2026-10-10-governed-diagnostic-memory.md)，两者当前待实施。下表是目标职责，不代表现有内存 Memory 原型已经具备持久化、审核或召回闭环。新方案保留旧 MemoryFacade，新增强制范围的小接口；实际接入以该 Spec 的兼容、事务和安全约束为准。
+
 | 类型 | 内容 | V1 |
 |---|---|---|
 | Working | 当前 Run 结构化状态 | Checkpoint 支持 |
